@@ -738,6 +738,25 @@ sub2api/
 
 Copyright (c) 2026 Wesley Liddick
 
+### ⚠️ サードパーティコンポーネントとライセンスの例外
+
+**上記の LGPL-3.0 ライセンスは、本リポジトリ内のすべてのファイルには適用されません。**
+
+一部のプラットフォーム統合モジュールはサードパーティプロジェクトからの移植であり、
+それぞれの元のライセンスが引き続き適用されます：
+
+| モジュール | 由来 | ライセンス |
+| --- | --- | --- |
+| `backend/internal/pkg/trae/`、`backend/internal/service/trae_*`、`backend/internal/handler/admin/trae_oauth_handler.go`、`frontend/src/components/account/forms/TraeForm.vue` | [NextAgentX/trae-workbuddy-switch](https://github.com/NextAgentX/trae-workbuddy-switch) | **PolyForm Noncommercial 1.0.0** |
+| `backend/internal/pkg/workbuddy/`、`backend/internal/service/openai_gateway_workbuddy.go` | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | MIT |
+| `backend/internal/pkg/qoder/`、`backend/internal/service/openai_gateway_qoder.go`、`backend/internal/service/qoder_ops_service.go` | [shuishuipingan/qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub) | MIT |
+
+**特に、trae-workbuddy-switch に由来するコードは PolyForm Noncommercial 1.0.0 の下で
+ライセンスされており、非商業的目的にのみ使用が許可されています。商業利用はできません。**
+
+完全なライセンス全文、影響を受けるファイルの一覧、および原著作者の `Required Notice` は
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) を参照してください。
+
 ---
 
 <div align="center">

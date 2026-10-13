@@ -926,6 +926,27 @@ This project is licensed under the [GNU Lesser General Public License v3.0](LICE
 
 Copyright (c) 2026 Wesley Liddick
 
+### ⚠️ Third-Party Components / License Exceptions
+
+**The LGPL-3.0 license above does NOT apply to all files in this repository.**
+
+Certain platform-integration modules are ports of third-party projects and remain under
+their own original licenses:
+
+| Module | Origin | License |
+| --- | --- | --- |
+| `backend/internal/pkg/trae/`, `backend/internal/service/trae_*`, `backend/internal/handler/admin/trae_oauth_handler.go`, `frontend/src/components/account/forms/TraeForm.vue` | [NextAgentX/trae-workbuddy-switch](https://github.com/NextAgentX/trae-workbuddy-switch) | **PolyForm Noncommercial 1.0.0** |
+| `backend/internal/pkg/workbuddy/`, `backend/internal/service/openai_gateway_workbuddy.go` | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | MIT |
+| `backend/internal/pkg/qoder/`, `backend/internal/service/openai_gateway_qoder.go`, `backend/internal/service/qoder_ops_service.go` | [shuishuipingan/qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub) | MIT |
+
+**In particular, the trae-workbuddy-switch derived code is licensed under PolyForm
+Noncommercial 1.0.0, which permits noncommercial use only. Commercial use of those files
+is not permitted.**
+
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full license texts and the
+complete list of affected files, including the `Required Notice` reproduced from the
+original licensor.
+
 ---
 
 <div align="center">

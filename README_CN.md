@@ -842,6 +842,24 @@ sub2api/
 
 Copyright (c) 2026 Wesley Liddick
 
+### ⚠️ 第三方组件与许可例外
+
+**上述 LGPL-3.0 授权并不覆盖本仓库的全部文件。**
+
+部分平台集成模块移植自第三方项目，仍适用其各自的原始许可：
+
+| 模块 | 来源 | 许可 |
+| --- | --- | --- |
+| `backend/internal/pkg/trae/`、`backend/internal/service/trae_*`、`backend/internal/handler/admin/trae_oauth_handler.go`、`frontend/src/components/account/forms/TraeForm.vue` | [NextAgentX/trae-workbuddy-switch](https://github.com/NextAgentX/trae-workbuddy-switch) | **PolyForm Noncommercial 1.0.0** |
+| `backend/internal/pkg/workbuddy/`、`backend/internal/service/openai_gateway_workbuddy.go` | [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) | MIT |
+| `backend/internal/pkg/qoder/`、`backend/internal/service/openai_gateway_qoder.go`、`backend/internal/service/qoder_ops_service.go` | [shuishuipingan/qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub) | MIT |
+
+**特别提示：源自 trae-workbuddy-switch 的代码适用 PolyForm Noncommercial 1.0.0，
+仅允许非商业用途，不得用于商业目的。**
+
+完整许可全文、受影响文件清单及原许可方的 `Required Notice` 见
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
 ---
 
 <div align="center">
