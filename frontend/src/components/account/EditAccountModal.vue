@@ -4563,11 +4563,14 @@ const syncFormFromAccount = (newAccount: Account | null) => {
             : 'https://api.anthropic.com'
     editBaseUrl.value = platformDefaultUrl
 
-    // Load model mappings for OpenAI/Grok OAuth accounts（二开三平台同规则）
+    // Load model mappings for OpenAI/Grok OAuth accounts（二开三平台同规则）。
+    // antigravity 已在平台专属块完成加载（含 model_whitelist 旧数据兼容），
+    // 此处必须跳过清空分支，否则会覆盖刚载入的白名单/映射，表现为
+    // “保存后重新打开编辑，模型列表为空”。
     if ((newAccount.platform === 'openai' || newAccount.platform === 'grok' || isSourceIntegratedPlatform(newAccount.platform)) && newAccount.credentials) {
       const oauthCredentials = newAccount.credentials as Record<string, unknown>
       loadModelRestrictionFromMapping(oauthCredentials.model_mapping as Record<string, unknown> | undefined)
-    } else {
+    } else if (newAccount.platform !== 'antigravity') {
       modelRestrictionMode.value = 'whitelist'
       modelMappings.value = []
       allowedModels.value = []

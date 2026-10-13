@@ -1773,6 +1773,34 @@ describe('EditAccountModal', () => {
       'antigravity_project_id'
     )
   })
+
+  it('loads Antigravity stored model mapping and preserves it on save (round-trip)', async () => {
+    // 回归：通用 OAuth 分支曾把已载入的白名单清空——保存后重新打开编辑时
+    // 模型列表为空，且下一次保存会把 model_mapping 一并抹掉。
+    const account = buildAntigravityAccount('configured-project')
+    account.credentials.model_mapping = {
+      'gemini-2.5-flash': 'gemini-2.5-flash',
+      'claude-sonnet-4-6': 'claude-sonnet-4-6'
+    }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    await wrapper.vm.$nextTick()
+
+    const selector = wrapper.get('[data-testid="model-whitelist-value"]')
+    expect(selector.text().split(',').sort()).toEqual(['claude-sonnet-4-6', 'gemini-2.5-flash'])
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gemini-2.5-flash': 'gemini-2.5-flash',
+      'claude-sonnet-4-6': 'claude-sonnet-4-6'
+    })
+  })
 })
 
 describe('EditAccountModal OpenAI 自动使用重置卡', () => {
