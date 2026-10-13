@@ -1,0 +1,505 @@
+package service
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
+	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
+)
+
+// 本文件收敛三个 CC（Chat Completions）forwarder 之间重复的 HTTP 管线与 SSE
+// 循环骨架（PR #3802 遗留项）：
+//
+//   - forwardAsRawChatCompletions          （原生 CC 直转）
+//   - forwardResponsesViaRawChatCompletions（/v1/responses → CC 回退）
+//   - forwardAnthropicViaRawChatCompletions（/v1/messages → CC 回退）
+//
+// 以及 messages / chat_completions 两条 Responses 主路径中逐字相同的错误处理块。
+// 所有 helper 都是对既有内联代码的等价提取，不改变任何行为；各路径的差异
+// （GLM effort 归一化、fast policy、Grok 分支、ClientDisconnect 语义等）仍留在
+// 调用方，属于有意保留的行为差异，不在此强行统一。
+
+// newUpstreamSSEScanner 构造读取上游 SSE 流的行扫描器，按配置放大单行上限。
+func (s *OpenAIGatewayService) newUpstreamSSEScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	maxLineSize := defaultMaxLineSize
+	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
+		maxLineSize = s.cfg.Gateway.MaxLineSize
+	}
+	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	return scanner
+}
+
+// newStreamHeaderWriter 返回幂等的 SSE 响应头写入闭包：首次调用时透传过滤后的
+// 上游响应头并写入标准 SSE 头 + 200 状态码，后续调用为 no-op。延迟到首个事件
+// 写出前才提交响应头，使上游早期失败仍可改走 failover 或非流式错误响应。
+func (s *OpenAIGatewayService) newStreamHeaderWriter(c *gin.Context, upstream http.Header) func() {
+	headersWritten := false
+	return func() {
+		if headersWritten {
+			return
+		}
+		headersWritten = true
+		if s.responseHeaderFilter != nil {
+			responseheaders.WriteFilteredHeaders(c.Writer.Header(), upstream, s.responseHeaderFilter)
+		}
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.WriteHeader(http.StatusOK)
+	}
+}
+
+// readOpenAIUpstreamError 读取上游错误体并把 resp.Body 回卷为可重读的副本
+// （下游 handleXxxErrorResponse 需要再次读取），返回原始错误体与脱敏后的
+// 上游错误消息。
+func (s *OpenAIGatewayService) readOpenAIUpstreamError(resp *http.Response) ([]byte, string) {
+	respBody := s.readUpstreamErrorBody(resp)
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+
+	upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
+	upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
+	return respBody, upstreamMsg
+}
+
+// failoverOpenAIUpstreamHTTPError 对 >=400 的上游响应做 failover 判定：命中时
+// 记录 ops 事件、执行账号级错误处置并返回 *UpstreamFailoverError；未命中返回
+// nil，调用方继续走各自端点格式的非 failover 错误处理链。
+func (s *OpenAIGatewayService) failoverOpenAIUpstreamHTTPError(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	resp *http.Response,
+	respBody []byte,
+	upstreamMsg string,
+	upstreamModel string,
+) *UpstreamFailoverError {
+	shouldFailover := s.shouldFailoverOpenAIUpstreamResponse(account, resp.StatusCode, upstreamMsg, respBody)
+	tempUnscheduled := false
+	if c != nil && account != nil && account.Platform != PlatformGrok && !shouldFailover && !IsResponseCommitted(c) && s.rateLimitService != nil {
+		tempUnscheduled = s.rateLimitService.CheckErrorPolicy(ctx, account, resp.StatusCode, respBody, upstreamModel) == ErrorPolicyTempUnscheduled
+		shouldFailover = tempUnscheduled
+	}
+	if account != nil && account.Platform == PlatformGrok {
+		shouldFailover = s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody)
+	}
+	if account != nil && account.Platform == PlatformGrok {
+		s.handleGrokAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+	}
+	if !shouldFailover {
+		return nil
+	}
+	upstreamDetail := ""
+	if s.cfg != nil && s.cfg.Gateway.LogUpstreamErrorBody {
+		maxBytes := s.cfg.Gateway.LogUpstreamErrorBodyMaxBytes
+		if maxBytes <= 0 {
+			maxBytes = 2048
+		}
+		upstreamDetail = truncateString(string(respBody), maxBytes)
+	}
+	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+		ProxyID:            opsUpstreamProxyID(account),
+		ProxyName:          opsUpstreamProxyName(account),
+		Platform:           account.Platform,
+		AccountID:          account.ID,
+		AccountName:        account.Name,
+		UpstreamStatusCode: resp.StatusCode,
+		UpstreamRequestID:  resp.Header.Get("x-request-id"),
+		Kind:               "failover",
+		Message:            upstreamMsg,
+		Detail:             upstreamDetail,
+	})
+	shouldDisable := tempUnscheduled
+	if account.Platform != PlatformGrok && !tempUnscheduled {
+		shouldDisable = s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, upstreamModel)
+	}
+	return s.newOpenAIAccountFailoverError(
+		account,
+		resp.StatusCode,
+		resp.Header,
+		respBody,
+		upstreamMsg,
+		shouldDisable,
+		!shouldDisable && account.IsPoolMode() && (account.IsPoolModeRetryableStatus(resp.StatusCode) || isOpenAITransientProcessingError(resp.StatusCode, upstreamMsg, respBody)),
+	)
+}
+
+// openAIChatCompletionsTargetURL 解析账号的（非 Grok）Chat Completions 上游端点。
+func (s *OpenAIGatewayService) openAIChatCompletionsTargetURL(account *Account) (string, error) {
+	baseURL := account.GetOpenAIBaseURL()
+	if baseURL == "" {
+		baseURL = "https://api.openai.com"
+	}
+	validatedURL, err := s.validateUpstreamBaseURL(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid base_url: %w", err)
+	}
+	return buildOpenAIChatCompletionsURL(validatedURL), nil
+}
+
+// resolveCCFallbackTarget 解析两条 CC 回退路径共用的账号凭证与上游端点
+// （回退路径仅面向 APIKey 账号，凭证恒为 openai api_key；trae / qoder 平台例外——
+// OAuth 账号凭证为平台自有 token，端点由平台配置决定）。
+func (s *OpenAIGatewayService) resolveCCFallbackTarget(account *Account) (apiKey string, targetURL string, err error) {
+	if account.Platform == PlatformTrae {
+		creds, cerr := traeAccountCredentials(account)
+		if cerr != nil {
+			return "", "", cerr
+		}
+		targetURL, err = traeChatURL(account)
+		if err != nil {
+			return "", "", err
+		}
+		return creds.JWT, targetURL, nil
+	}
+	if account.Platform == PlatformQoder {
+		// qoder：真实出站鉴权是 COSY 签名（sendCCUpstreamRequest 的分叉统一替换），
+		// 此处返回 access_token 作凭证存在性校验与占位。
+		creds, cerr := qoderAccountCredentials(account)
+		if cerr != nil {
+			return "", "", cerr
+		}
+		targetURL, err = qoderChatURL(account)
+		if err != nil {
+			return "", "", err
+		}
+		return creds.AccessToken, targetURL, nil
+	}
+	if account.Platform == PlatformWorkbuddy {
+		// workbuddy：OAuth 账号凭证为存储的 access_token（sendCCUpstreamRequest 的
+		// 分叉统一以 ChatHeaders 重设 Bearer），端点由 realm 决定。
+		creds, cerr := parseWorkbuddyCredentials(account)
+		if cerr != nil {
+			return "", "", fmt.Errorf("account %d missing workbuddy credentials: %w", account.ID, cerr)
+		}
+		targetURL, err = s.rawChatCompletionsURL(account)
+		if err != nil {
+			return "", "", err
+		}
+		return creds.AccessToken, targetURL, nil
+	}
+	apiKey = strings.TrimSpace(account.GetOpenAIProtocolAPIKey())
+	if apiKey == "" {
+		return "", "", fmt.Errorf("account %d missing api_key", account.ID)
+	}
+	targetURL, err = s.openAIChatCompletionsTargetURL(account)
+	if err != nil {
+		return "", "", err
+	}
+	return apiKey, targetURL, nil
+}
+
+// sendCCUpstreamRequest 构建并发送 CC 上游请求：分离的上游 context、OpenAI HTTP
+// profile、标准头（含流式 Accept 切换）、客户端 header 白名单透传、自定义 UA 与
+// 账号级 header 覆写，最后经代理发出。传输层失败（DNS/TCP/TLS，无 HTTP 响应）
+// 统一由 handleOpenAIUpstreamTransportError 归一为 failover。
+//
+// userAgent 为空时保留默认 UA；Grok 的默认 UA 兜底由调用方解析后传入。
+func (s *OpenAIGatewayService) sendCCUpstreamRequest(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	targetURL string,
+	body []byte,
+	stream bool,
+	bearerToken string,
+	userAgent string,
+	grokCacheIdentity string,
+) (*http.Response, error) {
+	// DeepSeek thinking mode 要求历史 assistant 回传 reasoning_content。
+	// Responses→CC 回退在加密-only / 缺 reasoning item 且缓存未命中时会漏掉该
+	// 字段，上游 400 "The `reasoning_content` in the thinking mode must be
+	// passed back to the API"。在共用出站点补空格占位，真实明文不覆盖。
+	body = ensureDeepSeekChatReasoningPlaceholders(account, body)
+	// trae：请求体改写为 llm_utils_chat 形态（三条 raw CC 路径共用出站点，
+	// 在此收敛可同时覆盖 CC / Responses / Anthropic 入站）。
+	if account.Platform == PlatformTrae {
+		var traeErr error
+		body, traeErr = applyTraeChatBody(account, body)
+		if traeErr != nil {
+			return nil, fmt.Errorf("rewrite trae chat body: %w", traeErr)
+		}
+	}
+	// qoder：请求体以官方 baseprompt 骨架改写并 qoder_encode（响应包装层需要
+	// 编码前的原始 OpenAI 体解析 model/tools，先留存副本）。
+	qoderOrigBody := body
+	if account.Platform == PlatformQoder {
+		var qdErr error
+		body, qdErr = applyQoderChatBody(account, body)
+		if qdErr != nil {
+			return nil, fmt.Errorf("rewrite qoder chat body: %w", qdErr)
+		}
+	}
+	// workbuddy：出站体走 pkg 协议归一化（强制 stream——上游拒绝非流式 / max_tokens
+	// 翻译 / tool_choice·role·image_url 归一 / prompt_cache_key 注入；global 补兜底
+	// system 与 effort 降级）。在共用出站点收敛，三条 raw CC 路径
+	//（CC / Responses / Anthropic 入站）统一覆盖。
+	if account.Platform == PlatformWorkbuddy {
+		cred, credErr := parseWorkbuddyCredentials(account)
+		if credErr != nil {
+			return nil, fmt.Errorf("parse workbuddy credentials: %w", credErr)
+		}
+		body = prepareWorkbuddyForwardBody(cred, body)
+		SetActualOpenAIUpstreamEndpoint(c, workbuddyChatEndpointPath)
+	}
+	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	upstreamReq, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, bytes.NewReader(body))
+	releaseUpstreamCtx()
+	if err != nil {
+		return nil, fmt.Errorf("build upstream request: %w", err)
+	}
+	// 记录本次实际选择的协议端点，供错误日志和用量日志在没有
+	// OpenAIForwardResult（例如 503/传输失败）时使用。每次发送都覆盖，
+	// 避免 Gin context 在账号 failover 尝试之间残留旧端点。
+	SetActualOpenAIUpstreamEndpoint(c, "/v1/chat/completions")
+	upstreamReq = upstreamReq.WithContext(WithHTTPUpstreamProfile(upstreamReq.Context(), HTTPUpstreamProfileOpenAI))
+	upstreamReq.Header.Set("Content-Type", "application/json")
+	upstreamReq.Header.Set("Authorization", "Bearer "+bearerToken)
+	if stream {
+		upstreamReq.Header.Set("Accept", "text/event-stream")
+	} else {
+		upstreamReq.Header.Set("Accept", "application/json")
+	}
+
+	// 透传白名单中的客户端 header。详见 openaiCCRawAllowedHeaders 的设计说明。
+	for key, values := range c.Request.Header {
+		lowerKey := strings.ToLower(key)
+		if openaiCCRawAllowedHeaders[lowerKey] {
+			for _, v := range values {
+				upstreamReq.Header.Add(key, v)
+			}
+		}
+	}
+	if userAgent != "" {
+		upstreamReq.Header.Set("user-agent", userAgent)
+	}
+
+	if account.Platform == PlatformGrok {
+		if account.IsGrokOAuth() {
+			applyGrokCLIHeaders(upstreamReq.Header)
+		}
+		applyGrokCacheHeaders(upstreamReq.Header, grokCacheIdentity)
+	}
+	// trae：删净上方默认头（Bearer / 透传 / 默认 UA）后注入 Cloud-IDE-JWT 头族。
+	// 放在账号级 header 覆写之前，运营覆写仍最后生效。
+	if account.Platform == PlatformTrae {
+		if traeErr := applyTraeChatHeaders(upstreamReq.Header, account); traeErr != nil {
+			return nil, fmt.Errorf("apply trae chat headers: %w", traeErr)
+		}
+	}
+	// workbuddy：注入官方桌面端头族（UA 三段式 / X-Machine-ID 会话族 / Bearer
+	// access_token）。删净默认 Authorization 后由 ChatHeaders 统一设置，其余默认头
+	// （Content-Type / Accept / Accept-Language / UA）均被 Header.Set 覆盖，无 codex
+	// 残留。放在账号级 header 覆写之前，运营覆写仍最后生效。
+	if account.Platform == PlatformWorkbuddy {
+		if wbErr := applyWorkbuddyChatTransport(upstreamReq, account); wbErr != nil {
+			return nil, fmt.Errorf("apply workbuddy chat transport: %w", wbErr)
+		}
+	}
+	// qoder：删净默认头（Bearer / 透传 / 默认 UA）后注入 COSY 签名头族
+	// （Authorization: Bearer COSY.*；签名与 body 绑定，故在 body 定稿后应用）。
+	// 放在账号级 header 覆写之前，运营覆写仍最后生效。
+	if account.Platform == PlatformQoder {
+		if qdErr := applyQoderChatTransport(upstreamReq, account, body); qdErr != nil {
+			return nil, fmt.Errorf("apply qoder chat transport: %w", qdErr)
+		}
+	}
+	// 官方 OpenCode / Command Code 上游收敛为规范客户端 UA：客户端透传的编程库
+	// UA 会命中其前置 Cloudflare bot 拦截（CF 1010/403），并被计入账号 403 strike。
+	applyOpenCodeUpstreamUserAgent(account, targetURL, upstreamReq.Header)
+
+	// 账号级请求头覆写：放在所有内置默认头（含 Grok CLI 身份头）之后应用，
+	// 使配置值获得除共享传输层强制头之外的最高优先级。
+	account.ApplyHeaderOverrides(upstreamReq.Header)
+	applyOpenCodeSessionHeader(c, account, targetURL, upstreamReq.Header, body)
+
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	var resp *http.Response
+	if account.Platform == PlatformQoder {
+		// qoder：主选网关主机传输失败/瞬时故障时换候选主机重试一次
+		//（COSY 签名只覆盖 path，换主机签名依旧有效）。
+		resp, err = s.sendQoderChat(ctx, account, upstreamReq, body, proxyURL)
+	} else {
+		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
+	}
+	if err != nil {
+		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
+	}
+	// trae：上游响应恒为 SOLO 私有 SSE，在交回调用方前转换为下游期望的形态
+	// （流式→OpenAI SSE 管道；非流式→本地聚合的 chat.completion JSON）。
+	if account.Platform == PlatformTrae {
+		if traeErr := s.wrapTraeChatResponse(ctx, account, resp, stream, gjson.GetBytes(body, "model").String()); traeErr != nil {
+			_ = resp.Body.Close()
+			return nil, traeErr
+		}
+	}
+	// qoder：上游响应恒为私有 SSE 信封，同样在交回调用方前转换为下游期望的
+	// 形态（流式→OpenAI SSE 管道；非流式→本地聚合的 chat.completion JSON）。
+	if account.Platform == PlatformQoder {
+		if qdErr := s.wrapQoderChatResponse(ctx, account, resp, stream, qoderOrigBody); qdErr != nil {
+			_ = resp.Body.Close()
+			return nil, qdErr
+		}
+	}
+	// workbuddy：上游恒以 SSE 回流（拒绝非流式）。流式本就是标准 OpenAI SSE 直接
+	// 透传；调用方期望非流式（stream=false）时在交回前本地聚合为 chat.completion
+	// JSON，使三条 raw CC 路径的既有 buffer 处理器无需平台特判。
+	if account.Platform == PlatformWorkbuddy {
+		if wbErr := s.wrapWorkbuddyChatResponse(resp, stream, gjson.GetBytes(body, "model").String()); wbErr != nil {
+			_ = resp.Body.Close()
+			return nil, wbErr
+		}
+	}
+	return resp, nil
+}
+
+// ccStreamScanState 是 scanCCStream 返回的读取状态快照。
+type ccStreamScanState struct {
+	// Usage 为 include_usage chunk 中最近一次出现的用量（上游可能重复发送，
+	// 总是保留最新值）；终态事件中的用量由调用方在 finalize 阶段自行覆盖。
+	Usage OpenAIUsage
+	// FirstTokenMs 为首个实际输出 chunk（排除 usage-only chunk）的到达时延。
+	FirstTokenMs *int
+	// SawDone 表示上游发出了 [DONE] 哨兵。
+	SawDone bool
+	// Err 为 scanner 读错误（客户端 context 取消不属于此类，会原样带出）。
+	// 非 nil 时调用方必须跳过 finalize 并返回 usage-incomplete 错误，避免
+	// 把上游截断伪装成正常收尾。
+	Err error
+}
+
+// scanCCStream 驱动两条 CC 回退路径共享的 SSE 读循环：提取 data 行、在 [DONE]
+// 哨兵处停止、保留最新 usage、记录首 token 时延，并把每个解析成功的 chunk 交给
+// emit 回调做各自的协议转换与写出。读错误按既有约定过滤 context 取消类噪声后
+// 记入 Warn 日志。
+func (s *OpenAIGatewayService) scanCCStream(
+	c *gin.Context,
+	resp *http.Response,
+	logPrefix string,
+	requestID string,
+	startTime time.Time,
+	emit func(*apicompat.ChatCompletionsChunk),
+) ccStreamScanState {
+	var st ccStreamScanState
+
+	scanner := s.newUpstreamSSEScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		payload, ok := extractOpenAISSEDataLine(line)
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" {
+			continue
+		}
+		if payload == "[DONE]" {
+			st.SawDone = true
+			break
+		}
+		// 观察上游 CC chunk 回显的 model / service_tier（计费以回显为准）。
+		// CC chunk 无 type 字段，按 untyped payload 观察（上游约束：只有终止
+		// 事件与无类型 body 报告实际处理档位）。
+		if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
+			observer.ObserveOpenAI([]byte(payload), "")
+		}
+
+		if u := extractCCStreamUsage(payload); u != nil {
+			st.Usage = *u
+		}
+
+		var chunk apicompat.ChatCompletionsChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			logger.L().Warn(logPrefix+": failed to parse chat stream chunk",
+				zap.Error(err),
+				zap.String("request_id", requestID),
+			)
+			continue
+		}
+		if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(payload) && chatChunkStartsResponsesOutput(&chunk) {
+			ms := int(time.Since(startTime).Milliseconds())
+			st.FirstTokenMs = &ms
+		}
+		emit(&chunk)
+	}
+
+	if err := scanner.Err(); err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			logger.L().Warn(logPrefix+": stream read error",
+				zap.Error(err),
+				zap.String("request_id", requestID),
+			)
+		}
+		st.Err = err
+	}
+	return st
+}
+
+// logCCStreamMissingDoneSentinel 记录"上游未发 [DONE] 哨兵即结束"的 debug 日志。
+func logCCStreamMissingDoneSentinel(logPrefix, requestID string) {
+	logger.L().Debug(logPrefix+": upstream stream ended without done sentinel",
+		zap.String("request_id", requestID),
+	)
+}
+
+// readCCUpstreamJSONResponse 读取并解析 CC 非流式 JSON 响应，失败时以调用方
+// 端点格式回写错误；成功时顺带提取 usage。
+func (s *OpenAIGatewayService) readCCUpstreamJSONResponse(
+	c *gin.Context,
+	resp *http.Response,
+	writeError compatErrorWriter,
+) (*apicompat.ChatCompletionsResponse, OpenAIUsage, error) {
+	respBody, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
+	if err != nil {
+		if !errors.Is(err, ErrUpstreamResponseBodyTooLarge) {
+			writeError(c, http.StatusBadGateway, "api_error", "Failed to read upstream response")
+		}
+		return nil, OpenAIUsage{}, fmt.Errorf("read upstream body: %w", err)
+	}
+
+	var ccResp apicompat.ChatCompletionsResponse
+	if err := json.Unmarshal(respBody, &ccResp); err != nil {
+		writeError(c, http.StatusBadGateway, "api_error", "Failed to parse upstream response")
+		return nil, OpenAIUsage{}, fmt.Errorf("parse chat completions response: %w", err)
+	}
+	// 观察上游 CC JSON 回显的 model / service_tier（计费以回显为准）。
+	// CC JSON 无 type 字段，按 untyped payload 观察（上游约束）。
+	if observer := upstreamResponseModelObserverFromContext(c); observer != nil {
+		observer.ObserveOpenAI(respBody, "")
+	}
+
+	usage := OpenAIUsage{}
+	if parsed, ok := extractOpenAIUsageFromJSONBytes(respBody); ok {
+		usage = parsed
+	}
+	return &ccResp, usage, nil
+}
+
+// writeOpenAIResponsesFallbackError 以 /v1/responses 回退路径的既有错误格式回写
+// （裸 error 对象；不调用 MarkResponseCommitted，与原内联写法保持一致）。
+func writeOpenAIResponsesFallbackError(c *gin.Context, statusCode int, errType, message string) {
+	c.JSON(statusCode, gin.H{
+		"error": gin.H{
+			"type":    errType,
+			"message": message,
+		},
+	})
+}

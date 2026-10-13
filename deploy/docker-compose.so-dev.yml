@@ -1,0 +1,134 @@
+# =============================================================================
+# Sub2API 二开本地开发环境（sub2api-so）
+# =============================================================================
+# 三个服务全部容器化：PostgreSQL 16 + Redis 7 + 后端源码热跑（golang:1.27.2）
+# 数据卷复用工作区约定：sub2api_pgdata / sub2api_redisdata / sub2api_go_mod /
+# sub2api_go_cache（与手动 docker run 的 Go 工具链命令共享依赖缓存）。
+#
+# 用法（Git Bash，在 deploy/ 目录下）：
+#   docker compose -f docker-compose.so-dev.yml up -d
+#   docker compose -f docker-compose.so-dev.yml logs -f backend
+#   docker compose -f docker-compose.so-dev.yml down
+#
+# 后端:  http://127.0.0.1:8088  （一体化服务前端页面 + API；health: /health；8080 常被本机其他服务占用，故用 8088）
+#        页面来自 -tags embed 打包的 backend/internal/web/dist（首次已在宿主机 pnpm build 生成最新产物）
+# PG:    127.0.0.1:5432  user/pass/db 均为 sub2api（psql 用 127.0.0.1，勿用 localhost）
+# Redis: 127.0.0.1:6379  无密码
+# 前端:  宿主机 frontend/ 下 pnpm dev（Vite 代理默认指向 http://localhost:8080，
+#        本仓库已设 frontend/.env.development.local 的 VITE_DEV_PROXY_TARGET=http://127.0.0.1:8088；
+#        不放进容器——源码挂载下 Vite 文件监听不可靠）
+#
+# 说明：
+# - 首次启动 AUTO_SETUP=true：自动测试连接、执行迁移建表、创建管理员并写
+#   backend/data/config.yaml（gitignored）。库非空时自动跳过，不重复初始化。
+# - 源码变更后重启 backend 容器即可（go run 会重新编译）：
+#   docker compose -f docker-compose.so-dev.yml restart backend
+# =============================================================================
+
+services:
+  backend:
+    image: golang:1.27.2
+    container_name: sub2api-backend-dev
+    restart: unless-stopped
+    working_dir: /app
+    # -tags embed：把 backend/internal/web/dist 前端产物打进二进制，后端一体化服务页面
+    # （改前端代码后需在宿主机 frontend/ 下重新 pnpm build 再 restart backend）
+    command: go run -tags embed ./cmd/server/
+    environment:
+      # AUTO_SETUP 在库为空时自动初始化（迁移建表 + 创建管理员），已初始化则跳过
+      - AUTO_SETUP=true
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@sub2api.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?请设置初始管理员密码，如 ADMIN_PASSWORD=Dev123456}
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${POSTGRES_USER:-sub2api}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:-sub2api}
+      - DATABASE_DBNAME=${POSTGRES_DB:-sub2api}
+      - DATABASE_SSLMODE=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - SERVER_MODE=debug
+      - TZ=Asia/Shanghai
+    volumes:
+      # 整个 backend/ 挂载进容器，源码即改即重启生效
+      - ../backend:/app
+      - sub2api_go_mod:/go/pkg/mod
+      - sub2api_go_cache:/root/.cache/go-build
+    ports:
+      - "${BIND_HOST:-127.0.0.1}:${BACKEND_PORT:-8088}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 5 -O /dev/null http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    networks:
+      - sub2api-dev
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: sub2api-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-sub2api}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-sub2api}
+      - POSTGRES_DB=${POSTGRES_DB:-sub2api}
+      - PGDATA=/var/lib/postgresql/data
+      - TZ=Asia/Shanghai
+    volumes:
+      - sub2api_pgdata:/var/lib/postgresql/data
+    ports:
+      # 暴露到宿主机：psql 调试 + 集成测试用（仅监听回环地址）
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - sub2api-dev
+
+  redis:
+    image: redis:7-alpine
+    container_name: sub2api-redis
+    restart: unless-stopped
+    command: >
+      sh -c '
+        redis-server
+        --save 60 1
+        --appendonly yes'
+    volumes:
+      - sub2api_redisdata:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - sub2api-dev
+
+volumes:
+  sub2api_pgdata:
+    name: sub2api_pgdata   # 固定卷名，与手动 docker run 创建的卷复用
+  sub2api_redisdata:
+    name: sub2api_redisdata
+  sub2api_go_mod:
+    name: sub2api_go_mod
+  sub2api_go_cache:
+    name: sub2api_go_cache
+
+networks:
+  sub2api-dev:
+    driver: bridge

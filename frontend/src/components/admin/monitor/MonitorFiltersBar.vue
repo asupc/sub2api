@@ -1,0 +1,120 @@
+<template>
+  <div class="flex flex-col justify-between gap-2.5 lg:flex-row lg:items-center">
+    <!-- Left: Search + Filters -->
+    <div class="flex flex-1 flex-wrap items-center gap-2">
+      <div class="relative w-full sm:w-56">
+        <Icon
+          name="search"
+          size="sm"
+          class="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500"
+        />
+        <input
+          v-model="search"
+          type="text"
+          :placeholder="t('admin.channelMonitor.searchPlaceholder')"
+          class="input input-sm h-8 pl-5 text-xs"
+          @input="$emit('search-input')"
+        />
+      </div>
+
+      <Select
+        v-model="provider"
+        size="sm"
+        :options="providerFilterOptions"
+        :placeholder="t('admin.channelMonitor.allProviders')"
+        class="w-44"
+        @change="$emit('reload')"
+      />
+
+      <Select
+        v-model="enabled"
+        size="sm"
+        :options="enabledFilterOptions"
+        :placeholder="t('admin.channelMonitor.enabledFilter')"
+        class="w-40"
+        @change="$emit('reload')"
+      />
+    </div>
+
+    <!-- Right: Actions -->
+    <div class="flex w-full flex-shrink-0 flex-wrap items-center justify-end gap-2 lg:w-auto">
+      <button
+        @click="$emit('reload')"
+        :disabled="loading"
+        class="btn btn-secondary btn-sm"
+        :title="t('common.refresh')"
+      >
+        <Icon name="refresh" size="sm" :class="loading ? 'animate-spin' : ''" />
+      </button>
+      <button
+        @click="$emit('manage-templates')"
+        class="btn btn-secondary btn-sm"
+        :title="t('admin.channelMonitor.template.manageButton')"
+      >
+        <Icon name="cog" size="sm" class="md:mr-1.5" />
+        {{ t('admin.channelMonitor.template.manageButton') }}
+      </button>
+      <button @click="$emit('create')" class="btn btn-primary btn-sm">
+        <Icon name="plus" size="sm" class="md:mr-1.5" />
+        {{ t('admin.channelMonitor.createButton') }}
+      </button>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+import type { Provider } from '@/api/admin/channelMonitor'
+import Select from '@/components/common/Select.vue'
+import Icon from '@/components/icons/Icon.vue'
+import {
+  PROVIDER_OPENAI,
+  PROVIDER_ANTHROPIC,
+  PROVIDER_GEMINI,
+  PROVIDER_GROK,
+  PROVIDER_ANTIGRAVITY,
+  PROVIDER_KIMI,
+  PROVIDER_ZHIPU,
+  PROVIDER_DEEPSEEK,
+  PROVIDER_MINIMAX,
+  PROVIDER_OPENCODE_GO,
+} from '@/constants/channelMonitor'
+
+defineProps<{
+  loading: boolean
+}>()
+
+defineEmits<{
+  (e: 'reload'): void
+  (e: 'create'): void
+  (e: 'manage-templates'): void
+  (e: 'search-input'): void
+}>()
+
+const search = defineModel<string>('search', { required: true })
+const provider = defineModel<Provider | ''>('provider', { required: true })
+const enabled = defineModel<'' | 'true' | 'false'>('enabled', { required: true })
+
+const { t } = useI18n()
+
+const providerFilterOptions = computed(() => [
+  { value: '', label: t('admin.channelMonitor.allProviders') },
+  { value: PROVIDER_OPENAI, label: t('monitorCommon.providers.openai') },
+  { value: PROVIDER_ANTHROPIC, label: t('monitorCommon.providers.anthropic') },
+  { value: PROVIDER_GEMINI, label: t('monitorCommon.providers.gemini') },
+  { value: PROVIDER_GROK, label: t('monitorCommon.providers.grok') },
+  { value: PROVIDER_ANTIGRAVITY, label: t('monitorCommon.providers.antigravity') },
+  { value: PROVIDER_KIMI, label: t('monitorCommon.providers.kimi') },
+  { value: PROVIDER_ZHIPU, label: t('monitorCommon.providers.zhipu') },
+  { value: PROVIDER_DEEPSEEK, label: t('monitorCommon.providers.deepseek') },
+  { value: PROVIDER_MINIMAX, label: t('monitorCommon.providers.minimax') },
+  { value: PROVIDER_OPENCODE_GO, label: t('monitorCommon.providers.opencode_go') },
+])
+
+const enabledFilterOptions = computed(() => [
+  { value: '', label: t('admin.channelMonitor.allStatus') },
+  { value: 'true', label: t('admin.channelMonitor.onlyEnabled') },
+  { value: 'false', label: t('admin.channelMonitor.onlyDisabled') },
+])
+</script>

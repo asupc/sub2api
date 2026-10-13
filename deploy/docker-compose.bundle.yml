@@ -1,0 +1,186 @@
+# =============================================================================
+# Sub2API 离线部署包 Compose（配合 docker load 导入的本地镜像 tar 使用）
+# =============================================================================
+# 由 deploy/build-docker-tar.sh 生成的部署包内含本文件（改名为 docker-compose.yml）。
+#
+# 部署步骤（Linux 服务器）：
+#   1. docker load -i sub2api-<版本>-docker-image.tar
+#   2. cp .env.example .env && vi .env   # 至少填写 POSTGRES_PASSWORD / ADMIN_PASSWORD
+#   3. docker compose up -d
+#   4. 验证：curl http://127.0.0.1:8080/health
+#
+# 注意：本 compose 面向全新部署（自带 PostgreSQL 18 + Redis 8 数据卷）。
+#       升级已有实例时请勿直接 up —— 先备份数据库，并按需将 DATABASE_HOST/REDIS_HOST
+#       指向现有实例，详见包内 README.md。
+#
+# 端口/服务口径与上游 deploy/docker-compose.yml 保持一致：
+#   PostgreSQL 18-alpine（与应用镜像内置 pg_dump/psql 版本匹配）、Redis 8-alpine。
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Sub2API 应用（一体化镜像：前端已嵌入后端二进制）
+  # ===========================================================================
+  sub2api:
+    image: ${SUB2API_IMAGE:-sub2api:latest}
+    container_name: sub2api
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    ports:
+      - "${BIND_HOST:-0.0.0.0}:${SERVER_PORT:-8080}:8080"
+    volumes:
+      # 数据持久化（首次启动自动生成的 config.yaml 也保存在这里）
+      - sub2api_data:/app/data
+      # 可选：挂载自定义 config.yaml（挂载后以宿主机文件为准）
+      # - ./config.yaml:/app/data/config.yaml
+    environment:
+      # Auto Setup：首次启动自动迁移建表 + 创建管理员
+      - AUTO_SETUP=true
+
+      # Server
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8080
+      - SERVER_MODE=${SERVER_MODE:-release}
+      - TZ=${TZ:-Asia/Shanghai}
+
+      # PostgreSQL（本 compose 内置的 postgres 服务）
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=${POSTGRES_USER:-sub2api}
+      - DATABASE_PASSWORD=${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      - DATABASE_DBNAME=${POSTGRES_DB:-sub2api}
+      - DATABASE_SSLMODE=disable
+
+      # Redis（本 compose 内置的 redis 服务）
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+
+      # 初始管理员（仅数据库为空、首次初始化时创建）
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@sub2api.local}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?请在 .env 中设置 ADMIN_PASSWORD}
+
+      # JWT 密钥（不填则首次启动自动生成并持久化到数据卷，之后保持不变）
+      - JWT_SECRET=${JWT_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "5", "-O", "/dev/null", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # 应用自身会对数据库启动期瞬时错误重试，给足宽限期
+      start_period: 120s
+    networks:
+      - sub2api
+
+  # ===========================================================================
+  # PostgreSQL Database
+  # ===========================================================================
+  postgres:
+    image: postgres:18-alpine
+    container_name: sub2api-postgres
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    # 调优参数可经 .env 覆盖，缺省值即 postgres:18 出厂默认
+    command: >
+      postgres
+      -c max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      -c shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      -c effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-4GB}
+      -c maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+    volumes:
+      - sub2api_pgdata:/var/lib/postgresql/data
+    environment:
+      # postgres:18-alpine 默认 PGDATA=/var/lib/postgresql/18/docker（在镜像声明的
+      # 匿名卷 /var/lib/postgresql 内）。若不显式设置 PGDATA，即使挂载了命名卷，
+      # 数据也不会落盘到命名卷，down/up 后会重新 initdb 导致用户/密码丢失。
+      - PGDATA=/var/lib/postgresql/data
+      - POSTGRES_USER=${POSTGRES_USER:-sub2api}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-sub2api}
+      - TZ=${TZ:-Asia/Shanghai}
+    networks:
+      - sub2api
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api} && psql -U ${POSTGRES_USER:-sub2api} -d ${POSTGRES_DB:-sub2api} -Atqc 'SELECT 1' >/dev/null",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 60s
+    # 默认不向宿主机暴露端口；如需调试可临时加：ports: ["127.0.0.1:5433:5432"]
+
+  # ===========================================================================
+  # Redis Cache
+  # ===========================================================================
+  redis:
+    image: redis:8-alpine
+    container_name: sub2api-redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+    volumes:
+      - sub2api_redisdata:/data
+    command:
+      - redis-server
+      - --save
+      - "60"
+      - "1"
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --requirepass
+      - ${REDIS_PASSWORD:-}
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      # REDISCLI_AUTH 供 redis-cli 健康检查使用（比 -a 传参安全）
+      - REDISCLI_AUTH=${REDIS_PASSWORD:-}
+    networks:
+      - sub2api
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    # 默认不向宿主机暴露端口；如需调试可临时加：ports: ["127.0.0.1:6379:6379"]
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  sub2api_data:
+    driver: local
+  sub2api_pgdata:
+    driver: local
+  sub2api_redisdata:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  sub2api:
+    driver: bridge
