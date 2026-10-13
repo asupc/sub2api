@@ -416,7 +416,7 @@ func TestWorkbuddyResponsesInboundNonStreamViaCCFallback(t *testing.T) {
 	body := []byte(`{"model":"glm-5.3","stream":false,"input":"hi"}`)
 	c, responseBody := wbNewForwardContext(body)
 	c.Request.URL.Path = "/v1/responses"
-	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, account, body)
+	result, err := svc.forwardResponsesViaRawChatCompletions(context.Background(), c, account, body, time.Now())
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
