@@ -388,6 +388,30 @@ func TestAccountHandlerGetAvailableModels_GeminiGoogleOneUsesConservativeCatalog
 	require.NotContains(t, ids, "gemini-2.5-flash-image")
 }
 
+func TestAntigravityHasStoredModelMapping(t *testing.T) {
+	// 白名单/映射模式（非空 model_mapping）时测试下拉框只能列出映射 keys；
+	// 空映射 = 直接模型模式，允许展示上游 live 目录。
+	cases := []struct {
+		name    string
+		account *service.Account
+		want    bool
+	}{
+		{name: "nil account", account: nil, want: false},
+		{name: "nil credentials", account: &service.Account{}, want: false},
+		{name: "missing mapping", account: &service.Account{Credentials: map[string]any{}}, want: false},
+		{name: "empty JSON mapping", account: &service.Account{Credentials: map[string]any{"model_mapping": map[string]any{}}}, want: false},
+		{name: "empty string mapping", account: &service.Account{Credentials: map[string]any{"model_mapping": map[string]string{}}}, want: false},
+		{name: "blank key only", account: &service.Account{Credentials: map[string]any{"model_mapping": map[string]any{" ": "upstream"}}}, want: false},
+		{name: "JSON mapping", account: &service.Account{Credentials: map[string]any{"model_mapping": map[string]any{"gemini-3.8-flash-high": "gemini-3.8-flash-high"}}}, want: true},
+		{name: "string mapping", account: &service.Account{Credentials: map[string]any{"model_mapping": map[string]string{"gemini-3.8-flash-high": "gemini-3.8-flash-high"}}}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, antigravityHasStoredModelMapping(tc.account))
+		})
+	}
+}
+
 func TestAccountHandlerGetAvailableModels_Antigravity(t *testing.T) {
 	defaults := antigravity.DefaultModels()
 	known := defaults[0]

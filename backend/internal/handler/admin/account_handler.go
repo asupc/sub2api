@@ -2894,11 +2894,13 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		return
 	}
 
-	// Antigravity：OAuth 账号优先返回上游 live 目录的直接模型
+	// Antigravity：白名单/映射模式的账号可测试集合就是映射的请求侧 keys——展示
+	// 上游 live 目录会把账号实际用不了的模型混进测试下拉框（选中即
+	// "model not in whitelist"）。直接模型模式（空映射）才返回上游 live 目录
 	// （v1internal:fetchAvailableModels，与 CLIProxyAPI 的目录口径一致），
-	// 拉取失败回落存储映射 keys / 静态清单；APIKey/Upstream 账号保持映射口径。
+	// 拉取失败回落静态清单；APIKey/Upstream 账号保持映射口径。
 	if account.Platform == service.PlatformAntigravity {
-		if account.Type == service.AccountTypeOAuth && h.accountTestService != nil {
+		if !antigravityHasStoredModelMapping(account) && account.Type == service.AccountTypeOAuth && h.accountTestService != nil {
 			if fetched, err := h.accountTestService.FetchUpstreamSupportedModels(c.Request.Context(), account); err == nil && len(fetched) > 0 {
 				models := make([]antigravity.ClaudeModel, 0, len(fetched))
 				for _, id := range fetched {
@@ -3041,6 +3043,30 @@ func integratedPlatformTestModels(c *gin.Context, h *AccountHandler, account *se
 		models = append(models, claude.Model{ID: id, Type: "model", DisplayName: id})
 	}
 	return models
+}
+
+// antigravityHasStoredModelMapping 判断账号是否保存了非空 model_mapping
+// （白名单/映射模式）。为真时账号可测试的模型就是映射的请求侧 keys；
+// 为空表示直接模型模式（直通上游目录）。
+func antigravityHasStoredModelMapping(account *service.Account) bool {
+	if account == nil {
+		return false
+	}
+	switch mapping := account.Credentials["model_mapping"].(type) {
+	case map[string]any:
+		for id := range mapping {
+			if strings.TrimSpace(id) != "" {
+				return true
+			}
+		}
+	case map[string]string:
+		for id := range mapping {
+			if strings.TrimSpace(id) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // antigravityAccountTestModels uses the stored mapping rather than GetModelMapping,
