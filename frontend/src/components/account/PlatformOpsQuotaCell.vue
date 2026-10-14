@@ -59,6 +59,11 @@
     <!-- 无快照 -->
     <div v-else class="text-xs text-gray-400">-</div>
 
+    <!-- 签到状态（二开：qoder/workbuddy，读 extra.ops_state.checkin 按账号时区判当日三态） -->
+    <span v-if="checkin" :class="checkin.cls" :title="checkin.title">
+      {{ checkin.label }}
+    </span>
+
     <!-- 今日积分消耗（二开：qoder/workbuddy，来源上游 usage 积分字段日累计） -->
     <span
       v-if="todayCredits !== null && todayCredits !== undefined"
@@ -99,7 +104,12 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
 import type { Account } from '@/types'
-import type { WorkbuddyQuotaSnapshot, QoderQuotaSnapshot, TraeQuotaSnapshot } from '@/api/admin/platformOps'
+import type {
+  WorkbuddyQuotaSnapshot,
+  QoderQuotaSnapshot,
+  TraeQuotaSnapshot,
+  PlatformOpsStateEntry
+} from '@/api/admin/platformOps'
 
 /**
  * 三平台（WorkBuddy / Qoder / Trae）额度快照单元格：
@@ -152,6 +162,54 @@ const formatShortDate = (value: string | undefined): string => {
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
+
+// 账号时区的「今天」键（YYYY-MM-DD），与后端 sameLocalDay 切日口径一致；
+// 无效时区名（Intl 抛错）回退浏览器本地时区。
+const dayKeyInZone = (date: Date, tz: string): string => {
+  try {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(date)
+  } catch {
+    return new Intl.DateTimeFormat('en-CA').format(date)
+  }
+}
+
+type CheckinBadge = {
+  kind: 'ok' | 'failed' | 'pending'
+  label: string
+  title: string
+  cls: string
+}
+
+// 每日签到状态（workbuddy/qoder，extra.ops_state.checkin）：
+// 今日成功（last_ok 为今天）绿 / 今日跑过但未成功（last_run 为今天）红 / 其余灰。
+const checkin = computed<CheckinBadge | null>(() => {
+  if (platform.value !== 'workbuddy' && platform.value !== 'qoder') return null
+  const opsState = extra.value.ops_state as Record<string, PlatformOpsStateEntry> | undefined
+  const entry = opsState?.checkin
+  if (!entry) {
+    return { kind: 'pending', label: t('admin.ops.quota.checkinPending'), title: t('admin.ops.quota.checkinPendingTitle'), cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300' }
+  }
+  const tz = (extra.value.ops_timezone as string) || 'Asia/Shanghai'
+  const today = dayKeyInZone(new Date(), tz)
+  if (entry.last_ok && dayKeyInZone(new Date(entry.last_ok), tz) === today) {
+    const note = entry.note ? `：${entry.note}` : ''
+    return {
+      kind: 'ok',
+      label: t('admin.ops.quota.checkinOk'),
+      title: t('admin.ops.quota.checkinOkTitle', { time: formatShortDate(entry.last_ok), note }),
+      cls: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+    }
+  }
+  if (entry.last_run && dayKeyInZone(new Date(entry.last_run), tz) === today) {
+    return {
+      kind: 'failed',
+      label: t('admin.ops.quota.checkinFailed'),
+      title: t('admin.ops.quota.checkinFailedTitle', { error: entry.last_err ?? '', time: formatShortDate(entry.last_run) }),
+      cls: 'bg-red-50 text-red-600 dark:bg-red-900/30 dark:text-red-300'
+    }
+  }
+  return { kind: 'pending', label: t('admin.ops.quota.checkinPending'), title: t('admin.ops.quota.checkinPendingTitle'), cls: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300' }
+})
 
 const wbExpiringLabel = computed(() => formatShortDate(wb.value?.expiring_at))
 const traeEarliestLabel = computed(() => {

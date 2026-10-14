@@ -847,6 +847,7 @@ export default {
         ok: '成功',
         failed: '失败',
         runSuccess: '{task} 执行成功',
+        runSuccessNote: '{task} 执行成功：{note}',
         runFailed: '{task} 执行失败：{error}',
         loadFailed: '加载运营任务失败',
         // 账号级任务调度设置（extra.ops_config）
@@ -873,7 +874,14 @@ export default {
         earliestExpire: '最早到期积分时间',
         probe: '查询最新额度',
         todayCredits: '今日',
-        todayCreditsDesc: '今日该账号经本网关消耗的积分合计（上游响应 usage 字段累加，按北京时间切日）'
+        todayCreditsDesc: '今日该账号经本网关消耗的积分合计（上游响应 usage 字段累加，按北京时间切日）',
+        // 每日签到状态胶囊（extra.ops_state.checkin，按账号时区判当日）
+        checkinOk: '已签到',
+        checkinOkTitle: '签到成功：{time}{note}',
+        checkinFailed: '签到失败',
+        checkinFailedTitle: '签到失败：{error}（{time}）',
+        checkinPending: '未签到',
+        checkinPendingTitle: '今日尚未执行签到（每日定点自动执行，也可在「运营任务」面板手动触发）'
       }
     },
 

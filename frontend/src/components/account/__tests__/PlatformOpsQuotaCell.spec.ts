@@ -15,8 +15,19 @@ vi.mock('@/api/admin', () => ({
   }
 }))
 
+// 带占位符的 title 文案模板（断言插值内容用）；其余 key 原样返回。
+const ZH_TEMPLATES: Record<string, string> = {
+  'admin.ops.quota.checkinOkTitle': '签到成功：{time}{note}',
+  'admin.ops.quota.checkinFailedTitle': '签到失败：{error}（{time}）'
+}
+
 vi.mock('vue-i18n', () => ({
-  useI18n: () => ({ t: (key: string) => key })
+  useI18n: () => ({
+    t: (key: string, params?: Record<string, unknown>) => {
+      const tpl = ZH_TEMPLATES[key] ?? key
+      return params ? tpl.replace(/\{(\w+)\}/g, (_, k) => String(params[k] ?? '')) : tpl
+    }
+  })
 }))
 
 function makeAccount(platform: string, extra: Record<string, unknown> = {}): Account {
@@ -137,5 +148,71 @@ describe('PlatformOpsQuotaCell', () => {
     })
     expect(withoutCredits.text()).not.toContain('admin.ops.quota.todayCredits')
     withoutCredits.unmount()
+  })
+
+  describe('签到状态胶囊', () => {
+    // 时间均相对当前时刻构造，任何时区/任何时刻运行都稳定：
+    // 「今天」的判定基准（now）与相对偏移（-2d）不可能同日。
+    const iso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString()
+    const TWO_DAYS = 2 * 24 * 3600 * 1000
+
+    it('今日签到成功：绿色「已签到」，title 含 note', () => {
+      const wrapper = mount(PlatformOpsQuotaCell, {
+        props: {
+          account: makeAccount('workbuddy', {
+            ops_state: { checkin: { last_ok: iso(0), last_run: iso(0), note: '签到成功 +100' } }
+          })
+        }
+      })
+      expect(wrapper.text()).toContain('admin.ops.quota.checkinOk')
+      expect(wrapper.text()).not.toContain('admin.ops.quota.checkinFailed')
+      const badge = wrapper.get('span[title*="签到成功："]')
+      expect(badge.attributes('title')).toContain('签到成功 +100')
+      wrapper.unmount()
+    })
+
+    it('今日跑过但失败：红色「签到失败」，title 含错误信息', () => {
+      const wrapper = mount(PlatformOpsQuotaCell, {
+        props: {
+          account: makeAccount('qoder', {
+            ops_state: { checkin: { last_run: iso(0), last_ok: iso(-TWO_DAYS), last_err: 'upstream 500' } }
+          })
+        }
+      })
+      expect(wrapper.text()).toContain('admin.ops.quota.checkinFailed')
+      expect(wrapper.text()).not.toContain('admin.ops.quota.checkinOk')
+      const badge = wrapper.get('span[title*="签到失败："]')
+      expect(badge.attributes('title')).toContain('upstream 500')
+      wrapper.unmount()
+    })
+
+    it('今日未跑 / 从未跑过：灰色「未签到」', () => {
+      const stale = mount(PlatformOpsQuotaCell, {
+        props: {
+          account: makeAccount('qoder', {
+            ops_state: { checkin: { last_run: iso(-TWO_DAYS), last_ok: iso(-TWO_DAYS) } }
+          })
+        }
+      })
+      expect(stale.text()).toContain('admin.ops.quota.checkinPending')
+      stale.unmount()
+
+      const never = mount(PlatformOpsQuotaCell, { props: { account: makeAccount('qoder') } })
+      expect(never.text()).toContain('admin.ops.quota.checkinPending')
+      never.unmount()
+    })
+
+    it('trae 账号即使有签到状态也不渲染胶囊', () => {
+      const wrapper = mount(PlatformOpsQuotaCell, {
+        props: {
+          account: makeAccount('trae', {
+            ops_state: { checkin: { last_ok: iso(0), last_run: iso(0) } }
+          })
+        }
+      })
+      expect(wrapper.text()).not.toContain('admin.ops.quota.checkinOk')
+      expect(wrapper.text()).not.toContain('admin.ops.quota.checkinPending')
+      wrapper.unmount()
+    })
   })
 })
