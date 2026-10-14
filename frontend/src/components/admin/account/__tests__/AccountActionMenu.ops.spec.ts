@@ -188,3 +188,67 @@ describe('PlatformOpsTasksPanel 调度设置', () => {
     wrapper.unmount()
   })
 })
+
+describe('PlatformOpsTasksPanel 手动执行结论透传', () => {
+  it('后端返回 note 时 toast 使用 runSuccessNote 并展示结论；无 note 沿用 runSuccess', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    const platformOps = adminAPI.platformOps as unknown as Record<string, ReturnType<typeof vi.fn>>
+    platformOps.runAccountTask = vi
+      .fn()
+      .mockResolvedValueOnce({ done: true, note: '活动领取成功 +100 Credits（每日领取）' })
+      .mockResolvedValueOnce({ done: true })
+    getAccountTasks.mockResolvedValue({
+      platform: 'qoder',
+      tasks: [{ id: 'checkin', platform: 'qoder', name: '每日签到', state: {} }]
+    })
+    showSuccess.mockClear()
+
+    const wrapper = mount(AccountActionMenu, {
+      props: { show: true, account: makeAccount({ id: 3, platform: 'qoder' }), anchorRect },
+      attachTo: document.body
+    })
+    getBodyButton('ops-tasks-entry')!.click()
+    await flushPromises()
+
+    // 有 note：toast 走 note 分支（mock 的 t 仅回传 key，故断言 key）。
+    getBodyButton('ops-task-checkin')!.click()
+    await flushPromises()
+    await flushPromises()
+    expect(showSuccess).toHaveBeenCalledWith('admin.ops.tasks.runSuccessNote')
+
+    // 无 note：回退旧文案。
+    getBodyButton('ops-task-checkin')!.click()
+    await flushPromises()
+    await flushPromises()
+    expect(showSuccess).toHaveBeenLastCalledWith('admin.ops.tasks.runSuccess')
+
+    wrapper.unmount()
+  })
+
+  it('状态徽标 hover 标题包含成功结论 note', async () => {
+    getAccountTasks.mockResolvedValue({
+      platform: 'qoder',
+      tasks: [
+        {
+          id: 'checkin',
+          platform: 'qoder',
+          name: '每日签到',
+          state: { last_ok: '2026-10-14T10:00:00Z', note: '今日活动奖励已领取（每日领取）' }
+        }
+      ]
+    })
+    const wrapper = mount(AccountActionMenu, {
+      props: { show: true, account: makeAccount({ id: 4, platform: 'qoder' }), anchorRect },
+      attachTo: document.body
+    })
+    getBodyButton('ops-tasks-entry')!.click()
+    await flushPromises()
+
+    const title = document.body
+      .querySelector('[data-testid="ops-task-checkin"] span[title]')!
+      .getAttribute('title')
+    expect(title).toContain('今日活动奖励已领取（每日领取）')
+
+    wrapper.unmount()
+  })
+})

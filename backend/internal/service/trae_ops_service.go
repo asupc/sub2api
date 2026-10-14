@@ -174,26 +174,29 @@ func traeOpsTaskDue(task PlatformOpsTask, entry OpsStateEntry, now time.Time, lo
 
 // runCheckin 每日签到：预检（已签直接成功）→ claim。业务性失败（重复签到 /
 // 套餐限制）按成功记账，其余报错交退避。
-func (s *TraeOpsService) runCheckin(ctx context.Context, account *Account) error {
+func (s *TraeOpsService) runCheckin(ctx context.Context, account *Account) (string, error) {
 	creds, client, err := s.traeClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	variant := creds.VariantOf()
 	device := trae.DeviceIdentity{DeviceID: creds.DeviceID, MarketUserID: creds.UID}
 
 	if status, statErr := trae.CheckinStatus(ctx, client, variant, creds.JWT, device); statErr == nil &&
 		status.OK() && status.CheckedIn {
-		return nil
+		return "今日已签到", nil
 	}
 	claim, err := trae.CheckinClaim(ctx, client, variant, creds.JWT, device)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if claim.OK() || traeCheckinBusinessSuccess(claim) {
-		return nil
+		if msg := strings.TrimSpace(claim.Message); msg != "" {
+			return msg, nil
+		}
+		return "签到成功", nil
 	}
-	return fmt.Errorf("签到失败: HTTP %d code=%d has_code=%v: %s", claim.HTTPStatus, claim.Code, claim.HasCode, claim.Message)
+	return "", fmt.Errorf("签到失败: HTTP %d code=%d has_code=%v: %s", claim.HTTPStatus, claim.Code, claim.HasCode, claim.Message)
 }
 
 // traeCheckinBusinessSuccess 判定签到 claim 的业务性「等效成功」（重复签到 /
@@ -210,34 +213,35 @@ func traeCheckinBusinessSuccess(claim *trae.ClaimResult) bool {
 }
 
 // runUsageRefresh 刷新积分快照到 extra["trae_quota"]。
-func (s *TraeOpsService) runUsageRefresh(ctx context.Context, account *Account) error {
+func (s *TraeOpsService) runUsageRefresh(ctx context.Context, account *Account) (string, error) {
 	_, err := storeTraeQuotaSnapshot(ctx, s.accountRepo, account)
-	return err
+	return "", err
 }
 
 // runCreditsMonitor 积分到期监控：刷新快照并对 7 天内到期的账号打
 // expiring_soon 标记 + 告警日志。
-func (s *TraeOpsService) runCreditsMonitor(ctx context.Context, account *Account) error {
+func (s *TraeOpsService) runCreditsMonitor(ctx context.Context, account *Account) (string, error) {
 	creds, client, err := s.traeClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	entitlements, err := trae.QueryEntitlements(ctx, client, creds.VariantOf(), creds.JWT, trae.DeviceIdentity{
 		DeviceID:     creds.DeviceID,
 		MarketUserID: creds.UID,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := writeTraeQuotaExtra(ctx, s.accountRepo, account, entitlements, map[string]any{
 		"expiring_soon": traeEntitlementsExpiring(entitlements),
 	}); err != nil {
-		return err
+		return "", err
 	}
 	if traeEntitlementsExpiring(entitlements) {
 		log.Printf("[TraeOps] account %d 积分临期告警：7 天内到期（expiring_soon=true）", account.ID)
+		return "积分临期：7 天内到期", nil
 	}
-	return nil
+	return "", nil
 }
 
 // traeEntitlementsExpiring 是否存在 7 天内到期且未过期的积分包。

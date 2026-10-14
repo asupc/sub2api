@@ -37,8 +37,10 @@ type PlatformOpsTask struct {
 	Hours []int
 	// Interval 是固定间隔触发周期（与 Hours 互斥，优先 Hours）；<=0 表示仅按 Hours。
 	Interval time.Duration
-	// RunOne 对单个账号执行任务；返回 error 记入 ops_state（LastErr / Streak）。
-	RunOne func(ctx context.Context, account *Account) error
+	// RunOne 对单个账号执行任务；返回 error 记入 ops_state（LastErr / Streak），
+	// 返回的 note 为本次执行的上游结论文本（成功时写入 ops_state 供前端展示，
+	// 如「活动领取成功 +100 Credits（…）」「今日已签到」；失败时忽略）。
+	RunOne func(ctx context.Context, account *Account) (string, error)
 	// IncludeDisabled 表示是否对非 active 账号执行（保号类任务为 true）。
 	IncludeDisabled bool
 }
@@ -101,6 +103,9 @@ type OpsStateEntry struct {
 	Retries int `json:"retries,omitempty"`
 	// NextRun 是下次应执行时刻（含退避顺延；零值表示按任务调度规则计算）。
 	NextRun time.Time `json:"next_run,omitempty"`
+	// Note 是最近一次成功执行的上游结论文本（到账/幂等跳过/未开放等原因），
+	// 供手动触发响应与任务面板展示；失败时清空。
+	Note string `json:"note,omitempty"`
 }
 
 // opsStateKey 是 extra 中运营状态的顶层键。
@@ -181,11 +186,12 @@ func RunPlatformOpsTask(ctx context.Context, repo opsStateRepo, task PlatformOps
 
 	now := time.Now()
 	entry := LoadOpsState(account, task.ID)
-	err := task.RunOne(ctx, account)
+	note, err := task.RunOne(ctx, account)
 
 	entry.LastRun = now
 	if err != nil {
 		entry.LastErr = err.Error()
+		entry.Note = ""
 		entry.Streak++
 		// 当日重试退避；跨日（上次成功/执行不在今天）重置计数。
 		if !sameLocalDay(entry.LastOK, now, platformOpsTimezone(account)) || entry.Retries == 0 {
@@ -201,6 +207,7 @@ func RunPlatformOpsTask(ctx context.Context, repo opsStateRepo, task PlatformOps
 	} else {
 		entry.LastOK = now
 		entry.LastErr = ""
+		entry.Note = strings.TrimSpace(note)
 		entry.Streak = 0
 		entry.Retries = 0
 		entry.NextRun = time.Time{}

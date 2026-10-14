@@ -54,7 +54,9 @@ func (h *PlatformOpsHandler) RunTask(c *gin.Context) {
 		response.Success(c, gin.H{"done": false, "error": err.Error()})
 		return
 	}
-	response.Success(c, gin.H{"done": true})
+	// 成功结论文本（到账/幂等跳过/未开放原因）：SaveOpsState 已同步内存 Extra，直接回读。
+	note := service.LoadOpsState(account, taskID).Note
+	response.Success(c, gin.H{"done": true, "note": note})
 }
 
 // AccountStates 返回账号全部运营任务的描述与最近状态。

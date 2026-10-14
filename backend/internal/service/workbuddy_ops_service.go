@@ -282,23 +282,23 @@ func (s *WorkbuddyOpsService) taskTimeout(taskID string) time.Duration {
 
 // runCheckin 每日签到（幂等：IsAlreadyCheckin 视为成功）；成功后刷新余额快照，
 // 顺带做 wb_no_credit 恢复判定（签到到账 → error 账号自动回 active）。
-func (s *WorkbuddyOpsService) runCheckin(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runCheckin(ctx context.Context, account *Account) (string, error) {
 	cred, skip, err := s.growthEligibleCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if skip {
-		return nil // 企业账号无个人成长体系，跳过
+		return "企业账号无个人成长体系，跳过", nil
 	}
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := client.DailyCheckin(ctx, cred); err != nil {
 		if workbuddy.IsAlreadyCheckin(err) {
-			return nil // 今日已签到，幂等成功
+			return "今日已签到", nil // 幂等成功
 		}
-		return fmt.Errorf("daily checkin: %w", err)
+		return "", fmt.Errorf("daily checkin: %w", err)
 	}
 	// 签到成功：刷新余额（失败不影响签到结果，只记日志）。
 	if snapshot, qerr := s.oauthService.QueryWorkbuddyQuota(ctx, account.ID); qerr != nil {
@@ -306,108 +306,108 @@ func (s *WorkbuddyOpsService) runCheckin(ctx context.Context, account *Account) 
 	} else if snapshot != nil {
 		log.Printf("[WorkbuddyOps] checkin ok account %d remain=%d", account.ID, snapshot.Remain)
 	}
-	return nil
+	return "签到成功", nil
 }
 
 // runTravel 猫猫旅行单趟巡检（领奖 / 派出 / 领养，最多一个动作）。
-func (s *WorkbuddyOpsService) runTravel(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runTravel(ctx context.Context, account *Account) (string, error) {
 	cred, skip, err := s.growthEligibleCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if skip {
-		return nil
+		return "", nil
 	}
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	msg, err := client.RunTravelRound(ctx, cred)
 	if err != nil {
-		return fmt.Errorf("travel round: %w", err)
+		return "", fmt.Errorf("travel round: %w", err)
 	}
 	log.Printf("[WorkbuddyOps] travel account %d: %s", account.ID, msg)
-	return nil
+	return msg, nil
 }
 
 // runActivity 对话活跃上报（一条 chat_request_send 点亮连登 + first_buddy 门槛）。
-func (s *WorkbuddyOpsService) runActivity(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runActivity(ctx context.Context, account *Account) (string, error) {
 	cred, skip, err := s.growthEligibleCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if skip {
-		return nil
+		return "", nil
 	}
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	conv := fmt.Sprintf("wb2api-ops-activity-%d", s.now().UnixMilli())
 	if err := client.ReportChatActivity(ctx, cred, conv, ""); err != nil {
-		return fmt.Errorf("report chat activity: %w", err)
+		return "", fmt.Errorf("report chat activity: %w", err)
 	}
-	return nil
+	return "", nil
 }
 
 // runKeepalive token 保活：RefreshToken 空跑并写回新凭据（企业账号同样适用）。
-func (s *WorkbuddyOpsService) runKeepalive(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runKeepalive(ctx context.Context, account *Account) (string, error) {
 	_, err := s.oauthService.RefreshAccountToken(ctx, account)
 	if err != nil {
-		return fmt.Errorf("keepalive refresh: %w", err)
+		return "", fmt.Errorf("keepalive refresh: %w", err)
 	}
-	return nil
+	return "", nil
 }
 
 // runBlackcat 夜猫子：仅在 23:00–08:00 计数窗口内补足差额对话，窗口外视为成功跳过。
-func (s *WorkbuddyOpsService) runBlackcat(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runBlackcat(ctx context.Context, account *Account) (string, error) {
 	cred, skip, err := s.growthEligibleCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if skip {
-		return nil
+		return "", nil
 	}
 	if !workbuddy.InNightWindow(s.now()) {
-		return nil
+		return "非夜窗（23:00–08:00），跳过", nil
 	}
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	need, err := client.BlackcatNeed(ctx, cred)
 	if err != nil {
-		return fmt.Errorf("blackcat need: %w", err)
+		return "", fmt.Errorf("blackcat need: %w", err)
 	}
 	if need <= 0 {
-		return nil
+		return "夜窗对话数已达标", nil
 	}
 	done, err := client.RunNightChats(ctx, cred, int(need))
 	if err != nil {
-		return fmt.Errorf("night chats completed=%d: %w", done, err)
+		return "", fmt.Errorf("night chats completed=%d: %w", done, err)
 	}
 	log.Printf("[WorkbuddyOps] blackcat account %d completed %d chats", account.ID, done)
-	return nil
+	return fmt.Sprintf("补足夜窗对话 %d 条", done), nil
 }
 
 // runGrowth 成长任务：批量接受未接受任务 + 内置动作闭环（chat_5 / first_buddy /
 // black_cat；black_cat 动作内部自带夜窗判定）。其余无内置动作的任务仅接受报名，
 // 达标领奖交给下一轮（判据事件未移植，见 pkg tasks.go 注释）。
-func (s *WorkbuddyOpsService) runGrowth(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runGrowth(ctx context.Context, account *Account) (string, error) {
 	cred, skip, err := s.growthEligibleCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if skip {
-		return nil
+		return "", nil
 	}
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	accepted, err := client.AcceptPendingGrowthTasks(ctx, cred)
 	if err != nil {
-		return fmt.Errorf("accept growth tasks: %w", err)
+		return "", fmt.Errorf("accept growth tasks: %w", err)
 	}
 	var results []string
 	for _, code := range []string{"chat_5", "first_buddy", "black_cat"} {
@@ -420,20 +420,21 @@ func (s *WorkbuddyOpsService) runGrowth(ctx context.Context, account *Account) e
 			results = append(results, fmt.Sprintf("%s: %s", code, res.Message))
 		}
 	}
-	log.Printf("[WorkbuddyOps] growth account %d accepted=%d %s", account.ID, accepted, strings.Join(results, "; "))
-	return nil
+	note := fmt.Sprintf("accepted=%d %s", accepted, strings.Join(results, "; "))
+	log.Printf("[WorkbuddyOps] growth account %d %s", account.ID, note)
+	return note, nil
 }
 
 // runBalance 余额刷新：查上游积分 → extra["wb_quota"] 快照 + wb_no_credit 恢复判定。
-func (s *WorkbuddyOpsService) runBalance(ctx context.Context, account *Account) error {
+func (s *WorkbuddyOpsService) runBalance(ctx context.Context, account *Account) (string, error) {
 	snapshot, err := s.oauthService.QueryWorkbuddyQuota(ctx, account.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if snapshot != nil {
 		log.Printf("[WorkbuddyOps] balance account %d remain=%d/%d", account.ID, snapshot.Remain, snapshot.Total)
 	}
-	return nil
+	return "", nil
 }
 
 // ---------------------------------------------------------------------------

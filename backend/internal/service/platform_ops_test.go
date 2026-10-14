@@ -78,16 +78,44 @@ func TestRunPlatformOpsTaskSuccess(t *testing.T) {
 	account := &Account{ID: 7, Platform: PlatformWorkbuddy, Extra: map[string]any{}}
 	ran := false
 	task := PlatformOpsTask{ID: "checkin", Platform: PlatformWorkbuddy, Name: "每日签到",
-		RunOne: func(ctx context.Context, a *Account) error { ran = true; return nil }}
+		RunOne: func(ctx context.Context, a *Account) (string, error) { ran = true; return "签到成功 +100", nil }}
 	require.NoError(t, RunPlatformOpsTask(context.Background(), repo, task, account))
 	require.True(t, ran)
 	entry := LoadOpsState(account, "checkin")
 	require.False(t, entry.LastRun.IsZero())
 	require.False(t, entry.LastOK.IsZero())
 	require.Empty(t, entry.LastErr)
+	require.Equal(t, "签到成功 +100", entry.Note)
 	require.Zero(t, entry.Streak)
 	require.True(t, entry.NextRun.IsZero())
 	require.Equal(t, int64(7), repo.lastID)
+}
+
+// 成功路径的 note 随后续失败清空。
+func TestRunPlatformOpsTaskNoteClearedOnFailure(t *testing.T) {
+	repo := &opsStateStubRepo{}
+	account := &Account{ID: 9, Platform: PlatformQoder, Extra: map[string]any{}}
+	ok := PlatformOpsTask{ID: "checkin", Platform: PlatformQoder,
+		RunOne: func(ctx context.Context, a *Account) (string, error) { return "已领", nil }}
+	require.NoError(t, RunPlatformOpsTask(context.Background(), repo, ok, account))
+	require.Equal(t, "已领", LoadOpsState(account, "checkin").Note)
+
+	bad := PlatformOpsTask{ID: "checkin", Platform: PlatformQoder,
+		RunOne: func(ctx context.Context, a *Account) (string, error) { return "残留", errors.New("boom") }}
+	require.Error(t, RunPlatformOpsTask(context.Background(), repo, bad, account))
+	require.Empty(t, LoadOpsState(account, "checkin").Note)
+}
+
+// note 经 extra JSON 往返持久化并可还原。
+func TestOpsStateNoteJSONRoundTrip(t *testing.T) {
+	account := &Account{ID: 10, Extra: map[string]any{}}
+	entry := OpsStateEntry{Note: "活动领取成功 +100 Credits（每日积分）"}
+	blob, err := json.Marshal(entry)
+	require.NoError(t, err)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(blob, &raw))
+	account.Extra[opsStateKey] = map[string]any{"checkin": raw}
+	require.Equal(t, entry, LoadOpsState(account, "checkin"))
 }
 
 // 失败路径：记录错误、递增 Streak/Retries、NextRun 落在第一档退避。
@@ -96,7 +124,7 @@ func TestRunPlatformOpsTaskFailureBackoff(t *testing.T) {
 	account := &Account{ID: 8, Platform: PlatformQoder, Extra: map[string]any{}}
 	boom := errors.New("upstream 500")
 	task := PlatformOpsTask{ID: "keepalive", Platform: PlatformQoder,
-		RunOne: func(ctx context.Context, a *Account) error { return boom }}
+		RunOne: func(ctx context.Context, a *Account) (string, error) { return "", boom }}
 	err := RunPlatformOpsTask(context.Background(), repo, task, account)
 	require.Same(t, boom, err)
 	entry := LoadOpsState(account, "keepalive")

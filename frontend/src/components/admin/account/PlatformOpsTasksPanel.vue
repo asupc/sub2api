@@ -331,7 +331,10 @@ const statusTitle = (task: PlatformOpsAccountTask): string => {
     const time = formatShortDate(task.state.last_run)
     return time ? `${time} ${task.state.last_err ?? ''}` : (task.state.last_err ?? '')
   }
-  if (task.state.last_ok) return `${t('admin.ops.tasks.ok')} ${task.state.last_ok}`
+  if (task.state.last_ok) {
+    const note = task.state.note ? `：${task.state.note}` : ''
+    return `${t('admin.ops.tasks.ok')} ${task.state.last_ok}${note}`
+  }
   return t('admin.ops.tasks.neverRun')
 }
 
@@ -341,7 +344,11 @@ const run = async (task: PlatformOpsAccountTask) => {
   try {
     const result = await adminAPI.platformOps.runAccountTask(props.account.id, task.id)
     if (result.done) {
-      appStore.showSuccess(t('admin.ops.tasks.runSuccess', { task: task.name }))
+      if (result.note) {
+        appStore.showSuccess(t('admin.ops.tasks.runSuccessNote', { task: task.name, note: result.note }))
+      } else {
+        appStore.showSuccess(t('admin.ops.tasks.runSuccess', { task: task.name }))
+      }
     } else {
       appStore.showError(t('admin.ops.tasks.runFailed', { task: task.name, error: result.error ?? '' }))
     }

@@ -168,9 +168,12 @@ func TestWorkbuddyOpsService_EnterpriseAccountsSkipGrowthTasks(t *testing.T) {
 
 	enterprise := wbWorkbuddyAccount()
 	enterprise.Credentials["enterprise_id"] = "ent-1"
-	require.NoError(t, svc.runCheckin(context.Background(), enterprise))
-	require.NoError(t, svc.runTravel(context.Background(), enterprise))
-	require.NoError(t, svc.runActivity(context.Background(), enterprise))
+	_, err := svc.runCheckin(context.Background(), enterprise)
+	require.NoError(t, err)
+	_, err = svc.runTravel(context.Background(), enterprise)
+	require.NoError(t, err)
+	_, err = svc.runActivity(context.Background(), enterprise)
+	require.NoError(t, err)
 	require.False(t, called, "企业账号 growth 族任务应在发请求前跳过")
 }
 

@@ -26,6 +26,7 @@ export interface PlatformOpsStateEntry {
   streak?: number
   retries?: number
   next_run?: string
+  note?: string
 }
 
 export interface PlatformOpsAccountTask extends PlatformOpsTaskInfo {
@@ -45,6 +46,7 @@ export interface PlatformOpsAccountTasksResponse {
 export interface PlatformOpsRunResult {
   done: boolean
   error?: string
+  note?: string
 }
 
 /** GET /admin/platform-ops/tasks — 全部平台的运营任务注册表 */
