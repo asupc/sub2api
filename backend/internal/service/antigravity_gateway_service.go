@@ -255,13 +255,20 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 	return true
 }
 
-// mapAntigravityModel 获取映射后的模型名
+// mapAntigravityModel 获取请求最终发往上游的模型名，与转发阶段
+// （getMappedModelForThinkingLevel）同口径：裸 Gemini 名先按 thinking 档位
+// 解析到账号已配置的变体，再走常规映射表。
 // 直接模型模式：未配置映射时模型名原样透传（放行与否由 IsModelSupported 判定）；
 // 配置了映射时完全依赖映射配置（账户映射，含通配符），映射不命中返回空字符串，
 // 调度时会过滤掉该账号
 func mapAntigravityModel(account *Account, requestedModel string) string {
 	if account == nil {
 		return ""
+	}
+	// 账号只配置了变体（如 gemini-3.8-flash-high）而没有裸名条目时，裸名请求
+	// 必须解析到变体才与转发阶段一致；否则该账号会被调度准入错误地过滤掉。
+	if mapped, ok := resolveGeminiThinkingVariantForLevel(account, requestedModel, ""); ok {
+		return mapped
 	}
 	requestedModel = strings.TrimPrefix(requestedModel, "models/")
 

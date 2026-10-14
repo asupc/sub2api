@@ -236,6 +236,25 @@ func TestAntigravityGatewayService_GetMappedModel_EdgeCases(t *testing.T) {
 	}
 }
 
+// 账号只配置了变体（无裸名条目）时，裸名请求必须解析到变体：调度准入
+// （isModelSupportedByAccount → mapAntigravityModel）与转发阶段同口径，
+// 否则该账号会被错误地过滤出候选集。
+func TestAntigravityGatewayService_MapBareNameToConfiguredVariant(t *testing.T) {
+	svc := &AntigravityGatewayService{}
+
+	account := &Account{
+		Platform: PlatformAntigravity,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gemini-3.8-flash-high": "gemini-3.8-flash-high",
+			},
+		},
+	}
+
+	require.Equal(t, "gemini-3.8-flash-high", svc.getMappedModel(account, "gemini-3.8-flash"))
+	require.Equal(t, "gemini-3.8-flash-high", mapAntigravityModel(account, "gemini-3.8-flash"))
+}
+
 func TestAntigravityGatewayService_IsModelSupported(t *testing.T) {
 	svc := &AntigravityGatewayService{}
 

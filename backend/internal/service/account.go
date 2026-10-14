@@ -676,28 +676,12 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 			result[k] = s
 		}
 	}
+	// Antigravity 非空映射不再注入默认条目：管理员配置的映射就是完整口径。
+	// 运行时补条目会让已删除的模型重新出现在 /v1/models（列表与调度准入都读
+	// 这份映射），与「直接模型模式空映射不注入」的语义也自相矛盾。
+	// 3.1 Pro 旧别名仅把已配置的条目改写到上游实际路由（不新增键）。
 	if len(result) > 0 {
 		if a.Platform == domain.PlatformAntigravity {
-			ensureAntigravityDefaultPassthroughs(result, []string{
-				"gemini-3-flash",
-				"gemini-3.1-pro-high",
-				"gemini-3.1-pro-low",
-				"gemini-3.6-flash",
-				"gemini-3.6-flash-high",
-				"gemini-3.6-flash-low",
-				"gemini-3.6-flash-medium",
-				"gemini-3.6-flash-tiered",
-				"gemini-3.7-flash",
-				"gemini-3.7-flash-high",
-				"gemini-3.7-flash-low",
-				"gemini-3.7-flash-medium",
-				"gemini-3.7-flash-tiered",
-				"gemini-3.8-flash",
-				"gemini-3.8-flash-high",
-				"gemini-3.8-flash-low",
-				"gemini-3.8-flash-medium",
-				"gemini-3.8-flash-tiered",
-			})
 			applyAntigravityGemini31ProAliases(result)
 		}
 		return result
@@ -744,27 +728,9 @@ func modelMappingSignature(rawMapping map[string]any) uint64 {
 	return h.Sum64()
 }
 
-func ensureAntigravityDefaultPassthrough(mapping map[string]string, model string) {
-	if mapping == nil || model == "" {
-		return
-	}
-	if _, exists := mapping[model]; exists {
-		return
-	}
-	for pattern := range mapping {
-		if matchWildcard(pattern, model) {
-			return
-		}
-	}
-	mapping[model] = model
-}
-
-func ensureAntigravityDefaultPassthroughs(mapping map[string]string, models []string) {
-	for _, model := range models {
-		ensureAntigravityDefaultPassthrough(mapping, model)
-	}
-}
-
+// applyAntigravityGemini31ProAliases 把已配置的 3.1 Pro 旧别名迁移到
+// 上游实际的 gemini-pro-agent 路由。只改写已存在的键，不补条目——补条目会
+// 让管理员删掉的模型重新出现在 /v1/models（列表与调度准入都读这份映射）。
 func applyAntigravityGemini31ProAliases(mapping map[string]string) {
 	target := strings.TrimSpace(mapping[domain.AntigravityGemini31ProAgentModel])
 	if target == "" {
@@ -798,26 +764,13 @@ func applyAntigravityGemini31ProAliases(mapping map[string]string) {
 
 	for _, alias := range aliases {
 		current, exists := mapping[alias.model]
-		if exists {
-			if _, legacy := alias.legacyTargets[current]; legacy {
-				mapping[alias.model] = target
-			}
+		if !exists {
 			continue
 		}
-		if mappingHasWildcardForModel(mapping, alias.model) {
-			continue
-		}
-		mapping[alias.model] = target
-	}
-}
-
-func mappingHasWildcardForModel(mapping map[string]string, model string) bool {
-	for pattern := range mapping {
-		if matchWildcard(pattern, model) {
-			return true
+		if _, legacy := alias.legacyTargets[current]; legacy {
+			mapping[alias.model] = target
 		}
 	}
-	return false
 }
 
 func normalizeRequestedModelForLookup(platform, requestedModel string) string {

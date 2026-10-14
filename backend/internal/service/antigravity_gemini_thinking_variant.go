@@ -158,10 +158,8 @@ func resolveGeminiThinkingVariantForLevel(account *Account, requestedModel strin
 	}
 	// 裸名本身已有"真正的"映射 → 尊重现有配置，不做推导。判定分两层：
 	//   1. 映射目标不是自己（如 gemini-3.8-flash → gemini-3.8-flash-tiered）：用户明确指定了目标；
-	//   2. 映射目标是自己（原样透传）：仅当这条是用户亲手写进 credentials.model_mapping 的才尊重。
-	//      resolveModelMapping 会给每个 Antigravity 账号自动补 gemini-3.x-flash 裸名自映射
-	//      （ensureAntigravityDefaultPassthroughs），而上游目录里并没有裸名模型，那条自映射
-	//      正是导致 404 的来源，不能算作用户意图。
+	//   2. 映射目标是自己（原样透传）：仅当这条是用户亲手写进 credentials.model_mapping 的才尊重；
+	//      通配符派生出的恒等命中不算用户为该裸名显式配置。
 	if mapped, matched := resolveRequestedModelInMapping(mapping, model); matched {
 		if strings.TrimSpace(mapped) != model || accountRawModelMappingHasKey(account, model) {
 			return "", false

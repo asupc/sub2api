@@ -74,11 +74,12 @@ func TestResolveGeminiThinkingVariant(t *testing.T) {
 		{"agy low (1000) -> -low", catalog, "gemini-3.8-flash", budget("1000"), "gemini-3.8-flash-low", true},
 		{"models/ prefix stripped", catalog, "models/gemini-3.8-flash", budget("1000"), "gemini-3.8-flash-low", true},
 		{"no thinkingConfig -> -high", catalog, "gemini-3.8-flash", []byte(`{"contents":[]}`), "gemini-3.8-flash-high", true},
-		// gemini-3.6/3.7/3.8-flash 的四个变体会被 resolveModelMapping 自动补齐，所以降级用一个不在默认表里的型号
+		// 降级用一个只配了 -high 的型号：请求 low 档时按 high→medium→low→tiered 顺序回落。
 		{"only -high exists: low request degrades to high", map[string]string{
 			"gemini-3.5-flash-high": "gemini-3.5-flash-high",
 		}, "gemini-3.5-flash", budget("1000"), "gemini-3.5-flash-high", true},
-		{"injected default variants are usable", catalog, "gemini-3.6-flash", budget("1000"), "gemini-3.6-flash-low", true},
+		// 只列出账号自己配置的变体：3.6-flash 只配了 -high，请求 low 档回落到它。
+		{"configured variant is picked when only one exists", catalog, "gemini-3.6-flash", budget("1000"), "gemini-3.6-flash-high", true},
 		{"already suffixed: untouched", catalog, "gemini-3.8-flash-low", budget("-1"), "", false},
 		{"bare name explicitly mapped: untouched", catalog, "gemini-2.5-flash", budget("-1"), "", false},
 		{"no variants in mapping: untouched", catalog, "gemini-9.9-flash", budget("-1"), "", false},
@@ -94,9 +95,8 @@ func TestResolveGeminiThinkingVariant(t *testing.T) {
 			"gemini-3.8-flash":      "gemini-3.8-flash",
 			"gemini-3.8-flash-high": "gemini-3.8-flash-high",
 		}, "gemini-3.8-flash", budget("1000"), "", false},
-		{"runtime-injected bare passthrough (not in credentials): still resolved", map[string]string{
-			// resolveModelMapping 会补 gemini-3.7-flash → gemini-3.7-flash 的默认透传，
-			// 但 credentials 里没有这条，应当继续推导变体。
+		{"bare name unmapped but variants configured: resolved", map[string]string{
+			// 裸名本身没有条目，但配置了它的 -medium 变体 → 按档位推导到该变体。
 			"gemini-3.7-flash-medium": "gemini-3.7-flash-medium",
 		}, "gemini-3.7-flash", budget("4000"), "gemini-3.7-flash-medium", true},
 		// 空 credentials 映射 → 直接模型模式，按静态目录兜底解析变体（静态清单同样登记带后缀的 3.8 flash）

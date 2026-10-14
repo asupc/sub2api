@@ -437,8 +437,9 @@ func TestAccountGetModelMapping_AntigravityNormalizesGemini31ProAliases(t *testi
 
 	mapping := account.GetModelMapping()
 
-	if got := mapping["gemini-3.1-pro"]; got != domain.AntigravityGemini31ProAgentModel {
-		t.Fatalf("expected gemini-3.1-pro to map to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
+	// 未配置的 gemini-3.1-pro 不再被补条目；已配置的旧别名仍改写到实际上游路由。
+	if _, exists := mapping["gemini-3.1-pro"]; exists {
+		t.Fatalf("did not expect gemini-3.1-pro to be injected, got %q", mapping["gemini-3.1-pro"])
 	}
 	if got := mapping["gemini-3.1-pro-high"]; got != domain.AntigravityGemini31ProAgentModel {
 		t.Fatalf("expected gemini-3.1-pro-high to map to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
@@ -470,8 +471,8 @@ func TestAccountGetModelMapping_AntigravityPreservesGemini31ProOverrides(t *test
 	if got := mapping["gemini-3.1-pro-preview"]; got != "custom-preview" {
 		t.Fatalf("expected gemini-3.1-pro-preview override to be preserved, got %q", got)
 	}
-	if got := mapping["gemini-3.1-pro"]; got != domain.AntigravityGemini31ProAgentModel {
-		t.Fatalf("expected gemini-3.1-pro alias to default to %q, got %q", domain.AntigravityGemini31ProAgentModel, got)
+	if _, exists := mapping["gemini-3.1-pro"]; exists {
+		t.Fatalf("did not expect gemini-3.1-pro to be injected, got %q", mapping["gemini-3.1-pro"])
 	}
 }
 
@@ -591,7 +592,9 @@ func TestAccountResolveMappedModel(t *testing.T) {
 	}
 }
 
-func TestAccountGetModelMapping_AntigravityEnsuresGeminiDefaultPassthroughs(t *testing.T) {
+// 非空映射的 Antigravity 账号不再被补默认透传条目：管理员删掉的模型不能因为
+// 运行时注入而重新出现在 /v1/models（列表与调度准入都读这份映射）。
+func TestAccountGetModelMapping_AntigravityDoesNotInjectDefaultPassthroughs(t *testing.T) {
 	account := &Account{
 		Platform: PlatformAntigravity,
 		Credentials: map[string]any{
@@ -602,14 +605,13 @@ func TestAccountGetModelMapping_AntigravityEnsuresGeminiDefaultPassthroughs(t *t
 	}
 
 	mapping := account.GetModelMapping()
-	if mapping["gemini-3-flash"] != "gemini-3-flash" {
-		t.Fatalf("expected gemini-3-flash passthrough to be auto-filled, got: %q", mapping["gemini-3-flash"])
+	if len(mapping) != 1 {
+		t.Fatalf("expected only the configured mapping entry, got %v", mapping)
 	}
-	if mapping["gemini-3.1-pro-high"] != "gemini-3.1-pro-high" {
-		t.Fatalf("expected gemini-3.1-pro-high passthrough to be auto-filled, got: %q", mapping["gemini-3.1-pro-high"])
-	}
-	if mapping["gemini-3.1-pro-low"] != "gemini-3.1-pro-low" {
-		t.Fatalf("expected gemini-3.1-pro-low passthrough to be auto-filled, got: %q", mapping["gemini-3.1-pro-low"])
+	for _, injected := range []string{"gemini-3-flash", "gemini-3.1-pro-high", "gemini-3.1-pro-low"} {
+		if _, exists := mapping[injected]; exists {
+			t.Fatalf("did not expect %q to be injected into a non-empty mapping", injected)
+		}
 	}
 }
 
