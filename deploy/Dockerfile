@@ -89,11 +89,16 @@ LABEL description="Sub2API - AI API Gateway Platform"
 LABEL org.opencontainers.image.source="https://github.com/Wei-Shaw/sub2api"
 
 # Install runtime dependencies
+# gcompat/libstdc++/libgcc：Qoder 原生风控身份组件 runtime-info 是 glibc ELF，
+# alpine(musl) 需兼容层才能执行（intl 签到依赖，见 docs/qoder-umid.md）。
 RUN apk add --no-cache \
     ca-certificates \
     tzdata \
     curl \
     su-exec \
+    gcompat \
+    libstdc++ \
+    libgcc \
     && rm -rf /var/cache/apk/*
 
 # Create non-root user
