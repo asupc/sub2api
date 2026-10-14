@@ -343,6 +343,13 @@ func PrepareChatBody(cred Credentials, body []byte, conversationID string) []byt
 	// （Claude Code system prompt 身份句 / x-anthropic-billing-header 归因行 /
 	// 裸 11128 反探测串等），见 sanitize.go。放在全部归一化之后、marshal 之前。
 	if msgs, ok := obj["messages"].([]any); ok {
+		// 工具配对清理（源项目 tool_pairing.go 同位，无条件启用）：剔除无配对的
+		// tool_call↔tool 结果与空 function.name 脏条目（上游 400 code 11133/11148
+		// 会顶死整条会话），见 tool_pairing.go。放在脱敏之前——被删条目无需再净化。
+		if cleaned, ch := CleanupOrphanToolCalls(msgs); ch {
+			obj["messages"] = cleaned
+			msgs = cleaned
+		}
 		sanitizeMessages(msgs)
 	}
 	out, err := json.Marshal(obj)
