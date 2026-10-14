@@ -328,7 +328,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	// （Authorization: Bearer COSY.*；签名与 body 绑定，故在 body 定稿后应用）。
 	// 放在账号级 header 覆写之前，运营覆写仍最后生效。
 	if account.Platform == PlatformQoder {
-		if qdErr := applyQoderChatTransport(upstreamReq, account, body); qdErr != nil {
+		if qdErr := applyQoderChatTransport(upstreamReq, account, body, qoderOrigBody); qdErr != nil {
 			return nil, fmt.Errorf("apply qoder chat transport: %w", qdErr)
 		}
 	}

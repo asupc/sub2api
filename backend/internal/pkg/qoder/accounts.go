@@ -180,31 +180,70 @@ func (c Credentials) OpenAPIHeaders() http.Header {
 }
 
 // DesktopHeaders 桌面端同款出站头（活动平台 /sash/... 必需，
-// qoder_accounts.py L1660-1710）。
+// qoder_accounts.py L1722-1772）。
 //
 // issue #10 实测（Linux/Docker）：全套**派生** cosy-machine* 六头会被服务端
-// 判定为非官方客户端、整条过滤 CLAIMABLE 活动；因此无原生桥真身份时
-// **一律不发**机器头，只发 UA / cosy-clienttype / cosy-version。服务器场景
-// 没有原生桥——仅当凭证里存有真实 machine_token（从官方客户端导入）时
-// 才发送全套六头。
+// 判定为非官方客户端、整条过滤 CLAIMABLE 活动；因此无真身份时**一律不发**
+// 机器头，只发 UA / cosy-clienttype / cosy-version。真身份两个来源，优先级：
+//  1. 原生身份桥（runtime-info 组件，见 umid.go）——机器级真值，intl 活动平台
+//     按它过滤活动列表；
+//  2. 凭证里导入的 machine_token（官方客户端凭据导入，type/code 派生兜底）。
 func (c Credentials) DesktopHeaders() http.Header {
+	h, _ := c.DesktopHeadersIdentity()
+	return h
+}
+
+// 机器头身份来源（Python MACHINE_IDENTITY_NATIVE / MACHINE_HEADERS_OMITTED
+// 口径 + sub2api 特有的凭证导入来源）。
+const (
+	MachineIdentityNative   = "runtime-info"
+	MachineIdentityImported = "imported"
+	MachineIdentityOmitted  = "omitted"
+)
+
+// DesktopHeadersIdentity 桌面端出站头 + 本次机器头身份来源（native 优先，
+// 凭证导入次之，无真身份不发机器头）。
+func (c Credentials) DesktopHeadersIdentity() (http.Header, string) {
 	h := c.OpenAPIHeaders()
 	h.Set("User-Agent", "Qoder")
 	h.Set("cosy-clienttype", DesktopClientType)
 	h.Set("cosy-version", DesktopClientVersion)
-	if c.MachineToken != "" {
-		machineID := c.MachineID
-		if machineID == "" {
-			machineID = DeriveID(c.UID, "machine")
-		}
-		h.Set("cosy-machineid", machineID)
-		h.Set("cosy-machinetoken", c.MachineToken)
-		h.Set("cosy-machinetype", DeriveMachineType(c.UID))
-		h.Set("cosy-machinecode", DeriveID(c.UID, "machinecode"))
-		h.Set("cosy-machineos", MachineOS)
-		h.Set("cosy-machinehostname", MachineHostname)
+	if ident := NativeMachineIdentity(c.NormalizedRealm(), c.UID); ident.valid() {
+		c.applyMachineHeaders(h, ident.MachineToken, ident.MachineType, ident.MachineCode)
+		return h, MachineIdentityNative
 	}
+	if c.MachineToken != "" {
+		c.applyMachineHeaders(h, c.MachineToken, DeriveMachineType(c.UID), DeriveID(c.UID, "machinecode"))
+		return h, MachineIdentityImported
+	}
+	return h, MachineIdentityOmitted
+}
+
+// desktopHeadersWithIdentity 用指定身份构造桌面端头（自愈重试用：新身份
+// 直接注入，不再过缓存）。
+func (c Credentials) desktopHeadersWithIdentity(ident MachineIdentity) http.Header {
+	h := c.OpenAPIHeaders()
+	h.Set("User-Agent", "Qoder")
+	h.Set("cosy-clienttype", DesktopClientType)
+	h.Set("cosy-version", DesktopClientVersion)
+	c.applyMachineHeaders(h, ident.MachineToken, ident.MachineType, ident.MachineCode)
 	return h
+}
+
+// applyMachineHeaders 注入全套 cosy-machine* 六头。machineid 按账号派生
+// （Python 同款：即便原生身份，machineid 也用 derive_id）；token/type/code
+// 用真值（原生身份或导入 token 时由调用方决定）。
+func (c Credentials) applyMachineHeaders(h http.Header, token, machineType, machineCode string) {
+	machineID := c.MachineID
+	if machineID == "" {
+		machineID = DeriveID(c.UID, "machine")
+	}
+	h.Set("cosy-machineid", machineID)
+	h.Set("cosy-machinetoken", token)
+	h.Set("cosy-machinetype", machineType)
+	h.Set("cosy-machinecode", machineCode)
+	h.Set("cosy-machineos", MachineOS)
+	h.Set("cosy-machinehostname", MachineHostname)
 }
 
 // ---------------------------------------------------------------------------
@@ -546,13 +585,24 @@ type CampaignsStatus struct {
 	Error          string         `json:"error,omitempty"`
 }
 
+// campaignsPayload 活动列表响应的业务字段子集。
+type campaignsPayload struct {
+	ShowCampaign bool             `json:"showCampaign"`
+	Claimable    bool             `json:"claimable"`
+	CampaignURL  string           `json:"campaignUrl"`
+	Campaigns    []map[string]any `json:"campaigns"`
+}
+
 // Campaigns 拉取官方活动平台列表（GET /sash/api/v1/me/campaigns，双区域通用）。
-// 桌面端头被拒（401/403）时回退普通头（_campaigns_get L1939-1965）。
+// 桌面端头被拒（401/403）时回退普通头（_campaigns_get L1939-1965）；原生身份
+// 被服务端拒绝（showCampaign=false）时清种子换新身份重试一次（campaigns
+// L2064-2072 的自愈：同种子下组件只会返回同一个被拒身份，不换种子自愈空转）。
 func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsStatus, error) {
 	cfg := Realm(creds.NormalizedRealm())
 	url := cfg.OpenAPI + PathCampaigns
+	headers, source := creds.DesktopHeadersIdentity()
 	var raw json.RawMessage
-	err := c.doJSON(ctx, http.MethodGet, url, nil, creds.DesktopHeaders(), &raw)
+	err := c.doJSON(ctx, http.MethodGet, url, nil, headers, &raw)
 	if err != nil {
 		// 桌面端头被拒（401/403）时回退普通头，至少保留"能不能看到"的信息
 		if se, ok := err.(*StatusError); ok && (se.Code == 401 || se.Code == 403) {
@@ -566,19 +616,27 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 		}
 		return &CampaignsStatus{Available: true, Error: err.Error()}, nil
 	}
-	st := &CampaignsStatus{MachineHeaders: "omitted"}
-	if creds.MachineToken != "" {
-		st.MachineHeaders = "native"
-	}
-	var q struct {
-		ShowCampaign bool             `json:"showCampaign"`
-		Claimable    bool             `json:"claimable"`
-		CampaignURL  string           `json:"campaignUrl"`
-		Campaigns    []map[string]any `json:"campaigns"`
-	}
+	var q campaignsPayload
 	if err := json.Unmarshal(raw, &q); err != nil {
 		return &CampaignsStatus{Available: true, Error: err.Error()}, nil
 	}
+	// 身份被拒自愈：原生身份 + showCampaign=false（服务端不认当前身份）→
+	// 清组件种子强制换新身份重试一次；重试仍不认则如实返回（等下次再试）。
+	if !q.ShowCampaign && source == MachineIdentityNative {
+		realm := creds.NormalizedRealm()
+		if ident := RefreshNativeIdentity(realm, creds.UID); ident.valid() {
+			var retryRaw json.RawMessage
+			if rerr := c.doJSON(ctx, http.MethodGet, url, nil,
+				creds.desktopHeadersWithIdentity(ident), &retryRaw); rerr == nil {
+				var rq campaignsPayload
+				if jerr := json.Unmarshal(retryRaw, &rq); jerr == nil && rq.ShowCampaign {
+					raw = retryRaw
+					q = rq
+				}
+			}
+		}
+	}
+	st := &CampaignsStatus{MachineHeaders: source}
 	st.OK = true
 	st.Available = true
 	st.ShowCampaign = q.ShowCampaign
@@ -810,4 +868,271 @@ func (c *Client) CampaignReward(ctx context.Context, creds Credentials, campaign
 		return nil, err
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// 活动平台签到编排（qoder_accounts.py campaign_checkin L2228-2390 的移植）。
+// ---------------------------------------------------------------------------
+
+// CampaignCheckinInput 活动平台签到编排入参。
+type CampaignCheckinInput struct {
+	Creds Credentials
+	// OnlyKinds 非 nil 时只领这些 benefit.kind（大写比较；checkin 任务传
+	// {"", "CREDITS"}，对齐 Python only_kinds=("", "CREDITS")）。
+	OnlyKinds []string
+	// BlockedUntil cid→到期 unix 秒（service 从 extra["qd_campaign_blocked"]
+	// 读入）；命中则不再 POST claim，直接计入 Blocked（同人去重冷却）。
+	BlockedUntil map[string]int64
+	// ClaimGap 相邻两次 claim 请求的间隔；<=0 用默认 1s（防风控）。
+	ClaimGap time.Duration
+}
+
+// CampaignCodeGrant 活动发放的兑换码（campaign_checkin codes 项）。
+type CampaignCodeGrant struct {
+	Campaign string `json:"campaign"`
+	Code     string `json:"code"`
+}
+
+// CampaignCheckinOutcome 活动平台签到编排结果。
+type CampaignCheckinOutcome struct {
+	// OK 列表查询成功且无未归类错误（对齐 Python ok: not errors）；
+	// false 时 service 侧走旧 sash Checkin 兜底。
+	OK bool `json:"ok"`
+	// Available 本区域存在活动平台（列表 404/405/410 → false）。
+	Available bool `json:"available"`
+	// Error 列表查询失败原因（触发兜底）。
+	Error string `json:"error,omitempty"`
+	// Claimed 真实新增领取的活动展示名（非 replayed）。
+	Claimed []string `json:"claimed,omitempty"`
+	// Already / Blocked / Pending / Locked / Views 分类结论（展示名）。
+	Already           []string            `json:"already,omitempty"`
+	Blocked           []string            `json:"blocked,omitempty"`
+	Pending           []string            `json:"pending,omitempty"`
+	Locked            []string            `json:"locked,omitempty"`
+	Views             []string            `json:"views,omitempty"`
+	Codes             []CampaignCodeGrant `json:"codes,omitempty"`
+	Errors            []string            `json:"errors,omitempty"`
+	Earned            int                 `json:"earned"` // 仅 claimed 且非 replayed 累计
+	Message           string              `json:"message"`
+	NextAvailableAt   int64               `json:"next_available_at,omitempty"`
+	NextAvailableNote string              `json:"next_available_note,omitempty"`
+	// BlockedMarks 本轮新触发的 cid→now+6h 冷却标记，由 service 落 extra。
+	BlockedMarks map[string]int64 `json:"blocked_marks,omitempty"`
+}
+
+// defaultCampaignClaimGap 相邻 claim 的最小间隔（Python CLAIM_GAP_DEFAULT）。
+const defaultCampaignClaimGap = time.Second
+
+// CampaignCheckin 活动平台签到：列活动 → 分类 → 逐个领取 CLAIMABLE 目标类条目。
+// 判定链逐条对齐 qoder_accounts.py L2262-2390；本函数不抛业务错误（列表/领取
+// 失败均归入 Outcome 字段），仅 ctx 取消等传输层异常经 error 返回。
+func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (*CampaignCheckinOutcome, error) {
+	out := &CampaignCheckinOutcome{BlockedMarks: map[string]int64{}}
+	st, err := c.Campaigns(ctx, in.Creds) // Go 无列表缓存，直接查最新（Python force=True 的对应物）
+	if err == nil && st != nil && st.OK {
+		out.Available = st.Available
+	} else {
+		out.Available = st != nil && st.Available
+		if err != nil {
+			out.Error = clip(err.Error(), 200)
+		} else if st != nil {
+			out.Error = clip(st.Error, 200)
+		} else {
+			out.Error = "campaigns: nil status"
+		}
+		out.NextAvailableAt, out.NextAvailableNote = nextCheckinWindow(time.Now())
+		return out, nil
+	}
+	gap := in.ClaimGap
+	if gap <= 0 {
+		gap = defaultCampaignClaimGap
+	}
+	now := time.Now()
+	out.NextAvailableAt, out.NextAvailableNote = nextCheckinWindow(now)
+	var codes []CampaignCodeGrant
+	// hasPending/hasLocked 仅用于 message 附注去重（对齐 Python "名额已发完/新人任务"关键词短路）。
+	var hasPending, hasLocked bool
+	for _, item := range st.Campaigns {
+		if in.OnlyKinds != nil && !kindAllowed(in.OnlyKinds, strings.ToUpper(strings.TrimSpace(item.BenefitKind))) {
+			continue // 只要"每日签到领积分"时跳过券类/其它奖励
+		}
+		cid := item.CampaignID
+		if cid == "" {
+			continue
+		}
+		label := campaignLabel(item)
+		status := strings.ToUpper(strings.TrimSpace(item.ClaimStatus))
+		actionType := strings.ToUpper(strings.TrimSpace(item.ActionType))
+		reason := strings.ToUpper(strings.TrimSpace(item.UnavailableReason))
+		amount := item.BenefitAmount
+		if status == "CLAIMED" {
+			// #25 遗留：归类先于 action_type 过滤——官方领取后会把 actionType
+			// 降级成 VIEW_DETAILS（intl 实测），先过滤会丢掉"已领"事实、误报
+			// "暂无可领取活动"。有奖励（amount>0）或仍是可领类 → already；
+			// 真·详情类（无奖励）才算 views。
+			if amount > 0 || actionType == "" || actionType == "CLAIM_BENEFIT" {
+				out.Already = append(out.Already, label)
+			} else {
+				out.Views = append(out.Views, label)
+			}
+			continue
+		}
+		// 以下只针对"还没领"的条目：详情类无奖励，不参与领取/归类。
+		if actionType != "" && actionType != "CLAIM_BENEFIT" {
+			continue
+		}
+		if status != "CLAIMABLE" {
+			// 不可领取但并非"与我们无关"：名额发完/成就未完成如实报出。
+			// （Go 的 AchievementCompleted 无法区分缺失与 false，只取
+			// unavailable_reason 主判定路径，漏分的条目与 Python 一样不领取。）
+			switch reason {
+			case "REDEMPTION_CODE_OUT_OF_STOCK":
+				out.Pending = append(out.Pending, label)
+				hasPending = true
+			case "ACHIEVEMENT_NOT_COMPLETED":
+				out.Locked = append(out.Locked, label)
+				hasLocked = true
+			}
+			continue
+		}
+		if exp, ok := in.BlockedUntil[cid]; ok && exp > now.Unix() {
+			out.Blocked = append(out.Blocked, label+"（冷却中）")
+			continue // 同人已领（冷却中）：不再重复 POST
+		}
+		res, cerr := c.ClaimCampaign(ctx, in.Creds, cid)
+		if cerr != nil {
+			errName := item.CampaignKey
+			if errName == "" {
+				errName = cid
+			}
+			out.Errors = append(out.Errors, fmt.Sprintf("%s: %s", errName, clip(cerr.Error(), 120)))
+		} else if res.Blocked {
+			out.BlockedMarks[cid] = time.Now().Add(6 * time.Hour).Unix()
+			out.Blocked = append(out.Blocked, label)
+		} else if res.FailureCode != "" {
+			// 已知失败码按"待重试/被锁"分类，不算失败。
+			if res.FailureCode == "REDEMPTION_CODE_OUT_OF_STOCK" {
+				out.Pending = append(out.Pending, label)
+				hasPending = true
+			} else {
+				out.Locked = append(out.Locked, label)
+				hasLocked = true
+			}
+		} else if res.Replayed {
+			out.Already = append(out.Already, label)
+			if res.RedemptionCode != "" {
+				codes = append(codes, CampaignCodeGrant{Campaign: label, Code: res.RedemptionCode})
+			}
+		} else if !res.OK {
+			// 未知结局（状态非 CLAIMED/GRANTED/SUCCESS 且无失败码）：如实报错，
+			// 不冒领（对齐 Python else → errors）。
+			msg := res.Status
+			if msg == "" {
+				msg = "unknown"
+			}
+			out.Errors = append(out.Errors, fmt.Sprintf("%s: status=%s", cid, msg))
+		} else {
+			earned := res.Amount
+			if earned <= 0 {
+				earned = item.BenefitAmount
+			}
+			if earned < 0 {
+				earned = 0
+			}
+			out.Claimed = append(out.Claimed, label)
+			out.Earned += earned
+			if res.RedemptionCode != "" {
+				codes = append(codes, CampaignCodeGrant{Campaign: label, Code: res.RedemptionCode})
+			}
+		}
+		// 每个 claim 请求之后统一等待一次（成功/被挡/失败都刚打过上游）。
+		if err := sleepCtx(ctx, gap); err != nil {
+			return out, err
+		}
+	}
+	out.Codes = codes
+	out.OK = len(out.Errors) == 0
+	out.Message = campaignCheckinMessage(out)
+	if hasPending && !strings.Contains(out.Message, "名额已发完") {
+		out.Message += "；另有活动今日名额已发完、次日 10:00 后重试：" + strings.Join(out.Pending, "、")
+	} else if hasLocked && !strings.Contains(out.Message, "新人任务") {
+		out.Message += "；另有活动需先完成新人任务：" + strings.Join(out.Locked, "、")
+	}
+	return out, nil
+}
+
+// campaignCheckinMessage 结论优先级链（Python L2345-2367）。
+func campaignCheckinMessage(out *CampaignCheckinOutcome) string {
+	switch {
+	case len(out.Claimed) > 0:
+		return fmt.Sprintf("活动领取成功 +%d Credits（%s）", out.Earned, strings.Join(out.Claimed, "、"))
+	case len(out.Blocked) > 0:
+		return "同人已领取：同一设备/身份下的其他账号本轮已领过（服务端按人去重）"
+	case len(out.Already) > 0:
+		return "今日活动奖励已领取（" + strings.Join(out.Already, "、") + "）"
+	case len(out.Pending) > 0:
+		return "名额已发完，次日 10:00 后可再领：" + strings.Join(out.Pending, "、")
+	case len(out.Locked) > 0:
+		return "需先在官方桌面端完成新人任务后可领：" + strings.Join(out.Locked, "、")
+	case len(out.Errors) > 0:
+		return "活动领取失败：" + clip(strings.Join(out.Errors, "; "), 200)
+	default:
+		return "当前账号暂无可领取的官方活动"
+	}
+}
+
+// campaignLabel 活动展示名：官方中文标题优先，其次 key，最后 id
+// （Python campaign_label L781-784）。
+func campaignLabel(item CampaignItem) string {
+	if t := strings.TrimSpace(item.TitleZh); t != "" {
+		return t
+	}
+	if t := strings.TrimSpace(item.CampaignKey); t != "" {
+		return t
+	}
+	return item.CampaignID
+}
+
+// kindAllowed OnlyKinds 匹配（大小写不敏感）。
+func kindAllowed(kinds []string, kind string) bool {
+	for _, k := range kinds {
+		if strings.EqualFold(strings.TrimSpace(k), kind) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkinWindowHourUTC8 官方每日名额刷新时刻（UTC+8 固定，不能按系统本地时区
+// 计算——容器常为 UTC，差 8 小时对不上官方说明；Python L844-848）。
+const checkinWindowHourUTC8 = 10
+
+var qoderUTC8 = time.FixedZone("UTC+8", 8*3600)
+
+// nextCheckinWindow 下一个「每日 10:00（UTC+8）」窗口 → (epoch 秒, 可读文本)。
+// 边界（Python next_checkin_window L851-867，issue #20 口径）：今天 10:00 之前
+// → 今天 10:00；到达/晚于 10:00（含刚领取成功）→ 明天 10:00（到达即算下一轮，
+// 不返回已经到点的时刻）。note 形如 "10-15 10:00（UTC+8）"。
+func nextCheckinWindow(now time.Time) (int64, string) {
+	n := now.In(qoderUTC8)
+	boundary := time.Date(n.Year(), n.Month(), n.Day(), checkinWindowHourUTC8, 0, 0, 0, qoderUTC8)
+	if !n.Before(boundary) {
+		boundary = boundary.Add(24 * time.Hour)
+	}
+	return boundary.Unix(), boundary.Format("01-02 15:04") + "（UTC+8）"
+}
+
+// sleepCtx 可中断等待。
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

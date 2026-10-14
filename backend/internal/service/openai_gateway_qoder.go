@@ -120,12 +120,17 @@ func applyQoderChatBody(account *Account, body []byte) ([]byte, error) {
 // 签名头族：删净默认头（Bearer Authorization / 白名单透传 / 默认 UA）后由
 // sess.Headers 统一设置（Authorization: Bearer COSY.*）。签名与 body 绑定，
 // 调用点必须位于 body 定稿之后。放在账号级 header 覆写之前，运营覆写仍最后生效。
-func applyQoderChatTransport(req *http.Request, account *Account, body []byte) error {
+//
+// origBody 为编码改写前的原始 OpenAI 请求体：据此解析模型名并带 realm 归一
+// 为上游 key，经 x-model-key / x-model-source 头下发（qoder_sign.py L26：
+// "x-model-key 决定上游模型路由"；Python open_upstream L4294 同款）。
+func applyQoderChatTransport(req *http.Request, account *Account, body []byte, origBody []byte) error {
 	sess, err := qoderCosySession(account)
 	if err != nil {
 		return err
 	}
-	headers := sess.Headers(string(body), req.URL.String(), "", true, "")
+	modelKey := qoder.ResolveUpstreamKey(qoderRequestModel(origBody), qoderAccountRealm(account))
+	headers := sess.Headers(string(body), req.URL.String(), modelKey, true, "")
 	for key := range req.Header {
 		req.Header.Del(key)
 	}
@@ -459,9 +464,9 @@ func classifyQoderUpstreamFailure(code int, detail string) int {
 }
 
 // qoderSingleAccountPool 报告 qoder 平台当前可调度账号是否不超过 1 个
-//（qoder_proxy.py open_upstream/_handle_envelope_account_cooldown 的
+// （qoder_proxy.py open_upstream/_handle_envelope_account_cooldown 的
 // single_account=(total <= 1) 口径）。真机验证：上游 429/排队是**模型级**状态
-//（同一账号上 kmodel 可用而 qmodel 排队），账号级冻结会把唯一账号的可用模型
+// （同一账号上 kmodel 可用而 qmodel 排队），账号级冻结会把唯一账号的可用模型
 // 一起拖死——单号池对此不接冷却，让每次请求真实撞上游拿真实结果。查询失败按
 // 多账号处理（保守：保留冷却语义）。
 func (s *OpenAIGatewayService) qoderSingleAccountPool(ctx context.Context) bool {
@@ -477,7 +482,7 @@ func (s *OpenAIGatewayService) qoderSingleAccountPool(ctx context.Context) bool 
 
 // qoderCoolAccountForLimit 429/10605 排队类的账号冷却：多账号池按信封
 // retryAfterSeconds 冷却（缺省 30s、封顶 SoftRateMax）后换号；单账号池跳过
-//（qoder_accounts.py note_error single_account：一次排队不能把唯一账号冷死）。
+// （qoder_accounts.py note_error single_account：一次排队不能把唯一账号冷死）。
 func (s *OpenAIGatewayService) qoderCoolAccountForLimit(ctx context.Context, account *Account, cooldown float64) {
 	if s == nil || s.accountRepo == nil || account == nil {
 		return

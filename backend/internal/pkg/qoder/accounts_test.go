@@ -392,3 +392,243 @@ func TestUserPlanAction(t *testing.T) {
 		t.Fatalf("plan: %q %v", plan, err)
 	}
 }
+
+// campaignTestCreds 活动链路测试用凭据。
+func campaignTestCreds() Credentials {
+	return Credentials{AccessToken: "dt-camp", Realm: "cn", UID: "u-camp"}
+}
+
+// campaignServer 按路径路由的 campaigns 假服务器（记录请求行，供断言）。
+func campaignServer(t *testing.T, routes map[string]http.HandlerFunc) (*Client, *[]string) {
+	t.Helper()
+	var calls []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if h, ok := routes[r.URL.Path]; ok {
+			h(w, r)
+			return
+		}
+		t.Errorf("unexpected path %s", r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	withRealm(t, "cn", srv.URL)
+	return NewClient(nil), &calls
+}
+
+func jsonHandler(body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+func TestCampaignCheckinClaimSuccess(t *testing.T) {
+	client, calls := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"claimable":true,"campaigns":[
+			{"campaignId":"c1","campaignKey":"daily100","actionType":"CLAIM_BENEFIT",
+				"claimStatus":"CLAIMABLE","benefit":{"kind":"CREDITS","amount":100},
+				"placements":[{"content":{"zh":{"title":"每日领取"}}}]}]}`),
+		"/sash/api/v1/me/campaigns/c1/claim": jsonHandler(
+			`{"status":"CLAIMED","replayed":false,"benefit":{"amount":100}}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"}, ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || len(out.Claimed) != 1 || out.Claimed[0] != "每日领取" || out.Earned != 100 {
+		t.Fatalf("outcome: %+v", out)
+	}
+	if out.Message != "活动领取成功 +100 Credits（每日领取）" {
+		t.Fatalf("message: %q", out.Message)
+	}
+	if out.NextAvailableNote == "" {
+		t.Fatal("next window must be given unconditionally")
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("calls: %v", *calls)
+	}
+}
+
+// TestCampaignCheckinClaimedWithViewDetails #25 回归：领取后 actionType 被降级
+// VIEW_DETAILS，CLAIMED + amount>0 必须归 already，不能误报"暂无活动"。
+func TestCampaignCheckinClaimedWithViewDetails(t *testing.T) {
+	client, _ := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"campaigns":[
+			{"campaignId":"c1","campaignKey":"daily100","actionType":"VIEW_DETAILS",
+				"claimStatus":"CLAIMED","benefit":{"kind":"CREDITS","amount":100},
+				"placements":[{"content":{"zh":{"title":"每日领取"}}}]}]}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"}, ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || len(out.Already) != 1 || out.Already[0] != "每日领取" || len(out.Views) != 0 {
+		t.Fatalf("outcome: %+v", out)
+	}
+	if out.Message != "今日活动奖励已领取（每日领取）" {
+		t.Fatalf("message: %q", out.Message)
+	}
+}
+
+// TestCampaignCheckinCooldown 冷却命中不再 POST claim（同人去重防风控）。
+func TestCampaignCheckinCooldown(t *testing.T) {
+	client, calls := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"campaigns":[
+			{"campaignId":"c1","campaignKey":"daily100","actionType":"CLAIM_BENEFIT",
+				"claimStatus":"CLAIMABLE","benefit":{"kind":"CREDITS","amount":100}}]}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"},
+		BlockedUntil: map[string]int64{"c1": time.Now().Unix() + 3600},
+		ClaimGap:     time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || len(out.Blocked) != 1 || len(out.Claimed) != 0 {
+		t.Fatalf("outcome: %+v", out)
+	}
+	if !strings.Contains(out.Message, "同人已领取") {
+		t.Fatalf("message: %q", out.Message)
+	}
+	for _, c := range *calls {
+		if strings.HasPrefix(c, "POST") {
+			t.Fatalf("cooldown must not claim: %v", *calls)
+		}
+	}
+}
+
+// TestCampaignCheckinBlockedMarks claim 返回 BLOCKED → 记 6h 冷却标记。
+func TestCampaignCheckinBlockedMarks(t *testing.T) {
+	client, _ := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"campaigns":[
+			{"campaignId":"c1","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE",
+				"benefit":{"kind":"CREDITS","amount":100}}]}`),
+		"/sash/api/v1/me/campaigns/c1/claim": jsonHandler(
+			`{"status":"BLOCKED","failureCode":"SAME_PERSON_ALREADY_CLAIMED"}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"}, ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exp := out.BlockedMarks["c1"]; exp < time.Now().Unix()+5*3600 {
+		t.Fatalf("blocked marks: %+v", out.BlockedMarks)
+	}
+}
+
+// TestCampaignCheckinPendingLocked 名额发完 → pending；成就未完成 → locked。
+func TestCampaignCheckinPendingLocked(t *testing.T) {
+	client, _ := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"campaigns":[
+			{"campaignId":"p1","campaignKey":"ka","actionType":"CLAIM_BENEFIT","claimStatus":"NOT_CLAIMABLE",
+				"unavailableReason":"REDEMPTION_CODE_OUT_OF_STOCK","benefit":{"kind":"CREDITS","amount":100}},
+			{"campaignId":"l1","campaignKey":"kb","actionType":"CLAIM_BENEFIT","claimStatus":"NOT_CLAIMABLE",
+				"unavailableReason":"ACHIEVEMENT_NOT_COMPLETED","requiredAchievementKey":"ach-1",
+				"benefit":{"kind":"CREDITS","amount":100}}]}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"}, ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || len(out.Pending) != 1 || out.Pending[0] != "ka" ||
+		len(out.Locked) != 1 || out.Locked[0] != "kb" {
+		t.Fatalf("outcome: %+v", out)
+	}
+	if !strings.Contains(out.Message, "名额已发完") || !strings.Contains(out.Message, "新人任务") {
+		t.Fatalf("message: %q", out.Message)
+	}
+}
+
+// TestCampaignCheckinUnavailable 区域无活动平台（404）→ OK=false（service 兜底）。
+func TestCampaignCheckinUnavailable(t *testing.T) {
+	client, _ := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.OK || out.Available || out.Error == "" {
+		t.Fatalf("outcome: %+v", out)
+	}
+}
+
+// TestCampaignCheckinOnlyKinds 券类（COUPON）不在 only_kinds → 完全跳过。
+func TestCampaignCheckinOnlyKinds(t *testing.T) {
+	client, calls := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"campaigns":[
+			{"campaignId":"v1","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE",
+				"benefit":{"kind":"COUPON","amount":1}},
+			{"campaignId":"c1","campaignKey":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE",
+				"benefit":{"kind":"credits","amount":100}}]}`),
+		"/sash/api/v1/me/campaigns/c1/claim": jsonHandler(`{"status":"CLAIMED","benefit":{"amount":100}}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"}, ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.OK || len(out.Claimed) != 1 || out.Earned != 100 {
+		t.Fatalf("outcome: %+v", out)
+	}
+	// 只对 CREDITS 条目 c1 发起领取；券类 v1 被 only_kinds 跳过（无对应 claim POST）。
+	if len(*calls) != 2 || (*calls)[1] != "POST /sash/api/v1/me/campaigns/c1/claim" {
+		t.Fatalf("coupon must be skipped: %v", *calls)
+	}
+}
+
+// TestCampaignCheckinReplayedCountsNotEarned 幂等回放计入 already，Earned 不增。
+func TestCampaignCheckinReplayedCountsNotEarned(t *testing.T) {
+	client, _ := campaignServer(t, map[string]http.HandlerFunc{
+		PathCampaigns: jsonHandler(`{"showCampaign":true,"campaigns":[
+			{"campaignId":"c1","campaignKey":"daily","actionType":"CLAIM_BENEFIT","claimStatus":"CLAIMABLE",
+				"benefit":{"kind":"CREDITS","amount":100}}]}`),
+		"/sash/api/v1/me/campaigns/c1/claim": jsonHandler(
+			`{"status":"CLAIMED","replayed":true,"benefit":{"amount":100}}`),
+	})
+	out, err := client.CampaignCheckin(context.Background(), CampaignCheckinInput{
+		Creds: campaignTestCreds(), OnlyKinds: []string{"", "CREDITS"}, ClaimGap: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Earned != 0 || len(out.Already) != 1 || len(out.Claimed) != 0 {
+		t.Fatalf("outcome: %+v", out)
+	}
+}
+
+func TestNextCheckinWindow(t *testing.T) {
+	loc := time.FixedZone("UTC+8", 8*3600)
+	before := time.Date(2026, 10, 14, 9, 59, 0, 0, loc)
+	at := time.Date(2026, 10, 14, 10, 0, 0, 0, loc)
+	after := time.Date(2026, 10, 14, 21, 30, 0, 0, loc)
+
+	ts, note := nextCheckinWindow(before)
+	if want := time.Date(2026, 10, 14, 10, 0, 0, 0, loc).Unix(); ts != want {
+		t.Fatalf("before 10:00 must give today: %d != %d", ts, want)
+	}
+	if note != "10-14 10:00（UTC+8）" {
+		t.Fatalf("note: %q", note)
+	}
+	// 到达即算下一轮（不返回已经到点的时刻）。
+	ts2, _ := nextCheckinWindow(at)
+	if want := time.Date(2026, 10, 15, 10, 0, 0, 0, loc).Unix(); ts2 != want {
+		t.Fatalf("at 10:00 must give tomorrow: %d != %d", ts2, want)
+	}
+	ts3, _ := nextCheckinWindow(after)
+	if want := time.Date(2026, 10, 15, 10, 0, 0, 0, loc).Unix(); ts3 != want {
+		t.Fatalf("after 10:00 must give tomorrow: %d != %d", ts3, want)
+	}
+}

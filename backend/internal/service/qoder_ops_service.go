@@ -9,17 +9,23 @@ package service
 //
 // 任务清单（时刻为账号时区，默认 Asia/Shanghai）：
 //
-//	checkin     每日签到    09,21  Checkin（幂等：已领/未开放按成功）+ 成功后刷新
-//	                            额度快照（解冻 qd_no_credit 罚停）
+//	checkin     每日签到    10,21  CampaignCheckin（活动平台优先，只领 CREDITS
+//	                            类；正常出口不兜底）→ 仅列表查询失败时兜底旧 sash
+//	                            Checkin；成功后刷新额度快照（解冻 qd_no_credit 罚停）
 //	pro_welfare Pro 福利包  09,21  eligibility → claim（无资格/已领按成功）
-//	campaigns   活动扫描    10     Campaigns 列表，仅 CLAIMABLE 条目领取（幂等）
+//	campaigns   活动扫描    10     Campaigns 列表，仅 CLAIMABLE 条目领取（幂等；
+//	                            排除 CREDITS 类——每日积分归 checkin 任务）
 //	keepalive   token 保活  22     RefreshAccountToken（PAT 账号经 personal_token
 //	                            重交换；IncludeDisabled 对 error 账号也要保活）
 //	balance     额度刷新    6h     QuotaUsage + UserPlan → extra["qd_quota"]（含
 //	                            qd_no_credit 恢复判定）
+//
+// checkin 的同人去重冷却（claim 返回 BLOCKED → cid 6h 不发 POST）持久化在
+// account.extra["qd_campaign_blocked"]（cid→到期 unix 秒）。
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -71,8 +77,8 @@ func (s *QoderOpsService) buildTasks() []PlatformOpsTask {
 			ID:              "checkin",
 			Platform:        PlatformQoder,
 			Name:            "每日签到",
-			Hours:           []int{9, 21},
-			IncludeDisabled: true, // 签到是积分恢复入口，qd_no_credit 罚停账号也要跑
+			Hours:           []int{10, 21}, // 名额 10:00（UTC+8）刷新，09:00 必早
+			IncludeDisabled: true,          // 签到是积分恢复入口，qd_no_credit 罚停账号也要跑
 			RunOne:          s.runCheckin,
 		},
 		{
@@ -221,87 +227,178 @@ func qoderOpsTaskDue(account *Account, task PlatformOpsTask, now time.Time) bool
 // 各任务动作。
 // ---------------------------------------------------------------------------
 
-// runCheckin 每日签到（幂等：已签 / 区域未开放 / 活动下线按成功）；成功后刷新
-// 额度快照，顺带做 qd_no_credit 恢复判定（签到到账 → error 账号自动回 active）。
-func (s *QoderOpsService) runCheckin(ctx context.Context, account *Account) error {
+// qoderCampaignBlockedKey 是 extra 中活动领取冷却的顶层键（cid→到期 unix 秒）。
+const qoderCampaignBlockedKey = "qd_campaign_blocked"
+
+// loadQoderCampaignBlocked 读取同人去重冷却表（extra 来自 JSONB，数值经
+// JSON 往返为 float64，统一转 map[string]int64）。
+func loadQoderCampaignBlocked(account *Account) map[string]int64 {
+	if account == nil || account.Extra == nil {
+		return nil
+	}
+	raw, ok := account.Extra[qoderCampaignBlockedKey]
+	if !ok {
+		return nil
+	}
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var out map[string]int64
+	if err := json.Unmarshal(blob, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// saveQoderCampaignBlocked 合并本轮新增冷却标记、丢弃过期项后写回 extra 并落库
+// （仿 SaveOpsState：JSON 往返 + UpdateExtra 浅合并 + 同步内存副本）。
+func (s *QoderOpsService) saveQoderCampaignBlocked(ctx context.Context, account *Account, marks map[string]int64) {
+	merged := loadQoderCampaignBlocked(account)
+	if merged == nil {
+		merged = map[string]int64{}
+	}
+	now := time.Now().Unix()
+	for cid, exp := range marks {
+		merged[cid] = exp
+	}
+	for cid, exp := range merged {
+		if exp <= now {
+			delete(merged, cid)
+		}
+	}
+	if account.Extra == nil {
+		account.Extra = map[string]any{}
+	}
+	account.Extra[qoderCampaignBlockedKey] = merged
+	if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{qoderCampaignBlockedKey: merged}); err != nil {
+		log.Printf("[QoderOps] save campaign blocked marks account %d failed: %v", account.ID, err)
+	}
+}
+
+// runCheckin 每日签到闭环（对齐 qoder_tasks.py run_checkin L693-804）：
+// 活动平台优先——CampaignCheckin 只领 CREDITS 类条目，OK=true（claimed/already/
+// blocked/暂无活动等任一正常出口）即返回，**不兜底**；仅列表查询失败（OK=false）
+// 才兜底旧 sash Checkin。成功后刷新额度快照，顺带做 qd_no_credit 恢复判定
+// （签到到账 → error 账号自动回 active）。结论文本经 note 透传前端。
+func (s *QoderOpsService) runCheckin(ctx context.Context, account *Account) (string, error) {
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	creds, err := qoderAccountCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
-	result, err := client.Checkin(ctx, creds)
-	if err != nil {
-		return fmt.Errorf("qoder checkin: %w", err)
+	note, err := s.checkinViaCampaigns(ctx, client, account, creds)
+	if err == nil {
+		s.refreshQuotaAfterCheckin(ctx, account, note)
+		return note, nil
+	}
+	// 兜底旧 sash 接口（仅活动平台列表查询失败时进入）。
+	result, cerr := client.Checkin(ctx, creds)
+	if cerr != nil {
+		return "", fmt.Errorf("qoder checkin: %w (campaigns: %v)", cerr, err)
 	}
 	if !result.OK {
-		return fmt.Errorf("qoder checkin failed: %s", result.Message)
+		return "", fmt.Errorf("qoder checkin failed: %s", result.Message)
 	}
-	// 签到成功（含幂等）：刷新额度（失败不影响签到结果，只记日志）。
+	s.refreshQuotaAfterCheckin(ctx, account, result.Message)
+	return result.Message, nil
+}
+
+// checkinViaCampaigns 活动平台签到主路径。返回 note；error 非 nil 表示列表
+// 查询失败（service 侧走旧 sash 兜底）。
+func (s *QoderOpsService) checkinViaCampaigns(ctx context.Context, client *qoder.Client, account *Account, creds qoder.Credentials) (string, error) {
+	camp, err := client.CampaignCheckin(ctx, qoder.CampaignCheckinInput{
+		Creds:        creds,
+		OnlyKinds:    []string{"", "CREDITS"}, // 只做每日签到领积分，不动券类（Python only_daily=True）
+		BlockedUntil: loadQoderCampaignBlocked(account),
+		ClaimGap:     time.Second,
+	})
+	if err != nil {
+		return "", err
+	}
+	if !camp.OK {
+		return "", fmt.Errorf("qoder campaigns unavailable: %s", camp.Error)
+	}
+	if len(camp.BlockedMarks) > 0 {
+		s.saveQoderCampaignBlocked(ctx, account, camp.BlockedMarks)
+	}
+	note := camp.Message
+	if camp.Earned == 0 && camp.NextAvailableNote != "" {
+		note += "；下次可领 " + camp.NextAvailableNote // Python 前端契约：没到账才渲染下次窗口
+	}
+	return note, nil
+}
+
+// refreshQuotaAfterCheckin 签到后刷新额度快照（失败不影响签到结果，只记日志）。
+func (s *QoderOpsService) refreshQuotaAfterCheckin(ctx context.Context, account *Account, note string) {
 	if snapshot, qerr := s.oauthService.QueryAccountQuota(ctx, account.ID); qerr != nil {
 		log.Printf("[QoderOps] checkin quota refresh account %d failed: %v", account.ID, qerr)
 	} else if snapshot != nil {
-		log.Printf("[QoderOps] checkin ok account %d: %s remain=%d", account.ID, result.Message, snapshot.Remain)
+		log.Printf("[QoderOps] checkin ok account %d: %s remain=%d", account.ID, note, snapshot.Remain)
 	}
-	return nil
 }
 
 // runProWelfare Pro 升级福利包：eligibility → claim。无资格 / 端点不存在 /
 // 已领取均按成功跳过（上游幂等语义）。
-func (s *QoderOpsService) runProWelfare(ctx context.Context, account *Account) error {
+func (s *QoderOpsService) runProWelfare(ctx context.Context, account *Account) (string, error) {
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	creds, err := qoderAccountCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	eligible, err := client.ProEligibility(ctx, creds)
 	if err != nil {
-		return fmt.Errorf("qoder pro eligibility: %w", err)
+		return "", fmt.Errorf("qoder pro eligibility: %w", err)
 	}
 	if !eligible {
-		return nil // 无资格 / 活动下线：幂等成功
+		return "Pro 升级包不可领取（已领或活动未开放）", nil // 幂等成功
 	}
 	result, err := client.ProClaim(ctx, creds)
 	if err != nil {
-		return fmt.Errorf("qoder pro claim: %w", err)
+		return "", fmt.Errorf("qoder pro claim: %w", err)
 	}
 	if !result.OK {
-		return fmt.Errorf("qoder pro claim failed: %s", result.Message)
+		return "", fmt.Errorf("qoder pro claim failed: %s", result.Message)
 	}
 	log.Printf("[QoderOps] pro welfare account %d: %s", account.ID, result.Message)
-	return nil
+	return result.Message, nil
 }
 
-// runCampaigns 活动扫描：拉取活动平台列表，仅对 CLAIMABLE 状态的条目领取
-// （幂等：已领回放 BLOCKED/同人去重等确定性结局记日志，不算任务失败）。
-func (s *QoderOpsService) runCampaigns(ctx context.Context, account *Account) error {
+// runCampaigns 活动扫描：拉取活动平台列表，仅对 CLAIMABLE 状态的**非 CREDITS**
+// 条目领取（兑换码/券/福利类；每日积分归 checkin 任务，两任务零重叠。幂等：
+// 已领回放 BLOCKED/同人去重等确定性结局记日志，不算任务失败）。
+func (s *QoderOpsService) runCampaigns(ctx context.Context, account *Account) (string, error) {
 	client, err := s.accountClient(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	creds, err := qoderAccountCredentials(account)
 	if err != nil {
-		return err
+		return "", err
 	}
 	status, err := client.Campaigns(ctx, creds)
 	if err != nil {
-		return fmt.Errorf("qoder campaigns: %w", err)
+		return "", fmt.Errorf("qoder campaigns: %w", err)
 	}
 	if !status.Available {
-		return nil // 本区域无活动平台：幂等成功
+		return "本区域无活动平台", nil // 幂等成功
 	}
 	if status.Error != "" {
-		return fmt.Errorf("qoder campaigns unavailable: %s", status.Error)
+		return "", fmt.Errorf("qoder campaigns unavailable: %s", status.Error)
 	}
 	var results []string
 	for _, campaign := range status.Campaigns {
 		if campaign.CampaignID == "" || !strings.EqualFold(strings.TrimSpace(campaign.ClaimStatus), "CLAIMABLE") {
 			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(campaign.BenefitKind), "CREDITS") {
+			continue // 每日积分归 checkin 任务，避免重复打上游
 		}
 		claim, cerr := client.ClaimCampaign(ctx, creds, campaign.CampaignID)
 		if cerr != nil {
@@ -310,33 +407,35 @@ func (s *QoderOpsService) runCampaigns(ctx context.Context, account *Account) er
 		}
 		results = append(results, fmt.Sprintf("%s: %s", campaign.CampaignID, claim.Message))
 	}
-	if len(results) > 0 {
-		log.Printf("[QoderOps] campaigns account %d: %s", account.ID, strings.Join(results, "; "))
+	note := strings.Join(results, "; ")
+	if note != "" {
+		log.Printf("[QoderOps] campaigns account %d: %s", account.ID, note)
+		return note, nil
 	}
-	return nil
+	return "无可领取的活动福利", nil
 }
 
 // runKeepalive token 保活：RefreshToken 空跑并写回新凭据（PAT 账号经
 // personal_token 重交换，同样适用）。
-func (s *QoderOpsService) runKeepalive(ctx context.Context, account *Account) error {
+func (s *QoderOpsService) runKeepalive(ctx context.Context, account *Account) (string, error) {
 	_, err := s.oauthService.RefreshAccountToken(ctx, account)
 	if err != nil {
-		return fmt.Errorf("qoder keepalive refresh: %w", err)
+		return "", fmt.Errorf("qoder keepalive refresh: %w", err)
 	}
-	return nil
+	return "", nil
 }
 
 // runBalance 额度刷新：QuotaUsage + UserPlan → extra["qd_quota"] 快照 +
 // qd_no_credit 恢复判定。
-func (s *QoderOpsService) runBalance(ctx context.Context, account *Account) error {
+func (s *QoderOpsService) runBalance(ctx context.Context, account *Account) (string, error) {
 	snapshot, err := s.oauthService.QueryAccountQuota(ctx, account.ID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if snapshot != nil {
 		log.Printf("[QoderOps] balance account %d remain=%d/%d plan=%s", account.ID, snapshot.Remain, snapshot.Total, snapshot.Plan)
 	}
-	return nil
+	return "", nil
 }
 
 // ---------------------------------------------------------------------------

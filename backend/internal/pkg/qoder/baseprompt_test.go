@@ -251,7 +251,7 @@ func TestStructuredToolHistoryGate(t *testing.T) {
 	noID := []any{
 		map[string]any{"role": "assistant", "content": "",
 			"tool_calls": []any{map[string]any{
-				"type": "function",
+				"type":     "function",
 				"function": map[string]any{"name": "terminal", "arguments": "{}"}}}},
 		map[string]any{"role": "tool", "tool_call_id": "call_1", "content": "x"},
 	}
@@ -422,6 +422,37 @@ func TestBuildAgentChatBodyImagesAndVisionParts(t *testing.T) {
 	}
 	if body["image_urls"] == nil {
 		t.Fatal("top-level image_urls must be set")
+	}
+}
+
+func TestBuildAgentChatBodyRealmMetadata(t *testing.T) {
+	sess := mustSession(t)
+	req := map[string]any{
+		"model":    "minimax-m3",
+		"messages": []any{map[string]any{"role": "user", "content": "q"}},
+	}
+	// intl：mmodel = MiniMax-M3 / is_vl=true（本区目录优先，不能落到 cn 的
+	// MiniMax-M2.7 / is_vl=false）。
+	encoded, err := BuildAgentChatBody(req, sess, "intl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc, _ := decodeBody(t, encoded)["model_config"].(map[string]any)
+	if mc["key"] != "mmodel" || mc["display_name"] != "MiniMax-M3" || mc["is_vl"] != true {
+		t.Fatalf("intl mmodel metadata: %+v", mc)
+	}
+	// cn：MiniMax-M2.7 请求名解析到同一 key，但元数据按 cn 快照（is_vl=false）。
+	reqCN := map[string]any{
+		"model":    "minimax-m2.7",
+		"messages": []any{map[string]any{"role": "user", "content": "q"}},
+	}
+	encoded, err = BuildAgentChatBody(reqCN, sess, "cn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mc, _ = decodeBody(t, encoded)["model_config"].(map[string]any)
+	if mc["key"] != "mmodel" || mc["display_name"] != "MiniMax-M2.7" || mc["is_vl"] != false {
+		t.Fatalf("cn mmodel metadata: %+v", mc)
 	}
 }
 

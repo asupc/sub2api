@@ -600,7 +600,7 @@ func StructuredToolHistoryEnabled(realm, model, modelKey string, messages []any)
 // backfillReasoningContent）判定，供调用方按同口径打观测日志。
 func StructuredToolHistoryEnabledForRequest(openAIReq map[string]any, realm string) bool {
 	model, _ := openAIReq["model"].(string)
-	modelKey := ResolveUpstreamKey(model, "")
+	modelKey := ResolveUpstreamKey(model, realm)
 	messages := normalizeRoles(anyList(openAIReq["messages"]))
 	messages = sanitizeMessages(messages)
 	messages = backfillReasoningContent(messages, model, modelKey)
@@ -728,14 +728,16 @@ const maxInputTokensDefault = 180000
 //   - business 会话卡片与 request/session id。
 //
 // session 提供身份（aliyun_user_type）；模型 key 由 openAIReq["model"]
-// 经 ResolveUpstreamKey 解析；realm 供结构化工具历史门控判断（cn/intl）。
+// 经 ResolveUpstreamKey 解析（带 realm，对齐 Python resolve_upstream_key(model,
+// realm=realm)——不带区域会丢跨区显示名校验）；realm 供结构化工具历史门控
+// 判断（cn/intl）与目录元数据查取。
 func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm string) (string, error) {
 	body, err := Baseprompt()
 	if err != nil {
 		return "", err
 	}
 	model, _ := openAIReq["model"].(string)
-	modelKey := ResolveUpstreamKey(model, "")
+	modelKey := ResolveUpstreamKey(model, realm)
 	if session == nil {
 		return "", fmt.Errorf("qoder: BuildAgentChatBody requires cosy session")
 	}
@@ -793,8 +795,10 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	}
 	body["aliyun_user_type"] = aliyunUserType
 
-	// model_config（目录元数据 + 动态 key）
-	catalogMeta := findCatalogEntry("", modelKey)
+	// model_config（目录元数据 + 动态 key）：先本区再双区（Python L3756-3765
+	// 先 models_for_realm(r) 再双区静态——双区同 key 元数据不同，如 mmodel
+	// intl=MiniMax-M3/is_vl=true、cn=MiniMax-M2.7/is_vl=false）。
+	catalogMeta := findCatalogEntry(realm, modelKey)
 	mc, _ := body["model_config"].(map[string]any)
 	if mc == nil {
 		mc = map[string]any{}

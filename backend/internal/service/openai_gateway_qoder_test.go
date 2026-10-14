@@ -292,7 +292,7 @@ func TestForwardAsRawChatCompletions_QoderStreamEnvelopeQueueFailover(t *testing
 }
 
 // TestForwardAsRawChatCompletions_QoderStreamQueueSinglePoolKeepsAccountHot 回归
-//（单号池）：429/10605 排队是**模型级**上游状态（真机验证：同一账号 kmodel 可用
+// （单号池）：429/10605 排队是**模型级**上游状态（真机验证：同一账号 kmodel 可用
 // 而 qmodel 排队），多轮 30s 账号级冻结会把唯一账号的可用模型一起拖死——表现为
 // "成功一次之后一直报错"。对齐 qoder_accounts.py note_error 的 single_account
 // 语义（一次排队不能把唯一账号冷死）：单号池排队/429 不 SetRateLimited，仅以
@@ -684,4 +684,25 @@ func TestMessagesFallback_QoderQueuedRejectNotAuthFailure(t *testing.T) {
 	require.ErrorAs(t, err, &foErr)
 	require.Empty(t, repo.errors, "排队不得罚号")
 	require.Len(t, repo.rateLimited, 1, "排队应冷却账号")
+}
+
+// x-model-key / x-model-source 头必须下发（qoder_sign.py L26：「x-model-key
+// 决定上游模型路由」；此前传空导致全部推理/测试请求都不带模型路由头）。
+func TestApplyQoderChatTransportModelKeyHeader(t *testing.T) {
+	t.Parallel()
+	account := qoderTestAccount()
+	req := httptest.NewRequest(http.MethodPost, "https://gateway.qoder.com.cn"+qoder.ChatPath, nil)
+	origBody := []byte(`{"model":"qwen3.8-max","messages":[{"role":"user","content":"hi"}]}`)
+	require.NoError(t, applyQoderChatTransport(req, account, []byte("encoded"), origBody))
+	require.Equal(t, "qmodel_38max", req.Header.Get("x-model-key"))
+	require.Equal(t, "system", req.Header.Get("x-model-source"))
+	require.True(t, strings.HasPrefix(req.Header.Get("Authorization"), "Bearer COSY."),
+		"authorization = %q", req.Header.Get("Authorization"))
+
+	// intl 账号 + 官方显示名（大小写不敏感别名）→ 同样解析为上游 key。
+	intlAccount := qoderTestAccount()
+	intlAccount.Credentials["realm"] = "intl"
+	req2 := httptest.NewRequest(http.MethodPost, "https://api1.qoder.sh"+qoder.ChatPath, nil)
+	require.NoError(t, applyQoderChatTransport(req2, intlAccount, []byte("encoded"), []byte(`{"model":"Auto"}`)))
+	require.Equal(t, "auto", req2.Header.Get("x-model-key"))
 }

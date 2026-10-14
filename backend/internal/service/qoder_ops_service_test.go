@@ -120,15 +120,24 @@ func withOpsState(account *Account, entry OpsStateEntry) *Account {
 	return account
 }
 
-// TestQoderOpsRunCheckin 签到全链路（假 openapi）：CLAIMED 状态判已签 → 幂等成功
-// → 刷新额度快照 → qd_no_credit 罚停账号自动恢复。
+// TestQoderOpsRunCheckin 签到闭环主路径（活动平台优先）：CLAIMABLE 的 CREDITS
+// 活动真实领取 +100 → note 写入 ops_state → 不碰旧 sash 接口 → 刷新额度快照 →
+// qd_no_credit 罚停账号自动恢复。
 func TestQoderOpsRunCheckin(t *testing.T) {
 	endpoints := newQoderTokenEndpoints()
 	defer endpoints.server.Close()
 	patchQoderRealm(t, "cn", endpoints.server.URL)
-	endpoints.handle("/sash/api/v1/me/daily-check-in/status", func(w http.ResponseWriter, _ *http.Request) {
+	endpoints.handle("/sash/api/v1/me/campaigns", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"CLAIMED","lastClaimedAt":` + strconv.FormatInt(time.Now().Unix(), 10) + `,"currentStreakDays":3}`))
+		_, _ = w.Write([]byte(`{"showCampaign":true,"claimable":true,"campaigns":[
+			{"campaignId":"c-1","campaignKey":"daily100","actionType":"CLAIM_BENEFIT",
+				"claimStatus":"CLAIMABLE","benefit":{"kind":"CREDITS","amount":100},
+				"placements":[{"content":{"zh":{"title":"每日领取"}}}]}
+		]}`))
+	})
+	endpoints.handle("/sash/api/v1/me/campaigns/c-1/claim", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"CLAIMED","replayed":false,"benefit":{"amount":100}}`))
 	})
 	endpoints.handle("/api/v2/quota/usage", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -149,6 +158,16 @@ func TestQoderOpsRunCheckin(t *testing.T) {
 
 	require.NoError(t, svc.RunAccountTask(context.Background(), account, "checkin"))
 
+	// 主路径只打活动平台，正常出口不兜底旧 sash（Python run_checkin 判定）。
+	paths := endpoints.called()
+	require.Contains(t, paths, "GET /sash/api/v1/me/campaigns")
+	require.Contains(t, paths, "POST /sash/api/v1/me/campaigns/c-1/claim")
+	for _, p := range paths {
+		require.NotContains(t, p, "daily-check-in")
+	}
+	// 结论文本写入 ops_state note。
+	require.Contains(t, LoadOpsState(account, "checkin").Note, "活动领取成功 +100 Credits")
+
 	// 额度快照已刷新（签到成功联动 balance）。
 	quota, ok := repo.extras[account.ID][qoderQuotaExtraKey].(QoderQuotaSnapshot)
 	require.True(t, ok)
@@ -159,8 +178,77 @@ func TestQoderOpsRunCheckin(t *testing.T) {
 	require.Equal(t, StatusActive, account.Status)
 }
 
-// TestQoderOpsRunCampaigns 活动扫描：仅 CLAIMABLE 条目发起领取，BLOCKED /
-// 已领取等确定性结局不算任务失败。
+// TestQoderOpsRunCheckinFallbackSash 活动平台列表不可用（404）→ 兜底旧 sash 接口。
+func TestQoderOpsRunCheckinFallbackSash(t *testing.T) {
+	endpoints := newQoderTokenEndpoints()
+	defer endpoints.server.Close()
+	patchQoderRealm(t, "cn", endpoints.server.URL)
+	endpoints.handle("/sash/api/v1/me/campaigns", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	endpoints.handle("/sash/api/v1/me/daily-check-in/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"CLAIMED","lastClaimedAt":` + strconv.FormatInt(time.Now().Unix(), 10) + `,"currentStreakDays":3}`))
+	})
+
+	repo := newQoderOAuthStubRepo()
+	svc := NewQoderOpsService(repo, NewQoderOAuthService(repo, nil), nil, 0)
+	defer svc.Stop()
+	account := qoderTestAccount()
+
+	require.NoError(t, svc.RunAccountTask(context.Background(), account, "checkin"))
+
+	paths := endpoints.called()
+	require.Contains(t, paths, "GET /sash/api/v1/me/campaigns")
+	require.Contains(t, paths, "GET /sash/api/v1/me/daily-check-in/status")
+	require.Equal(t, "今日已签到", LoadOpsState(account, "checkin").Note)
+}
+
+// TestQoderOpsRunCheckinBlockedCooldown 同人去重 BLOCKED → cid 6h 冷却落 extra，
+// 次轮不再 POST claim（防风控）。
+func TestQoderOpsRunCheckinBlockedCooldown(t *testing.T) {
+	endpoints := newQoderTokenEndpoints()
+	defer endpoints.server.Close()
+	patchQoderRealm(t, "cn", endpoints.server.URL)
+	endpoints.handle("/sash/api/v1/me/campaigns", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"showCampaign":true,"claimable":true,"campaigns":[
+			{"campaignId":"c-1","campaignKey":"daily100","actionType":"CLAIM_BENEFIT",
+				"claimStatus":"CLAIMABLE","benefit":{"kind":"CREDITS","amount":100}}
+		]}`))
+	})
+	endpoints.handle("/sash/api/v1/me/campaigns/c-1/claim", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"BLOCKED","failureCode":"SAME_PERSON_ALREADY_CLAIMED"}`))
+	})
+
+	repo := newQoderOAuthStubRepo()
+	svc := NewQoderOpsService(repo, NewQoderOAuthService(repo, nil), nil, 0)
+	defer svc.Stop()
+	account := qoderTestAccount()
+
+	require.NoError(t, svc.RunAccountTask(context.Background(), account, "checkin"))
+
+	// 冷却标记落 extra（cid→到期 unix 秒，now+6h）。
+	blocked, ok := account.Extra[qoderCampaignBlockedKey].(map[string]int64)
+	require.True(t, ok, "blocked marks: %v", account.Extra[qoderCampaignBlockedKey])
+	require.Greater(t, blocked["c-1"], time.Now().Unix()+5*3600)
+	require.Contains(t, LoadOpsState(account, "checkin").Note, "同人已领取")
+
+	require.NoError(t, svc.RunAccountTask(context.Background(), account, "checkin"))
+
+	// 次轮命中冷却：列表照查，claim 不再发。
+	claims := 0
+	for _, p := range endpoints.called() {
+		if p == "POST /sash/api/v1/me/campaigns/c-1/claim" {
+			claims++
+		}
+	}
+	require.Equal(t, 1, claims, "cooldown 内不应重复 claim")
+}
+
+// TestQoderOpsRunCampaigns 活动扫描：仅 CLAIMABLE 的**非 CREDITS** 条目发起领取
+// （每日积分归 checkin 任务），BLOCKED / 已领取等确定性结局不算任务失败。
 func TestQoderOpsRunCampaigns(t *testing.T) {
 	endpoints := newQoderTokenEndpoints()
 	defer endpoints.server.Close()
@@ -170,6 +258,7 @@ func TestQoderOpsRunCampaigns(t *testing.T) {
 		_, _ = w.Write([]byte(`{"showCampaign":true,"claimable":true,"campaigns":[
 			{"campaignId":"c-claimed","claimStatus":"CLAIMED"},
 			{"campaignId":"c-ready","claimStatus":"CLAIMABLE"},
+			{"campaignId":"c-credits","claimStatus":"CLAIMABLE","benefit":{"kind":"CREDITS","amount":100}},
 			{"campaignId":"c-disabled","claimStatus":"DISABLED"}
 		]}`))
 	})
@@ -184,7 +273,7 @@ func TestQoderOpsRunCampaigns(t *testing.T) {
 
 	require.NoError(t, svc.RunAccountTask(context.Background(), qoderTestAccount(), "campaigns"))
 
-	// 只领取了 CLAIMABLE 条目。
+	// 只领取了 CLAIMABLE 的非 CREDITS 条目（c-credits 归 checkin 任务）。
 	paths := endpoints.called()
 	require.Len(t, paths, 2)
 	require.Equal(t, "GET /sash/api/v1/me/campaigns", paths[0])
