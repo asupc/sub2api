@@ -717,6 +717,45 @@ func findCatalogEntry(realm, modelKey string) CatalogEntry {
 // maxInputTokensDefault 目录缺省上下文（build_qoder_body L3618）。
 const maxInputTokensDefault = 180000
 
+// anyOrDefault 值缺失（nil）时给默认值（Python `v or default` 的常规输入域
+// 语义——非 nil 原样保留，工具名/描述/参数只可能是 string/object/缺失）。
+func anyOrDefault(v, def any) any {
+	if v == nil {
+		return def
+	}
+	return v
+}
+
+// normalizeTools 把顶层 name 型的平铺 function 工具包成 Chat Completions
+// 嵌套 schema（对齐 qoder_proxy.py normalize_tools L2828）。/v1/responses
+// 桥与 custom 降级产物已是嵌套形态，但客户端直打 chat completions 仍可能
+// 带平铺工具（{"type":"function","name":...}），上游要求 tools[].function
+// 对象，否则 400 "'function' is a required property, expected an object -
+// 'tools.N'"。已嵌套的原样透传（幂等）；非对象条目按 Python 版语义丢弃。
+func normalizeTools(tools []any) []any {
+	norm := make([]any, 0, len(tools))
+	for _, t := range tools {
+		m, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		if hasKey(m, "name") && !hasKey(m, "function") && m["type"] == "function" {
+			fn := map[string]any{
+				"name":        anyOrDefault(m["name"], ""),
+				"description": anyOrDefault(m["description"], ""),
+				"parameters":  anyOrDefault(m["parameters"], map[string]any{}),
+			}
+			if strict, ok := m["strict"]; ok {
+				fn["strict"] = strict
+			}
+			norm = append(norm, map[string]any{"type": "function", "function": fn})
+			continue
+		}
+		norm = append(norm, t)
+	}
+	return norm
+}
+
 // BuildAgentChatBody 以官方 baseprompt.json 为骨架构造 agent_chat_generation
 // 上游请求体并返回 qoder_encode 后的出站 body（对齐 qoder_proxy.py
 // build_qoder_body L3537-3673 的覆写逻辑）：
@@ -724,7 +763,8 @@ const maxInputTokensDefault = 180000
 //   - messages：压平 + 脱敏 + DeepSeek reasoning 回填，覆写模板会话；
 //   - model_config / chat_context（高亮 prompt + 模型配置副本 + 图片）；
 //   - parameters：max_tokens 与归一化后的 reasoning_effort；
-//   - tools：客户端声明则透传，否则置空（不泄漏 Qoder 桌面端 agent 工具）；
+//   - tools：客户端声明则经 normalizeTools 包成嵌套 schema 后透传，否则
+//     置空（不泄漏 Qoder 桌面端 agent 工具）；
 //   - business 会话卡片与 request/session id。
 //
 // session 提供身份（aliyun_user_type）；模型 key 由 openAIReq["model"]
@@ -868,9 +908,12 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	}
 	body["parameters"] = params
 
-	// tools：客户端给了就用客户端的，否则置空
+	// tools：客户端给了就用客户端的，否则置空；平铺 function 工具在此
+	// 统一包成嵌套 schema——所有路径（chat / responses 桥 / anthropic 桥）
+	// 共用这处出站咽喉，客户端直打 chat completions 带平铺工具时上游不会
+	// 400（对齐 qoder_proxy.py PR #30 把 normalize_tools 移进 build_qoder_body）
 	if tools, ok := openAIReq["tools"].([]any); ok && len(tools) > 0 {
-		body["tools"] = tools
+		body["tools"] = normalizeTools(tools)
 	} else {
 		body["tools"] = []any{}
 	}

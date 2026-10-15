@@ -1,3 +1,5 @@
+//go:build unit
+
 package qoder
 
 // umid_test.go 二开新增：原生身份桥（umid.go）与 DesktopHeaders 真身份注入

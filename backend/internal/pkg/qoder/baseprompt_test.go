@@ -550,3 +550,84 @@ func TestShrinkToolResult(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildAgentChatBodyNormalizesFlatTools(t *testing.T) {
+	sess := mustSession(t)
+	req := map[string]any{
+		"model": "qwen3.8-max",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "查天气"},
+		},
+		"tools": []any{
+			// 平铺 function 工具（responses 风格顶层 name）→ 必须包成嵌套
+			map[string]any{
+				"type":        "function",
+				"name":        "get_weather",
+				"description": "查询城市天气",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"city": map[string]any{"type": "string"},
+					},
+				},
+				"strict": true,
+			},
+			// 已是嵌套形态 → 原样透传（幂等）
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":       "read_file",
+					"parameters": map[string]any{"type": "object"},
+				},
+			},
+			// 非对象条目 → 丢弃
+			"bogus",
+			// 带 name 缺 description/parameters 的平铺工具 → 补空串/空对象
+			map[string]any{"type": "function", "name": "bare"},
+		},
+	}
+	encoded, err := BuildAgentChatBody(req, sess, "")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	body := decodeBody(t, encoded)
+
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 3 {
+		t.Fatalf("tools len = %d（非对象条目应被丢弃）: %+v", len(tools), tools)
+	}
+
+	// ① 平铺 → 嵌套，strict 保留，description/parameters 原样
+	wrapped, _ := tools[0].(map[string]any)
+	fn, _ := wrapped["function"].(map[string]any)
+	if wrapped["type"] != "function" || fn == nil || fn["name"] != "get_weather" {
+		t.Fatalf("flat tool not wrapped: %+v", tools[0])
+	}
+	if fn["description"] != "查询城市天气" {
+		t.Fatalf("description lost: %+v", fn)
+	}
+	if fn["strict"] != true {
+		t.Fatalf("strict must carry over: %+v", fn)
+	}
+	params, _ := fn["parameters"].(map[string]any)
+	if params["type"] != "object" {
+		t.Fatalf("parameters lost: %+v", fn)
+	}
+
+	// ② 已嵌套 → 字段级原样
+	nested, _ := tools[1].(map[string]any)
+	nestedFn, _ := nested["function"].(map[string]any)
+	if nestedFn["name"] != "read_file" {
+		t.Fatalf("nested tool must pass through: %+v", tools[1])
+	}
+
+	// ③ 缺失字段补默认：description 空串、parameters 空对象
+	bare, _ := tools[2].(map[string]any)
+	bareFn, _ := bare["function"].(map[string]any)
+	if bareFn == nil || bareFn["name"] != "bare" || bareFn["description"] != "" {
+		t.Fatalf("bare flat tool must get defaults: %+v", tools[2])
+	}
+	if _, ok := bareFn["parameters"].(map[string]any); !ok || len(bareFn["parameters"].(map[string]any)) != 0 {
+		t.Fatalf("bare parameters must default to empty object: %+v", bareFn)
+	}
+}

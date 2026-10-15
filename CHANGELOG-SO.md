@@ -117,3 +117,9 @@
 - **10-15 账号测试模型列表与白名单对齐**：`GetAvailableModels`（`GET /admin/accounts/:id/models`，测试弹窗与定时测试面板共用）原先三分支忽略账号已配置的 `model_mapping`，下拉展示平台全集——可选中账号实际不服务的模型。修复：helper `storedModelWhitelistIDs`（读原始 `credentials.model_mapping`，跳过空键与 `*` 通配符；`GetModelMapping` 对 Grok/GoogleOne 注入默认映射故不可用），三平台 OAuth（`integratedPlatformTestModels`）、Claude OAuth/SetupToken、Gemini OAuth 含 GoogleOne 三分支统一「白名单非空 → 映射请求侧 keys；空 → 平台目录」；通配符映射视为无法枚举回落目录。其余分支横向核实本就对齐。合并：`account_handler.go` 小段插入。
 - **10-15 清理死代码 account/AccountTestModal**：`components/account/AccountTestModal.vue` 为 `components/admin/account/` 版本（AccountsView 实际使用）的旧副本，无视图引用，连同 spec 与 barrel 导出行删除。
 - **10-15 /admin/usage 分页启用快速跳页**：`Pagination` 组件内置跳页输入框（`showJump` 默认 false，上游无页面启用），主日志表与错误 tab（`OpsErrorLogTable` 内部分页）两处启用；`OpsErrorLogTable` 亦被 `/admin/ops` 复用，同步获得跳页。合并：模板单属性插入，三路合并可自动处理。
+
+### 2026-10-15 qoder 出站平铺工具嵌套归一化（porter 同步）
+
+- **修 qoder 平铺 function 工具出站 400**（移植 qoder2api-hub `2fc18d6` / PR #30）：客户端直打 `/v1/chat/completions` 带平铺工具（`{"type":"function","name":...}`）时 `BuildAgentChatBody` 原样透传，上游要求 `tools[].function` 对象而 400（`'function' is a required property, expected an object - 'tools.N'`）。修复：新增 `normalizeTools`（幂等，已嵌套原样透传、非对象条目丢弃、`strict` 保留、缺失 `description`/`parameters` 补默认），在 `BuildAgentChatBody` 的 tools 覆写处统一调用——所有路径共用这处出站咽喉，对齐 Python 侧把 `normalize_tools` 移进 `build_qoder_body`。responses/anthropic 桥产物本就是嵌套形态，不受影响。合并：纯二开文件。
+- 连带补 `pkg/qoder/umid_test.go` 缺失的 `//go:build unit` 标签（包内其余测试文件均有，缺它时无 tag 的 `go vet ./...` 编译不到 `oauth_test.go` 的 `withRealm`）。
+- **porter 评估未移植**：qoder `ac87c69` agent 一键配置器（改网关本机文件、loopback-only，与服务端多用户网关架构不符）；trae `7364861` 账号池恢复出口（平台账号状态本有管理端启用出口）、`20e9e90` no_credential 按因分档（`ErrNoAvailableAccounts` 已带 `summarizeSelectionFailureStats` 八维分档）、`f4db208` 流式日志 token 恒 0（usage 挂流末 chunk、平台流结束后记账，架构免疫）、`789ea7c`/`14e5c28`/`6d11182`/`358fabd`/`d655dc6`（测试/部署/桌面端路径/构建/会话指纹缓存，均不适用）。PORTER-BASE 首次入库并推进：qoder→`b850c7e`、trae→`7364861`；workbuddy 无增量。
