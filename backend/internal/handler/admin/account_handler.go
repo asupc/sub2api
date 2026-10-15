@@ -2856,6 +2856,33 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 		// Assist channel. Do not advertise newer 3.x or image models that the
 		// channel cannot serve.
 		if account.IsOAuth() {
+			// OAuth 账号也可能经批量编辑配置模型白名单/映射；配置后可测试的
+			// 集合就是映射请求侧 keys（与调度准入一致），否则按渠道回落默认目录。
+			if whitelist := storedModelWhitelistIDs(account); len(whitelist) > 0 {
+				defaults := geminicli.DefaultModels
+				if account.IsGeminiGoogleOne() {
+					defaults = geminicli.GoogleOneModels
+				}
+				defaultByID := make(map[string]geminicli.Model, len(defaults))
+				for _, dm := range defaults {
+					defaultByID[dm.ID] = dm
+				}
+				models := make([]geminicli.Model, 0, len(whitelist))
+				for _, id := range whitelist {
+					if dm, ok := defaultByID[id]; ok {
+						models = append(models, dm)
+						continue
+					}
+					models = append(models, geminicli.Model{
+						ID:          id,
+						Type:        "model",
+						DisplayName: id,
+						CreatedAt:   "",
+					})
+				}
+				response.Success(c, models)
+				return
+			}
 			if account.IsGeminiGoogleOne() {
 				response.Success(c, geminicli.GoogleOneModels)
 				return
@@ -2987,6 +3014,29 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 	// Handle Claude/Anthropic accounts
 	// For OAuth and Setup-Token accounts: return default models
 	if account.IsOAuth() {
+		// OAuth 账号也可能经批量编辑配置模型白名单/映射；配置后可测试的
+		// 集合就是映射请求侧 keys（与调度准入一致）。
+		if whitelist := storedModelWhitelistIDs(account); len(whitelist) > 0 {
+			defaultByID := make(map[string]claude.Model, len(claude.DefaultModels))
+			for _, dm := range claude.DefaultModels {
+				defaultByID[dm.ID] = dm
+			}
+			models := make([]claude.Model, 0, len(whitelist))
+			for _, id := range whitelist {
+				if dm, ok := defaultByID[id]; ok {
+					models = append(models, dm)
+					continue
+				}
+				models = append(models, claude.Model{
+					ID:          id,
+					Type:        "model",
+					DisplayName: id,
+					CreatedAt:   "",
+				})
+			}
+			response.Success(c, models)
+			return
+		}
 		response.Success(c, claude.DefaultModels)
 		return
 	}
@@ -3026,11 +3076,16 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 }
 
 // integratedPlatformTestModels 组装三平台（workbuddy/qoder/trae）测试弹窗的模型
-// 清单：live 目录优先（含各平台内建静态回落），accountTestService 缺失或仍失败时
-// 直接用平台静态兜底清单。返回 claude.Model 形状（测试弹窗按 id 消费）。
+// 清单：白名单/映射模式的账号可测试集合就是映射的请求侧 keys（调度准入
+// IsModelSupported 只放行这些模型，展示 live 全集会让管理员选中账号实际不服务
+// 的模型）；直接模式（空映射）才回落 live 目录（含各平台内建静态回落），
+// accountTestService 缺失或仍失败时用平台静态兜底清单。返回 claude.Model
+// 形状（测试弹窗按 id 消费）。
 func integratedPlatformTestModels(c *gin.Context, h *AccountHandler, account *service.Account) []claude.Model {
 	var ids []string
-	if h.accountTestService != nil {
+	if whitelist := storedModelWhitelistIDs(account); len(whitelist) > 0 {
+		ids = whitelist
+	} else if h.accountTestService != nil {
 		if fetched, err := h.accountTestService.FetchUpstreamSupportedModels(c.Request.Context(), account); err == nil {
 			ids = fetched
 		}
@@ -3043,6 +3098,39 @@ func integratedPlatformTestModels(c *gin.Context, h *AccountHandler, account *se
 		models = append(models, claude.Model{ID: id, Type: "model", DisplayName: id})
 	}
 	return models
+}
+
+// storedModelWhitelistIDs 返回账号存储的模型白名单/映射的请求侧 keys（跳过
+// 空键与通配符条目，无法枚举具体模型），排序返回；nil 表示未配置白名单
+// （= 允许所有模型）。读取原始 credentials 而非 GetModelMapping：后者会为
+// Grok / Gemini GoogleOne 注入默认映射，把管理员未配置的模型误报进测试下拉框。
+func storedModelWhitelistIDs(account *service.Account) []string {
+	if account == nil {
+		return nil
+	}
+	var ids []string
+	appendID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || strings.Contains(id, "*") {
+			return
+		}
+		ids = append(ids, id)
+	}
+	switch mapping := account.Credentials["model_mapping"].(type) {
+	case map[string]any:
+		for id := range mapping {
+			appendID(id)
+		}
+	case map[string]string:
+		for id := range mapping {
+			appendID(id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // antigravityHasStoredModelMapping 判断账号是否保存了非空 model_mapping

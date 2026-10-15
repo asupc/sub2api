@@ -136,6 +136,222 @@ func TestAccountHandlerGetAvailableModels_SourceIntegratedPlatformsUseOwnCatalog
 	}
 }
 
+func TestAccountHandlerGetAvailableModels_SourceIntegratedPlatformsWithMappingUseWhitelist(t *testing.T) {
+	// 白名单/映射模式（非空 model_mapping）时测试下拉框只能列出映射请求侧 keys；
+	// 调度准入 IsModelSupported 只放行这些模型，展示 live 全集会让管理员选中
+	// 账号实际不服务的模型。
+	cases := []struct {
+		platform string
+		realm    string
+	}{
+		{platform: service.PlatformWorkbuddy, realm: "cn"},
+		{platform: service.PlatformQoder, realm: "cn"},
+		{platform: service.PlatformTrae, realm: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.platform, func(t *testing.T) {
+			credentials := map[string]any{
+				"model_mapping": map[string]any{
+					"glm-5.3":      "glm-5.3",
+					"custom-alias": "upstream-model",
+					"glm-*":        "glm-*",
+					" ":            "blank-key",
+				},
+			}
+			if tc.realm != "" {
+				credentials["realm"] = tc.realm
+			}
+			svc := &availableModelsAdminService{
+				stubAdminService: newStubAdminService(),
+				account: service.Account{
+					ID:          61,
+					Name:        tc.platform + "-oauth-whitelist",
+					Platform:    tc.platform,
+					Type:        service.AccountTypeOAuth,
+					Status:      service.StatusActive,
+					Credentials: credentials,
+				},
+			}
+			router := setupAvailableModelsRouter(svc)
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/61/models", nil))
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			// 通配符与空键无法枚举具体模型，跳过；剩余 keys 即账号可测试集合。
+			require.ElementsMatch(t, []string{"glm-5.3", "custom-alias"}, collectModelIDs(t, rec))
+		})
+	}
+}
+
+func TestAccountHandlerGetAvailableModels_SourceIntegratedPlatformsWithWildcardOnlyMappingFallBackToCatalog(t *testing.T) {
+	// 仅通配符的映射 = 允许匹配的整族模型，无法枚举，回落平台静态兜底目录。
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       62,
+			Name:     "workbuddy-oauth-wildcard",
+			Platform: service.PlatformWorkbuddy,
+			Type:     service.AccountTypeOAuth,
+			Status:   service.StatusActive,
+			Credentials: map[string]any{
+				"realm":         "cn",
+				"model_mapping": map[string]any{"glm-*": "glm-*"},
+			},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/62/models", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	ids := collectModelIDs(t, rec)
+	require.NotEmpty(t, ids)
+	require.Contains(t, ids, "deepseek-v4.1-flash")
+	require.NotContains(t, ids, "glm-*")
+}
+
+func TestAccountHandlerGetAvailableModels_ClaudeOAuthUsesExplicitModelMapping(t *testing.T) {
+	// OAuth 账号经批量编辑配置白名单后，可测试集合就是映射 keys（官方模型
+	// 保留 DefaultModels 显示名，自定义别名用 id 兜底）。
+	svc := &availableModelsAdminService{
+		stubAdminService: newStubAdminService(),
+		account: service.Account{
+			ID:       63,
+			Name:     "claude-oauth-whitelist",
+			Platform: service.PlatformAnthropic,
+			Type:     service.AccountTypeOAuth,
+			Status:   service.StatusActive,
+			Credentials: map[string]any{
+				"model_mapping": map[string]any{
+					"claude-fable-5": "claude-fable-5",
+					"my-alias":       "claude-fable-5",
+				},
+			},
+		},
+	}
+	router := setupAvailableModelsRouter(svc)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/63/models", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp struct {
+		Data []struct {
+			ID          string `json:"id"`
+			DisplayName string `json:"display_name"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Data, 2)
+	byID := make(map[string]string, len(resp.Data))
+	for _, m := range resp.Data {
+		byID[m.ID] = m.DisplayName
+	}
+	require.Equal(t, "Claude Fable 5", byID["claude-fable-5"])
+	require.Equal(t, "my-alias", byID["my-alias"])
+}
+
+func TestAccountHandlerGetAvailableModels_GeminiOAuthUsesExplicitModelMapping(t *testing.T) {
+	cases := []struct {
+		name        string
+		oauthType   string
+		mapping     map[string]any
+		wantIDs     []string
+		wantDisplay map[string]string
+	}{
+		{
+			name:      "plain oauth",
+			oauthType: "",
+			mapping: map[string]any{
+				"gemini-2.5-pro": "gemini-2.5-pro",
+				"my-gem":         "gemini-2.5-pro",
+			},
+			wantIDs: []string{"gemini-2.5-pro", "my-gem"},
+			wantDisplay: map[string]string{
+				"gemini-2.5-pro": "Gemini 2.5 Pro",
+				"my-gem":         "my-gem",
+			},
+		},
+		{
+			name:      "google one oauth",
+			oauthType: "google_one",
+			mapping: map[string]any{
+				"gemini-2.5-flash": "gemini-2.5-flash",
+			},
+			wantIDs: []string{"gemini-2.5-flash"},
+			wantDisplay: map[string]string{
+				"gemini-2.5-flash": "Gemini 2.5 Flash",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			credentials := map[string]any{
+				"model_mapping": tc.mapping,
+			}
+			if tc.oauthType != "" {
+				credentials["oauth_type"] = tc.oauthType
+			}
+			svc := &availableModelsAdminService{
+				stubAdminService: newStubAdminService(),
+				account: service.Account{
+					ID:          64,
+					Name:        "gemini-oauth-whitelist",
+					Platform:    service.PlatformGemini,
+					Type:        service.AccountTypeOAuth,
+					Status:      service.StatusActive,
+					Credentials: credentials,
+				},
+			}
+			router := setupAvailableModelsRouter(svc)
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/admin/accounts/64/models", nil))
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			var resp struct {
+				Data []struct {
+					ID          string `json:"id"`
+					DisplayName string `json:"display_name"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			byID := make(map[string]string, len(resp.Data))
+			for _, m := range resp.Data {
+				byID[m.ID] = m.DisplayName
+			}
+			require.ElementsMatch(t, tc.wantIDs, keysOf(byID))
+			require.Equal(t, tc.wantDisplay, byID)
+		})
+	}
+}
+
+// collectModelIDs 解析 GetAvailableModels 响应中的模型 ID 列表。
+func collectModelIDs(t *testing.T, rec *httptest.ResponseRecorder) []string {
+	t.Helper()
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	ids := make([]string, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids
+}
+
+func keysOf(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func TestAccountHandlerGetAvailableModels_GrokUsesXAIModels(t *testing.T) {
 	svc := &availableModelsAdminService{
 		stubAdminService: newStubAdminService(),
