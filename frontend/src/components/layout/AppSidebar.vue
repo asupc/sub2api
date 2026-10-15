@@ -410,6 +410,10 @@ const PluginIcon = {
   render: () => h(Icon, { name: 'cube' })
 }
 
+const ModelManifestIcon = {
+  render: () => h(Icon, { name: 'cube' })
+}
+
 const CogIcon = {
   render: () =>
     h(
@@ -661,6 +665,8 @@ const adminNavItems = computed((): NavItem[] => {
         { path: '/admin/accounts', label: t('nav.accountsAll'), icon: null },
       ],
     },
+    // 模型清单与账号供给透视：账号管理的相邻入口，回答「某模型谁在供给/某账号提供哪些模型」
+    { path: '/admin/models', label: t('nav.modelManifest'), icon: ModelManifestIcon },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     {
       path: '/admin/security-audit',

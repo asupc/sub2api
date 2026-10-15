@@ -7,6 +7,7 @@ import dashboardAPI from './dashboard'
 import usersAPI from './users'
 import groupsAPI from './groups'
 import accountsAPI from './accounts'
+import modelsAPI from './models'
 import settingsAPI from './settings'
 import systemAPI from './system'
 import usageAPI from './usage'
@@ -39,6 +40,7 @@ export const adminAPI = {
   users: usersAPI,
   groups: groupsAPI,
   accounts: accountsAPI,
+  models: modelsAPI,
   settings: settingsAPI,
   system: systemAPI,
   usage: usageAPI,
@@ -69,6 +71,7 @@ export {
   usersAPI,
   groupsAPI,
   accountsAPI,
+  modelsAPI,
   settingsAPI,
   systemAPI,
   usageAPI,
@@ -98,6 +101,13 @@ export default adminAPI
 
 // Re-export types used by components
 export type { AuditLog, AuditLogQuery, AuditLogListResponse } from './audit'
+export type {
+  ModelManifestSummary,
+  ModelManifestAccountItem,
+  ModelManifestItem,
+  ModelManifestResponse,
+  ModelManifestParams
+} from './models'
 export type { BalanceHistoryItem } from './users'
 export type { ErrorPassthroughRule, CreateRuleRequest, UpdateRuleRequest } from './errorPassthrough'
 export type { BackupAgentHealth, DataManagementConfig } from './dataManagement'

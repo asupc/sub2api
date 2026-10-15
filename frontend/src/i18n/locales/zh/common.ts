@@ -179,6 +179,7 @@ export default {
     channels: '渠道管理',
     accounts: '账号管理',
     accountsAll: '全部账号',
+    modelManifest: '模型清单',
     plugins: '插件管理',
     ops: '运维监控',
     settings: '系统设置',
