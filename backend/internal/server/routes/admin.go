@@ -46,6 +46,9 @@ func RegisterAdminRoutes(
 		// 账号管理
 		registerAccountRoutes(admin, h, stepUpAuth)
 
+		// 模型清单与账号供给透视
+		registerModelManifestRoutes(admin, h)
+
 		// 公告管理
 		registerAnnouncementRoutes(admin, h)
 
@@ -448,6 +451,14 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/exchange-setup-token-code", h.Admin.OAuth.ExchangeSetupTokenCode)
 		accounts.POST("/cookie-auth", h.Admin.OAuth.CookieAuth)
 		accounts.POST("/setup-token-cookie-auth", h.Admin.OAuth.SetupTokenCookieAuth)
+	}
+}
+
+// registerModelManifestRoutes 注册模型清单与账号供给透视端点（纯内存聚合，无上游网络请求）
+func registerModelManifestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	models := admin.Group("/models")
+	{
+		models.GET("/manifest", h.Admin.ModelManifest.GetManifest)
 	}
 }
 
