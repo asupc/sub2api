@@ -142,6 +142,7 @@ docs/*
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/ACCOUNT_TABLE_UI_SPEC.md
+!docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md
 !docs/platform-ops-tasks.md
 !docs/legal/
 !docs/legal/*.md
