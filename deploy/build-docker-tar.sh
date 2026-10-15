@@ -9,6 +9,7 @@
 #   2. 注入 VERSION / COMMIT / DATE 构建参数（写入二进制版本信息）
 #   3. docker save 导出镜像 tar（GZIP=1 输出 .tar.gz），附 sha256 校验文件
 #   4. 组装离线部署包：镜像 tar + docker-compose.yml + .env.example + README.md
+#   5. 打包完成后将镜像 tar（含 .sha256）移动到工作区根目录（TAR_MOVE_DIR 可覆盖）
 #
 # 用法（Git Bash / Linux，任意目录执行）：
 #   bash deploy/build-docker-tar.sh                      # 全默认
@@ -169,6 +170,13 @@ cat > "${OUT_DIR}/README.md" <<EOF
       docker compose restart sub2api     # 重启应用
       docker compose down                # 停止（不加 -v 不删数据卷）
 EOF
+
+# ---------------------------------------------------------------------------
+# 5. 打包完成后将镜像 tar 移动到工作区根目录（TAR_MOVE_DIR 可覆盖）
+# ---------------------------------------------------------------------------
+TAR_MOVE_DIR="${TAR_MOVE_DIR:-$(cd "${REPO_ROOT}/.." && pwd)}"
+mv -f "${TAR_FILE}" "${TAR_FILE}.sha256" "${TAR_MOVE_DIR}/"
+echo "==> tar 已移动到: ${TAR_MOVE_DIR}/$(basename "${TAR_FILE}")"
 
 echo "==> 离线部署包已生成: ${OUT_DIR}"
 ls -lh "${OUT_DIR}"
