@@ -702,6 +702,29 @@ func ProvideScheduledTestRunnerService(
 	return svc
 }
 
+// ProvideModelBenchmarkService wires the benchmark application service.
+func ProvideModelBenchmarkService(
+	repo ModelBenchmarkRepository,
+	accounts AccountRepository,
+	upstream HTTPUpstream,
+	tlsProfiles *TLSFingerprintProfileService,
+	billing *BillingService,
+	cfg *config.Config,
+) *ModelBenchmarkService {
+	return NewModelBenchmarkService(repo, accounts, NewModelBenchmarkExecutor(accounts, upstream, tlsProfiles, billing, cfg))
+}
+
+// ProvideModelBenchmarkRunnerService creates and starts the independent benchmark runner.
+func ProvideModelBenchmarkRunnerService(
+	repo ModelBenchmarkRepository,
+	benchmarkService *ModelBenchmarkService,
+	cfg *config.Config,
+) *ModelBenchmarkRunnerService {
+	svc := NewModelBenchmarkRunnerService(repo, benchmarkService, cfg)
+	svc.Start()
+	return svc
+}
+
 // ProvideOpsScheduledReportService creates and starts OpsScheduledReportService.
 func ProvideOpsScheduledReportService(
 	opsService *OpsService,
@@ -1007,6 +1030,8 @@ var ProviderSet = wire.NewSet(
 	ProvideIdempotencyCleanupService,
 	ProvideScheduledTestService,
 	ProvideScheduledTestRunnerService,
+	ProvideModelBenchmarkService,
+	ProvideModelBenchmarkRunnerService,
 	NewGroupCapacityService,
 	NewChannelService,
 	wire.Bind(new(ChannelCacheInvalidator), new(*ChannelService)),

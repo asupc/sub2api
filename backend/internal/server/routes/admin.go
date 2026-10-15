@@ -127,6 +127,9 @@ func RegisterAdminRoutes(
 		// 定时测试计划
 		registerScheduledTestRoutes(admin, h)
 
+		// 模型能力测评
+		registerModelBenchmarkRoutes(admin, h)
+
 		// 渠道管理
 		registerChannelRoutes(admin, h)
 
@@ -808,6 +811,25 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	}
 	// Nested under accounts
 	admin.GET("/accounts/:id/scheduled-test-plans", h.Admin.ScheduledTest.ListByAccount)
+}
+
+func registerModelBenchmarkRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	benchmark := admin.Group("/model-benchmarks")
+	{
+		benchmark.GET("/suites", h.Admin.ModelBenchmark.ListSuites)
+		benchmark.GET("/targets", h.Admin.ModelBenchmark.ListTargets)
+		benchmark.GET("/plans", h.Admin.ModelBenchmark.ListPlans)
+		benchmark.POST("/plans", h.Admin.ModelBenchmark.CreatePlan)
+		benchmark.GET("/plans/:id", h.Admin.ModelBenchmark.GetPlan)
+		benchmark.PUT("/plans/:id", h.Admin.ModelBenchmark.UpdatePlan)
+		benchmark.DELETE("/plans/:id", h.Admin.ModelBenchmark.DeletePlan)
+		benchmark.POST("/plans/:id/run", h.Admin.ModelBenchmark.QueueRun)
+		benchmark.GET("/runs", h.Admin.ModelBenchmark.ListRuns)
+		benchmark.GET("/runs/:id", h.Admin.ModelBenchmark.GetRun)
+		benchmark.GET("/runs/:id/items", h.Admin.ModelBenchmark.ListRunItems)
+		benchmark.GET("/history", h.Admin.ModelBenchmark.ListHistory)
+		benchmark.GET("/rankings", h.Admin.ModelBenchmark.ListRankings)
+	}
 }
 
 func registerErrorPassthroughRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
