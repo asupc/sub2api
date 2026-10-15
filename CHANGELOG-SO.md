@@ -118,8 +118,23 @@
 - **10-15 清理死代码 account/AccountTestModal**：`components/account/AccountTestModal.vue` 为 `components/admin/account/` 版本（AccountsView 实际使用）的旧副本，无视图引用，连同 spec 与 barrel 导出行删除。
 - **10-15 /admin/usage 分页启用快速跳页**：`Pagination` 组件内置跳页输入框（`showJump` 默认 false，上游无页面启用），主日志表与错误 tab（`OpsErrorLogTable` 内部分页）两处启用；`OpsErrorLogTable` 亦被 `/admin/ops` 复用，同步获得跳页。合并：模板单属性插入，三路合并可自动处理。
 
+### 2026-10-15 模型能力测评方案与 UI 原型
+
+- 新增模型能力测评实施计划：高难度 `hard-v1` 题库（48 题 / D3-D5）、程序自动评分、Token/耗时/成本指标、效率分与综合评级、历史曲线和定时执行设计。文件：`docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md`、`openspec/changes/add-model-capability-benchmark/`。
+- 新增纯静态可视化原型：模型排行、能力拆解、历史曲线、题库家族、计划表单和 Run 详情。文件：`mockups/model-capability-benchmark-preview.html`。
+- 本条仅为方案与原型，不包含后端/前端功能实现；不影响与上游合并的运行时代码。
+
 ### 2026-10-15 qoder 出站平铺工具嵌套归一化（porter 同步）
 
 - **修 qoder 平铺 function 工具出站 400**（移植 qoder2api-hub `2fc18d6` / PR #30）：客户端直打 `/v1/chat/completions` 带平铺工具（`{"type":"function","name":...}`）时 `BuildAgentChatBody` 原样透传，上游要求 `tools[].function` 对象而 400（`'function' is a required property, expected an object - 'tools.N'`）。修复：新增 `normalizeTools`（幂等，已嵌套原样透传、非对象条目丢弃、`strict` 保留、缺失 `description`/`parameters` 补默认），在 `BuildAgentChatBody` 的 tools 覆写处统一调用——所有路径共用这处出站咽喉，对齐 Python 侧把 `normalize_tools` 移进 `build_qoder_body`。responses/anthropic 桥产物本就是嵌套形态，不受影响。合并：纯二开文件。
 - 连带补 `pkg/qoder/umid_test.go` 缺失的 `//go:build unit` 标签（包内其余测试文件均有，缺它时无 tag 的 `go vet ./...` 编译不到 `oauth_test.go` 的 `withRealm`）。
 - **porter 评估未移植**：qoder `ac87c69` agent 一键配置器（改网关本机文件、loopback-only，与服务端多用户网关架构不符）；trae `7364861` 账号池恢复出口（平台账号状态本有管理端启用出口）、`20e9e90` no_credential 按因分档（`ErrNoAvailableAccounts` 已带 `summarizeSelectionFailureStats` 八维分档）、`f4db208` 流式日志 token 恒 0（usage 挂流末 chunk、平台流结束后记账，架构免疫）、`789ea7c`/`14e5c28`/`6d11182`/`358fabd`/`d655dc6`（测试/部署/桌面端路径/构建/会话指纹缓存，均不适用）。PORTER-BASE 首次入库并推进：qoder→`b850c7e`、trae→`7364861`；workbuddy 无增量。
+
+### 2026-10-15 模型能力测评 MVP
+
+- 新增高难度模型能力测评 `hard-v1`（24 题族 × 2 动态实例 = 48 题，D3-D5），程序自动判定数学 / 算法 / 逻辑 / 代码 / 规划 / 指令能力，输出能力分、分类分、可见输出 Token 效率、耗时效率、综合评级与逐题证据；上游失败不计为答错。
+- 新增定时与手动排队执行：计划默认停用，全局并发 1，单计划串行、单题超时、PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取、running/claim 租约恢复与 panic 释放。
+- 新增 Token / 推理 / 缓存 / 总 Token、耗时、usage 覆盖、估算成本与历史曲线持久化；usage 缺失显式 `missing`，不虚构效率分。
+- 新增迁移 `243_so_model_capability_benchmark.sql`、Repository、Service、Executor、Runner、Admin API `/admin/model-benchmarks/*` 与前端 `/admin/model-benchmarks` 控制台（指标卡、排行、能力拆解、多指标历史曲线、计划管理、Run 详情）。Phase 1 仅支持 openai / Kimi / Zhipu / DeepSeek / MiniMax / OpenCode / Command Code / Cline 的 Chat Completions API Key 账号，其他目标服务端拒绝。
+- 验证：后端专项单测、repository integration、`go build ./...` 通过；前端 vitest 286/2122、typecheck、lint、build 通过。全量 backend unit 存在 2 个可复现既有失败，integration 有 1 个复跑通过的历史波动，lint 工具 0 issues 但 typechecking context 退出 1；明细见 `openspec/changes/add-model-capability-benchmark/implementation-evidence.md`。
+- 合并：新增文件为主；`wire*.go`、`handler.go`、`routes/admin.go`、`AppSidebar.vue`、`router/index.ts`、admin API/i18n barrel 需手工合并。
