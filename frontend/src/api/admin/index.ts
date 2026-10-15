@@ -8,6 +8,7 @@ import usersAPI from './users'
 import groupsAPI from './groups'
 import accountsAPI from './accounts'
 import modelsAPI from './models'
+import modelBenchmarksAPI from './modelBenchmarks'
 import settingsAPI from './settings'
 import systemAPI from './system'
 import usageAPI from './usage'
@@ -41,6 +42,7 @@ export const adminAPI = {
   groups: groupsAPI,
   accounts: accountsAPI,
   models: modelsAPI,
+  modelBenchmarks: modelBenchmarksAPI,
   settings: settingsAPI,
   system: systemAPI,
   usage: usageAPI,
@@ -72,6 +74,7 @@ export {
   groupsAPI,
   accountsAPI,
   modelsAPI,
+  modelBenchmarksAPI,
   settingsAPI,
   systemAPI,
   usageAPI,

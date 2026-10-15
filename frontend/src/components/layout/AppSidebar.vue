@@ -667,6 +667,7 @@ const adminNavItems = computed((): NavItem[] => {
     },
     // 模型清单与账号供给透视：账号管理的相邻入口，回答「某模型谁在供给/某账号提供哪些模型」
     { path: '/admin/models', label: t('nav.modelManifest'), icon: ModelManifestIcon },
+    { path: '/admin/model-benchmarks', label: t('nav.modelBenchmark'), icon: ChartIcon },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     {
       path: '/admin/security-audit',

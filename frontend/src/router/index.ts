@@ -341,6 +341,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/model-benchmarks',
+    name: 'AdminModelBenchmark',
+    component: () => import('@/views/admin/ModelBenchmarkView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Model Capability Benchmark',
+      titleKey: 'admin.modelBenchmark.title',
+      descriptionKey: 'admin.modelBenchmark.description'
+    }
+  },
+  {
     path: '/admin/plugins',
     name: 'AdminPlugins',
     component: () => import('@/views/admin/PluginsView.vue'),
