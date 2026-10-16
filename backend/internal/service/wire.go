@@ -706,12 +706,14 @@ func ProvideScheduledTestRunnerService(
 func ProvideModelBenchmarkService(
 	repo ModelBenchmarkRepository,
 	accounts AccountRepository,
+	manifestService *ModelManifestService,
 	upstream HTTPUpstream,
 	tlsProfiles *TLSFingerprintProfileService,
 	billing *BillingService,
+	accountTests *AccountTestService,
 	cfg *config.Config,
 ) *ModelBenchmarkService {
-	return NewModelBenchmarkService(repo, accounts, NewModelBenchmarkExecutor(accounts, upstream, tlsProfiles, billing, cfg))
+	return NewModelBenchmarkService(repo, accounts, manifestService, NewModelBenchmarkExecutor(accounts, upstream, tlsProfiles, billing, accountTests, cfg))
 }
 
 // ProvideModelBenchmarkRunnerService creates and starts the independent benchmark runner.

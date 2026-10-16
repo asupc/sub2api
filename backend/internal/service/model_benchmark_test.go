@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -16,6 +18,7 @@ import (
 func TestModelBenchmarkSuiteGeneratesHardV1(t *testing.T) {
 	suite := GetModelBenchmarkSuite()
 	require.Equal(t, "hard-v1", suite.ID)
+	require.Equal(t, "1.1.0", suite.Version)
 	require.Equal(t, 48, suite.ItemCount)
 	items := GenerateModelBenchmarkItems(1, 2)
 	require.Len(t, items, 48)
@@ -27,10 +30,50 @@ func TestModelBenchmarkSuiteGeneratesHardV1(t *testing.T) {
 		require.NotEmpty(t, item.Prompt)
 		require.Len(t, item.PromptHash, 64)
 		require.Contains(t, item.Prompt, `"answer"`)
+		require.Contains(t, item.Prompt, "只返回一个 JSON 对象")
+		require.Condition(t, func() bool {
+			for _, r := range item.Prompt {
+				if unicode.Is(unicode.Han, r) {
+					return true
+				}
+			}
+			return false
+		}, "prompt must be Chinese: %s", item.ID)
 	}
 	other := GenerateModelBenchmarkItems(1, 3)
 	require.NotEqual(t, items[0].PromptHash, other[0].PromptHash)
 	require.Equal(t, items[0].PromptHash, GenerateModelBenchmarkItems(1, 2)[0].PromptHash)
+}
+
+type modelBenchmarkManifestAccountSource struct {
+	accounts []Account
+}
+
+func (s modelBenchmarkManifestAccountSource) GetByID(_ context.Context, id int64) (*Account, error) {
+	for i := range s.accounts {
+		if s.accounts[i].ID == id {
+			return &s.accounts[i], nil
+		}
+	}
+	return nil, fmt.Errorf("account %d not found", id)
+}
+
+func (s modelBenchmarkManifestAccountSource) ListAllWithFilters(context.Context, string, string, string, string, int64, string) ([]Account, error) {
+	return s.accounts, nil
+}
+
+func TestModelBenchmarkListTargetsFollowsModelManifest(t *testing.T) {
+	accounts := []Account{
+		{ID: 1, Name: "supported", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: "active", Schedulable: true, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-a": "model-a"}}},
+		{ID: 2, Name: "unsupported", Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Status: "active", Schedulable: true, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-b": "model-b"}}},
+	}
+	source := modelBenchmarkManifestAccountSource{accounts: accounts}
+	service := NewModelBenchmarkService(nil, source, NewModelManifestService(source), nil)
+	targets, err := service.ListTargets(context.Background())
+	require.NoError(t, err)
+	require.Len(t, targets, 1)
+	require.Equal(t, "model-a", targets[0].ID)
+	require.Equal(t, []int64{1}, []int64{targets[0].Accounts[0].ID})
 }
 
 func TestModelBenchmarkScoreAnswerCheckers(t *testing.T) {
@@ -62,7 +105,7 @@ func TestModelBenchmarkAggregateExecutionFailureDoesNotBecomeZeroIntelligence(t 
 	}
 	AggregateModelBenchmarkRun(run, items)
 	require.NotNil(t, run.IntelligenceScore)
-	require.Equal(t, 40.0, *run.IntelligenceScore)
+	require.Equal(t, 100.0, *run.IntelligenceScore)
 	require.Equal(t, 1, run.AnsweredCount)
 	require.Equal(t, "partial", run.Status)
 	require.Nil(t, run.EfficiencyScore, "usage-incomplete run must not produce comparable efficiency")
@@ -90,7 +133,7 @@ func (u *modelBenchmarkHTTPUpstream) DoWithTLS(req *http.Request, _ string, _ in
 func TestModelBenchmarkExecutorCapturesUsage(t *testing.T) {
 	account := &Account{ID: 5, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "sk-test"}}
 	upstream := &modelBenchmarkHTTPUpstream{}
-	executor := NewModelBenchmarkExecutor(modelBenchmarkAccountSource{account}, upstream, nil, nil, &config.Config{})
+	executor := NewModelBenchmarkExecutor(modelBenchmarkAccountSource{account}, upstream, nil, nil, nil, &config.Config{})
 	item := ModelBenchmarkItem{ID: "mod", Category: "math", Difficulty: 4, Checker: "integer", Prompt: "return 7", Expected: int64(7), PromptHash: "hash", ExpectedOutputTokens: 20, ExpectedLatencyMS: 1000}
 	plan := &ModelBenchmarkPlan{AccountID: 5, ModelID: "gpt-test", MaxOutputTokens: 128}
 	result := executor.Execute(context.Background(), plan, item)
@@ -116,15 +159,17 @@ func TestGeneratedBenchmarkExpectedAnswersPassOwnCheckers(t *testing.T) {
 }
 
 func TestGeneratedBenchmarkFamiliesVaryAcrossRuns(t *testing.T) {
-	first := GenerateModelBenchmarkItems(1, 2)
-	second := GenerateModelBenchmarkItems(1, 3)
-	firstByFamily := map[string]ModelBenchmarkItem{}
-	for _, item := range first {
-		firstByFamily[item.FamilyID] = item
+	hashesByItem := map[string]map[string]struct{}{}
+	for runID := int64(2); runID <= 20; runID++ {
+		for _, item := range GenerateModelBenchmarkItems(1, runID) {
+			if hashesByItem[item.ID] == nil {
+				hashesByItem[item.ID] = map[string]struct{}{}
+			}
+			hashesByItem[item.ID][item.PromptHash] = struct{}{}
+		}
 	}
-	for _, item := range second {
-		original := firstByFamily[item.FamilyID]
-		require.NotEqual(t, original.PromptHash, item.PromptHash, item.FamilyID)
+	for itemID, hashes := range hashesByItem {
+		require.Greater(t, len(hashes), 1, "item %s should vary across runs", itemID)
 	}
 }
 

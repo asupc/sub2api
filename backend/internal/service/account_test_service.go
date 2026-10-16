@@ -2928,6 +2928,10 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 		}
 		seenJSON = true
 
+		if usage, ok := data["usage"].(map[string]any); ok {
+			s.sendEvent(c, TestEvent{Type: "benchmark_usage", Data: usage})
+		}
+
 		if errData, ok := data["error"].(map[string]any); ok {
 			errorMsg := "Chat Completions API (/v1/chat/completions) returned an error"
 			if msg, ok := errData["message"].(string); ok && msg != "" {
@@ -3335,6 +3339,53 @@ func (s *AccountTestService) RunTestBackground(ctx context.Context, accountID in
 		StartedAt:    startedAt,
 		FinishedAt:   finishedAt,
 	}, nil
+}
+
+// AccountTestBenchmarkResult is a minimal captured result for model benchmark execution.
+type AccountTestBenchmarkResult struct {
+	ResponseText string
+	ErrorMessage string
+	LatencyMs    int64
+	Usage        map[string]any
+}
+
+// RunBenchmarkPrompt executes a real account test with a benchmark prompt and captures text/usage.
+func (s *AccountTestService) RunBenchmarkPrompt(ctx context.Context, accountID int64, modelID, prompt string) AccountTestBenchmarkResult {
+	startedAt := time.Now()
+	w := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(w)
+	ginCtx.Request = (&http.Request{}).WithContext(ctx)
+	ginCtx.Set(accountTestBackgroundKey, true)
+	ginCtx.Set(accountTestBenchmarkKey, true)
+
+	testErr := s.TestAccountConnection(ginCtx, accountID, modelID, prompt, AccountTestModeDefault)
+	result := AccountTestBenchmarkResult{LatencyMs: time.Since(startedAt).Milliseconds()}
+	result.ResponseText, result.ErrorMessage = parseTestSSEOutput(w.Body.String())
+	result.Usage = parseBenchmarkUsageSSEOutput(w.Body.String())
+	if testErr != nil && result.ErrorMessage == "" {
+		result.ErrorMessage = testErr.Error()
+	}
+	return result
+}
+
+func parseBenchmarkUsageSSEOutput(body string) map[string]any {
+	var usage map[string]any
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		var event TestEvent
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event); err != nil {
+			continue
+		}
+		if event.Type == "benchmark_usage" {
+			if parsed, ok := event.Data.(map[string]any); ok {
+				usage = parsed
+			}
+		}
+	}
+	return usage
 }
 
 // parseTestSSEOutput extracts response text and error message from captured SSE output.

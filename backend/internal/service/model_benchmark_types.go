@@ -439,15 +439,17 @@ func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRu
 		latency int64
 	}
 	observations := make([]observation, 0, len(items))
-	usageComplete := len(items) > 0
+	usageComplete := false
 	for _, item := range items {
-		if item.UsageSource != "upstream" {
-			usageComplete = false
+		if item.Status == "execution_failed" {
+			continue
 		}
 		totalWeight += item.PossiblePoints
 		categoryTotals[item.Category] += item.PossiblePoints
-		if item.Status == "execution_failed" {
-			continue
+		if item.UsageSource == "upstream" {
+			usageComplete = true
+		} else {
+			usageComplete = false
 		}
 		answered++
 		earnedWeight += item.EarnedPoints
@@ -458,6 +460,9 @@ func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRu
 		if item.LatencyMS != nil {
 			observations = append(observations, observation{item: item, latency: *item.LatencyMS})
 		}
+	}
+	if answered*5 < len(items)*4 {
+		usageComplete = false
 	}
 	run.ItemCount = len(items)
 	run.AnsweredCount = answered

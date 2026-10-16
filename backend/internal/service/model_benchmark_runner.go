@@ -18,6 +18,7 @@ type ModelBenchmarkRunnerService struct {
 	cron      *cron.Cron
 	startOnce sync.Once
 	stopOnce  sync.Once
+	runningMu sync.Mutex
 }
 
 // NewModelBenchmarkRunnerService creates the benchmark runner.
@@ -86,6 +87,11 @@ func (s *ModelBenchmarkRunnerService) executeClaimedPlan(ctx context.Context, pl
 }
 
 func (s *ModelBenchmarkRunnerService) runScheduled() {
+	if !s.runningMu.TryLock() {
+		return
+	}
+	defer s.runningMu.Unlock()
+
 	time.Sleep(10 * time.Second)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancel()

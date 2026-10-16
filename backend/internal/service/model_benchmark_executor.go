@@ -26,29 +26,34 @@ type ModelBenchmarkExecutor struct {
 	httpUpstream HTTPUpstream
 	tlsProfiles  *TLSFingerprintProfileService
 	billing      *BillingService
+	accountTests *AccountTestService
 	cfg          *config.Config
 }
 
 // NewModelBenchmarkExecutor creates the Phase 1 executor.
-func NewModelBenchmarkExecutor(accounts ModelBenchmarkAccountSource, upstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService, billing *BillingService, cfg *config.Config) *ModelBenchmarkExecutor {
-	return &ModelBenchmarkExecutor{accounts: accounts, httpUpstream: upstream, tlsProfiles: tlsProfiles, billing: billing, cfg: cfg}
+func NewModelBenchmarkExecutor(accounts ModelBenchmarkAccountSource, upstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService, billing *BillingService, accountTests *AccountTestService, cfg *config.Config) *ModelBenchmarkExecutor {
+	return &ModelBenchmarkExecutor{accounts: accounts, httpUpstream: upstream, tlsProfiles: tlsProfiles, billing: billing, accountTests: accountTests, cfg: cfg}
 }
 
-// IsSupportedModelBenchmarkTarget enforces the Phase 1 adapter matrix.
+// IsSupportedModelBenchmarkTarget enforces the benchmark adapter matrix.
 func IsSupportedModelBenchmarkTarget(account *Account, modelID string) bool {
-	if account == nil || account.Type != AccountTypeAPIKey || !account.IsOpenAICompatible() || IsSourceIntegratedPlatform(account.Platform) {
+	if account == nil || strings.TrimSpace(modelID) == "" {
+		return false
+	}
+	mapped := account.GetMappedModel(modelID)
+	if mapped == "" || isOpenAIImageModel(mapped) || isGrokImageGenerationModel(mapped) || isGrokVideoGenerationModel(mapped) {
+		return false
+	}
+	switch account.Platform {
+	case PlatformQoder, PlatformTrae:
+		return account.Type == AccountTypeOAuth && strings.TrimSpace(account.GetOpenAIProtocolAPIKey()) != ""
+	}
+	if account.Type != AccountTypeAPIKey || !account.IsOpenAICompatible() || IsSourceIntegratedPlatform(account.Platform) {
 		return false
 	}
 	switch account.Platform {
 	case PlatformOpenAI, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformCommandCode, PlatformCline:
 	default:
-		return false
-	}
-	if strings.TrimSpace(modelID) == "" || !account.IsModelSupported(modelID) {
-		return false
-	}
-	mapped := account.GetMappedModel(modelID)
-	if mapped == "" || isOpenAIImageModel(mapped) || isGrokImageGenerationModel(mapped) || isGrokVideoGenerationModel(mapped) {
 		return false
 	}
 	if account.GetAPIProtocol() == APIProtocolAnthropic || account.IsAnthropicProtocol() {
@@ -64,6 +69,9 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 		return modelBenchmarkExecutionFailure(item, fmt.Errorf("unsupported benchmark target"))
 	}
 	upstreamModel := account.GetMappedModel(plan.ModelID)
+	if account.Platform == PlatformQoder || account.Platform == PlatformTrae {
+		return e.executeSourceIntegrated(ctx, plan, item, upstreamModel)
+	}
 	payload := map[string]any{
 		"model":       upstreamModel,
 		"messages":    []map[string]any{{"role": "user", "content": item.Prompt}},
@@ -112,6 +120,39 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 	latency := time.Since(start).Milliseconds()
 	result.LatencyMS = &latency
 	result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(parsed.Usage)
+	if result.InputTokens != nil && result.OutputTokens != nil && result.TotalTokens != nil {
+		result.UsageSource = "upstream"
+	}
+	e.applyCost(&result, upstreamModel)
+	return result
+}
+
+func (e *ModelBenchmarkExecutor) executeSourceIntegrated(ctx context.Context, plan *ModelBenchmarkPlan, item ModelBenchmarkItem, upstreamModel string) ModelBenchmarkRunItem {
+	if e.accountTests == nil {
+		return modelBenchmarkExecutionFailure(item, fmt.Errorf("source-integrated benchmark adapter is unavailable"))
+	}
+	capturedChan := make(chan AccountTestBenchmarkResult, 1)
+	go func() {
+		capturedChan <- e.accountTests.RunBenchmarkPrompt(ctx, plan.AccountID, plan.ModelID, item.Prompt)
+	}()
+	var captured AccountTestBenchmarkResult
+	select {
+	case captured = <-capturedChan:
+	case <-ctx.Done():
+		_ = ctx.Err()
+		return modelBenchmarkExecutionFailure(item, fmt.Errorf("source-integrated benchmark timed out: %w", ctx.Err()))
+	}
+	if captured.ErrorMessage != "" || captured.ResponseText == "" {
+		message := captured.ErrorMessage
+		if message == "" {
+			message = "source-integrated model returned empty content"
+		}
+		return modelBenchmarkExecutionFailure(item, fmt.Errorf("%s", message))
+	}
+	result := ModelBenchmarkScoreAnswer(item, captured.ResponseText)
+	latency := captured.LatencyMs
+	result.LatencyMS = &latency
+	result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(captured.Usage)
 	if result.InputTokens != nil && result.OutputTokens != nil && result.TotalTokens != nil {
 		result.UsageSource = "upstream"
 	}

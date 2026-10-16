@@ -10,14 +10,15 @@ import (
 
 // ModelBenchmarkService manages plans and executes model benchmark runs.
 type ModelBenchmarkService struct {
-	repo     ModelBenchmarkRepository
-	accounts ModelBenchmarkAccountSource
-	executor *ModelBenchmarkExecutor
+	repo            ModelBenchmarkRepository
+	accounts        ModelBenchmarkAccountSource
+	manifestService *ModelManifestService
+	executor        *ModelBenchmarkExecutor
 }
 
 // NewModelBenchmarkService creates the benchmark application service.
-func NewModelBenchmarkService(repo ModelBenchmarkRepository, accounts ModelBenchmarkAccountSource, executor *ModelBenchmarkExecutor) *ModelBenchmarkService {
-	return &ModelBenchmarkService{repo: repo, accounts: accounts, executor: executor}
+func NewModelBenchmarkService(repo ModelBenchmarkRepository, accounts ModelBenchmarkAccountSource, manifestService *ModelManifestService, executor *ModelBenchmarkExecutor) *ModelBenchmarkService {
+	return &ModelBenchmarkService{repo: repo, accounts: accounts, manifestService: manifestService, executor: executor}
 }
 
 // ListSuites returns the only built-in suite in Phase 1.
@@ -25,23 +26,17 @@ func (s *ModelBenchmarkService) ListSuites() []ModelBenchmarkSuite {
 	return []ModelBenchmarkSuite{GetModelBenchmarkSuite()}
 }
 
-// ListTargets returns supported account/model pairs using the same model-resolution rules as the manifest.
+// ListTargets returns the model-manifest view filtered to benchmark-supported accounts.
 func (s *ModelBenchmarkService) ListTargets(ctx context.Context) ([]ModelManifestItem, error) {
-	listener, ok := s.accounts.(ModelManifestAccountSource)
-	if !ok {
-		return nil, fmt.Errorf("account source does not support model listing")
+	if s.manifestService == nil {
+		return nil, fmt.Errorf("model manifest service is unavailable")
 	}
-	accounts, err := listener.ListAllWithFilters(ctx, "", "", "", "", 0, "")
+	manifest, err := s.manifestService.GetManifest(ctx, ModelManifestQuery{})
 	if err != nil {
 		return nil, err
 	}
-	collector := newModelManifestCollector()
-	for i := range accounts {
-		manifestAccountModels(collector, &accounts[i])
-	}
-	models := collector.build()
-	out := make([]ModelManifestItem, 0, len(models))
-	for _, model := range models {
+	out := make([]ModelManifestItem, 0, len(manifest.Models))
+	for _, model := range manifest.Models {
 		accounts := make([]ModelManifestAccountItem, 0, len(model.Accounts))
 		for _, account := range model.Accounts {
 			loaded, err := s.accounts.GetByID(ctx, account.ID)
@@ -49,14 +44,15 @@ func (s *ModelBenchmarkService) ListTargets(ctx context.Context) ([]ModelManifes
 				accounts = append(accounts, account)
 			}
 		}
-		if len(accounts) > 0 {
-			item := model
-			item.Accounts = accounts
-			item.TotalAccounts = len(accounts)
-			item.ActiveAccounts = len(accounts)
-			item.TotalConcurrency = 0
-			out = append(out, item)
+		if len(accounts) == 0 {
+			continue
 		}
+		item := model
+		item.Accounts = accounts
+		item.TotalAccounts = len(accounts)
+		item.ActiveAccounts = len(accounts)
+		item.TotalConcurrency = 0
+		out = append(out, item)
 	}
 	return out, nil
 }
@@ -306,13 +302,24 @@ func (s *ModelBenchmarkService) finishRun(ctx context.Context, plan *ModelBenchm
 }
 
 func aggregateModelBenchmarkUsage(run *ModelBenchmarkRun, items []ModelBenchmarkRunItem) {
-	allUpstream := len(items) > 0
+	allUpstream := false
+	answered := 0
+	for _, item := range items {
+		if item.Status == "execution_failed" {
+			continue
+		}
+		answered++
+		allUpstream = item.UsageSource == "upstream"
+		if !allUpstream {
+			break
+		}
+	}
+	if answered*5 < len(items)*4 {
+		allUpstream = false
+	}
 	var input, output, total, cost float64
 	usageCount := 0
 	for _, item := range items {
-		if item.UsageSource != "upstream" {
-			allUpstream = false
-		}
 		if item.InputTokens != nil {
 			input += float64(*item.InputTokens)
 		}

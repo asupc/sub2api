@@ -220,10 +220,33 @@ func qoderNextGatewayRequest(account *Account, req *http.Request, body []byte) (
 type qoderStreamBody struct {
 	reader io.Reader
 	closer io.Closer
+	ctx    context.Context
 }
 
-func (b *qoderStreamBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
-func (b *qoderStreamBody) Close() error               { return b.closer.Close() }
+func (b *qoderStreamBody) Read(p []byte) (int, error) {
+	if b.ctx == nil {
+		return b.reader.Read(p)
+	}
+	type readResult struct {
+		n   int
+		err error
+	}
+	done := make(chan readResult, 1)
+	go func() {
+		n, err := b.reader.Read(p)
+		done <- readResult{n: n, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.n, result.err
+	case <-b.ctx.Done():
+		_ = b.closer.Close()
+		result := <-done
+		_ = result
+		return 0, b.ctx.Err()
+	}
+}
+func (b *qoderStreamBody) Close() error { return b.closer.Close() }
 
 // wrapQoderChatResponse 把 qoder 上游响应（恒为私有 SSE 信封）转换为下游期望的
 // 形态后替换 resp.Body，使既有 CC 中继（流式透传 / 非流式缓冲）无需感知 qoder：
@@ -319,7 +342,7 @@ func (s *OpenAIGatewayService) wrapQoderChatResponse(ctx context.Context, accoun
 			}
 			_ = pipeWriter.Close()
 		}()
-		resp.Body = &qoderStreamBody{reader: pipeReader, closer: pipeReader}
+		resp.Body = &qoderStreamBody{reader: pipeReader, closer: pipeReader, ctx: ctx}
 		resp.Header.Set("Content-Type", "text/event-stream")
 		resp.Header.Del("Content-Length")
 		return nil
@@ -763,6 +786,30 @@ func qoderIsChatModelKey(key string) bool {
 // testQoderAccountConnection 经真实转发路径测试 qoder 账号连接：复用
 // sendCCUpstreamRequest 的 qoder 分叉（COSY 签名头族 + qoder_encode 体 + 网关主机
 // 故障切换；私有 SSE 信封已在分叉内包装为 OpenAI SSE），交既有测试流解析。
+func isBenchmarkAccountTest(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	return c.GetBool(accountTestBenchmarkKey)
+}
+
+func createQoderModelBenchmarkPayload(modelID, prompt string, maxTokens int) map[string]any {
+	if maxTokens <= 0 {
+		maxTokens = 4096
+	}
+	payload := map[string]any{
+		"model": modelID,
+		"messages": []map[string]any{
+			{"role": "user", "content": strings.TrimSpace(prompt)},
+		},
+		"stream": true,
+	}
+	if maxTokens > 0 {
+		payload["max_tokens"] = maxTokens
+	}
+	return payload
+}
+
 func (s *AccountTestService) testQoderAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 	testModelID := strings.TrimSpace(modelID)
@@ -786,7 +833,11 @@ func (s *AccountTestService) testQoderAccountConnection(c *gin.Context, account 
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	payloadBytes, _ := json.Marshal(createOpenAIChatCompletionsTestPayload(testModelID, prompt))
+	benchmarkMaxTokens := 0
+	if isBenchmarkAccountTest(c) {
+		benchmarkMaxTokens = 4096
+	}
+	payloadBytes, _ := json.Marshal(createQoderModelBenchmarkPayload(testModelID, prompt, benchmarkMaxTokens))
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 agent_chat_generation 测试连接"})
 

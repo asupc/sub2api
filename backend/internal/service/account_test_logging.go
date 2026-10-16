@@ -9,6 +9,7 @@ import (
 )
 
 const accountTestBackgroundKey = "account_test_background"
+const accountTestBenchmarkKey = "account_test_benchmark"
 
 // Bind attribution before lookup so missing accounts are identifiable too. The
 // request logger retains HTTP request IDs or the caller's background correlation.
