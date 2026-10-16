@@ -296,3 +296,11 @@
 - **已知限制**：/v1beta 入口多平台集合塌缩为 gemini 单池；Codex 能力广告（`openai_codex_model_metadata`）维持跨平台别名 fail-closed（仅 text、不广告推理等级）；在途预留估算对多平台 fail-open（空平台桶→无账号基准）；OpenAI WS 多平台集合 transport 放宽为 Any 由调度器按账号能力匹配。
 - **验证**：Docker golang:1.27.2 `go build ./...` 通过；`go test -tags=unit` 全绿（service 195s + handler/admin/server/routes/repository）。新增测试：`TestCompositeRouteResolverMergesSameFamilyMultiPlatformOwnership` / `...DoesNotGuessCrossFamilyAccountOwnership`（解析器）、`TestCompositeTargetPlatformMiddlewareMultiPlatformOwnershipWritesSetNotSingle` / `TestGetGroupPlatformMultiPlatformSetReturnsFamilyRepresentative` / `TestResolvedPlatformSetIntersectsGatesMultiPlatformRequests`（入口）、`TestGatewayService_SelectAccountForModelWithExclusions_CompositeMultiPlatformPool`（Gateway 族跨平台 failover+归属闸门）、`TestOpenAIGatewayService_SelectAccountWithScheduler_MultiPlatformUnifiedPool`（OpenAI 族）、`TestContextWithSelectedAccountPlatformBackfillsActualPlatform`（回填）。生产冒烟（部署后执行）：deepseek-v4-pro 双平台负载均衡、单平台故障转移、粘性、usage_log 平台归属、跨族 503+提示日志。
 - **合并影响**：composite 解析/调度链为二开密集区（`gateway_scheduling.go`/`openai_account_scheduler.go`/`openai_gateway_scheduling.go` 与上游高冲突面重合），上游同步时按本条目语义重放；不推进 `UPSTREAM-BASE`。
+
+### 2026-10-16 三平台重新授权授权 URL / 模型测评时间展示 / Antigravity 用量刷新修正
+
+- **重新授权授权 URL 修正**：WorkBuddy/Qoder/Trae 平台账号的"重新授权"入口不再复用 Claude 授权链接，隐藏 `AccountActionMenu` 中这三平台的重新授权按钮（其凭据走平台专用 OAuth/刷新链路）；其它平台保持各自分支。
+- **模型测评时间展示**：模型能力中心排行榜的"最近运行时间"与专属评测历史记录统一展示到秒（`ModelLeaderboard`/`ModelDetailDrawer`/`RunsTable` 的 `formatTime` 改为含 `second` 的本地化日期时间）。
+- **Antigravity 用量刷新**：`getAntigravityUsage` 支持 `force` 绕过 3 分钟缓存并交由主动查询链路；前端 Antigravity 用量单元格新增单独的主动查询按钮（`loadActiveUsage`），避免用量窗口长期不刷新或刷新结果失真。
+- **改动文件**：`frontend/src/components/admin/account/AccountActionMenu.vue`、`frontend/src/views/admin/components/benchmark/{ModelLeaderboard,ModelDetailDrawer,RunsTable}.vue`、`frontend/src/components/account/AccountUsageCell.vue`、`backend/internal/service/account_usage_service.go`。
+- **合并影响**：均为二开增量；不推进 `UPSTREAM-BASE`。
