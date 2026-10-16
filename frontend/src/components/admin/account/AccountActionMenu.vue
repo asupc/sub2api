@@ -45,7 +45,7 @@
               {{ t('admin.accounts.duplicateAccount') }}
             </button>
             <!-- 影子账号不持凭据:重授权/刷新 token 对其无效(后端拒绝),故隐藏(外审 G4)。 -->
-            <template v-if="(account.type === 'oauth' || account.type === 'setup-token') && !isShadow">
+            <template v-if="(account.type === 'oauth' || account.type === 'setup-token') && !isShadow && !isSourceIntegratedPlatform">
               <button @click="$emit('reauth', account); $emit('close')" class="flex w-full items-center gap-2 px-3.5 py-1.5 text-xs text-blue-600 hover:bg-gray-100 dark:hover:bg-dark-700">
                 <Icon name="link" size="sm" />
                 {{ t('admin.accounts.reAuthorize') }}
@@ -157,6 +157,11 @@ const isAntigravityOAuth = computed(() => props.account?.platform === 'antigravi
 const isOpenAIOAuth = computed(() => props.account?.platform === 'openai' && props.account?.type === 'oauth')
 // 三平台（WorkBuddy / Qoder / Trae）有通用运营任务端点，展示「运营任务」子菜单。
 const isOpsPlatform = computed(() =>
+  props.account?.platform === 'workbuddy' || props.account?.platform === 'qoder' || props.account?.platform === 'trae'
+)
+// 三平台使用设备登录/OAuth 轮询流程，不支持 ReAuthAccountModal 的通用授权链接，
+// 避免错误落回 Claude 授权 URL。
+const isSourceIntegratedPlatform = computed(() =>
   props.account?.platform === 'workbuddy' || props.account?.platform === 'qoder' || props.account?.platform === 'trae'
 )
 // 主视图 / 运营任务子视图；菜单每次打开都回到主视图。
