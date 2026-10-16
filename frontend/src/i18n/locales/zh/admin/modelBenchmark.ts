@@ -22,6 +22,8 @@ export default {
     history: { title: '历史曲线', hint: '能力分、效率分、Token、耗时与成本分开呈现，避免综合分掩盖问题', allModels: '全部模型', empty: '暂无历史数据' },
     plans: {
       title: '测评计划', create: '新建测评计划', namePlaceholder: '例如：旗舰模型每周硬测评', empty: '暂无测评计划',
+      modelSearch: '模型搜索', modelSearchPlaceholder: '搜索模型 ID 或显示名...', platformFilter: '平台', allPlatforms: '全部平台',
+      unsupportedModel: '当前模型暂无可测评账号',
       actions: '操作', runNow: '手动排队', enable: '启用', disable: '停用',
       costWarning: '每次运行约发起 {count} × {samples} 个上游请求，请确认额度与成本。', deleteConfirm: '确定删除计划「{name}」及其历史记录吗？'
     },

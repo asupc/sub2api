@@ -87,8 +87,31 @@
           <form class="mt-4 space-y-3" @submit.prevent="handleCreate">
             <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.name') }}</label><input v-model.trim="form.name" required class="input input-sm w-full" :placeholder="t('admin.modelBenchmark.plans.namePlaceholder')" /></div>
             <div class="grid gap-3 sm:grid-cols-2">
-              <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.model') }}</label><select v-model="form.model_id" required class="input input-sm w-full" @change="form.account_id = selectedModelAccounts[0]?.id ?? 0"><option v-for="model in targets" :key="model.id" :value="model.id">{{ model.id }}</option></select></div>
-              <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.account') }}</label><select v-model.number="form.account_id" required class="input input-sm w-full"><option v-for="account in selectedModelAccounts" :key="account.id" :value="account.id">#{{ account.id }} {{ account.name }}</option></select></div>
+              <div>
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.plans.modelSearch') }}</label>
+                <input v-model.trim="manifestSearch" class="input input-sm w-full" :placeholder="t('admin.modelBenchmark.plans.modelSearchPlaceholder')" />
+              </div>
+              <div>
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.plans.platformFilter') }}</label>
+                <select v-model="manifestPlatform" class="input input-sm w-full">
+                  <option value="">{{ t('admin.modelBenchmark.plans.allPlatforms') }}</option>
+                  <option v-for="platform in manifestPlatformOptions" :key="platform" :value="platform">{{ platform }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.model') }}</label>
+                <select v-model="form.model_id" required class="input input-sm w-full" @change="form.account_id = selectedModelAccounts[0]?.id ?? 0">
+                  <option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.display_name ? `${model.id} (${model.display_name})` : model.id }}</option>
+                </select>
+                <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ selectedModelPlatforms }}</p>
+              </div>
+              <div>
+                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.account') }}</label>
+                <select v-model.number="form.account_id" required class="input input-sm w-full" :disabled="!selectedModelSupported">
+                  <option v-if="!selectedModelSupported" :value="0">{{ t('admin.modelBenchmark.plans.unsupportedModel') }}</option>
+                  <option v-for="account in selectedModelAccounts" :key="account.id" :value="account.id">#{{ account.id }} {{ account.name }} · {{ account.platform }}</option>
+                </select>
+              </div>
               <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.cron') }}</label><input v-model.trim="form.cron_expression" required class="input input-sm w-full font-mono" placeholder="0 4 * * 1" /></div>
               <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.samples') }}</label><input v-model.number="form.sample_count" type="number" min="1" max="3" class="input input-sm w-full" /></div>
               <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.maxTokens') }}</label><input v-model.number="form.max_output_tokens" type="number" min="128" max="4096" class="input input-sm w-full" /></div>
@@ -96,7 +119,7 @@
             </div>
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-dark-200"><input v-model="form.enabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />{{ t('admin.modelBenchmark.fields.enabled') }}</label>
             <p class="rounded-lg bg-amber-50 p-2.5 text-[11px] text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">{{ t('admin.modelBenchmark.plans.costWarning', { count: suite?.item_count ?? 48, samples: form.sample_count || 1 }) }}</p>
-            <button type="submit" class="btn btn-primary btn-sm w-full" :disabled="creating || selectedModelAccounts.length === 0">{{ creating ? t('common.saving') : t('admin.modelBenchmark.plans.create') }}</button>
+            <button type="submit" class="btn btn-primary btn-sm w-full" :disabled="creating || !selectedModelSupported">{{ creating ? t('common.saving') : t('admin.modelBenchmark.plans.create') }}</button>
           </form>
         </div>
         <div class="rounded-xl border border-gray-200 bg-white shadow-xs dark:border-dark-700 dark:bg-dark-900">
@@ -123,7 +146,7 @@
     </div>
   </AppLayout>
 </template><script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import adminAPI from '@/api/admin'
@@ -135,7 +158,10 @@ const creating = ref(false)
 const loadError = ref('')
 const actionError = ref('')
 const suites = ref<ModelBenchmarkSuite[]>([])
+const manifestModels = ref<ModelManifestItem[]>([])
 const targets = ref<ModelManifestItem[]>([])
+const manifestSearch = ref('')
+const manifestPlatform = ref('')
 const plans = ref<ModelBenchmarkPlan[]>([])
 const rankings = ref<ModelBenchmarkRanking[]>([])
 const runs = ref<ModelBenchmarkRun[]>([])
@@ -147,7 +173,23 @@ const historyModel = ref('')
 const form = reactive({ name: '', model_id: '', account_id: 0, cron_expression: '0 4 * * 1', enabled: false, sample_count: 1, max_output_tokens: 768, timeout_seconds: 90, max_results: 50 })
 
 const suite = computed(() => suites.value[0] ?? null)
-const selectedModelAccounts = computed(() => targets.value.find(model => model.id === form.model_id)?.accounts ?? [])
+const benchmarkTargetByID = computed(() => new Map(targets.value.map(model => [model.id, model])))
+const selectedBenchmarkTarget = computed(() => benchmarkTargetByID.value.get(form.model_id))
+const selectedModelAccounts = computed(() => selectedBenchmarkTarget.value?.accounts ?? [])
+const selectedModelSupported = computed(() => selectedModelAccounts.value.length > 0)
+const selectedModelPlatforms = computed(() => {
+  const model = manifestModels.value.find(item => item.id === form.model_id)
+  return model?.platforms?.length ? model.platforms.join(' / ') : '—'
+})
+const modelOptions = computed(() => {
+  const search = manifestSearch.value.trim().toLowerCase()
+  return manifestModels.value.filter(model => {
+    if (manifestPlatform.value && !model.platforms.includes(manifestPlatform.value)) return false
+    if (!search) return true
+    return model.id.toLowerCase().includes(search) || (model.display_name ?? '').toLowerCase().includes(search)
+  })
+})
+const manifestPlatformOptions = computed(() => Array.from(new Set(manifestModels.value.flatMap(model => model.platforms))).sort())
 const latestRun = computed(() => runs.value.find(run => run.status === 'success' || run.status === 'partial') ?? null)
 const summaryCards = computed(() => { const best = rankings.value[0]; const latest = latestRun.value; return [
   { label: t('admin.modelBenchmark.stats.latestIntelligence'), value: formatScore(latest?.intelligence_score), hint: latest ? `#${latest.id}` : '—' },
@@ -172,7 +214,19 @@ const runMetrics = computed(() => { const run = selectedRun.value; if (!run) ret
   { label: t('admin.modelBenchmark.fields.totalTokens'), value: formatTokens(run.total_tokens) }, { label: t('admin.modelBenchmark.fields.latency'), value: formatLatency(run.avg_latency_ms) }, { label: t('admin.modelBenchmark.fields.cost'), value: run.estimated_cost == null ? '—' : `$${run.estimated_cost.toFixed(4)}` }
 ] })
 
-async function loadAll() { loadError.value = ''; try { const [suiteData, targetData, planData, rankingData, runData, historyData] = await Promise.all([adminAPI.modelBenchmarks.listSuites(), adminAPI.modelBenchmarks.listTargets(), adminAPI.modelBenchmarks.listPlans(), adminAPI.modelBenchmarks.listRankings(), adminAPI.modelBenchmarks.listRuns({ limit: 100 }), adminAPI.modelBenchmarks.listHistory({ limit: 500 })]); suites.value = suiteData; targets.value = targetData; plans.value = planData; rankings.value = rankingData; runs.value = runData; history.value = historyData; if (!form.model_id && targetData.length) { form.model_id = targetData[0].id; form.account_id = targetData[0].accounts[0]?.id ?? 0 } } catch (error) { loadError.value = error instanceof Error ? error.message : t('admin.modelBenchmark.loadFailed') } }
+async function loadAll() { loadError.value = ''; try { const [suiteData, manifestData, targetData, planData, rankingData, runData, historyData] = await Promise.all([adminAPI.modelBenchmarks.listSuites(), adminAPI.models.getModelManifest(), adminAPI.modelBenchmarks.listTargets(), adminAPI.modelBenchmarks.listPlans(), adminAPI.modelBenchmarks.listRankings(), adminAPI.modelBenchmarks.listRuns({ limit: 100 }), adminAPI.modelBenchmarks.listHistory({ limit: 500 })]); suites.value = suiteData; manifestModels.value = manifestData.models ?? []; targets.value = targetData; plans.value = planData; rankings.value = rankingData; runs.value = runData; history.value = historyData; if (!form.model_id) {
+				const preferred = modelOptions.value.find(model => benchmarkTargetByID.value.get(model.id)?.accounts.length) ?? modelOptions.value[0]
+				form.model_id = preferred?.id ?? ''
+				form.account_id = benchmarkTargetByID.value.get(form.model_id)?.accounts[0]?.id ?? 0
+			} } catch (error) { loadError.value = error instanceof Error ? error.message : t('admin.modelBenchmark.loadFailed') } }
+watch(modelOptions, options => {
+	if (options.length && !options.some(model => model.id === form.model_id)) {
+		const preferred = options.find(model => benchmarkTargetByID.value.get(model.id)?.accounts.length) ?? options[0]
+		form.model_id = preferred.id
+		form.account_id = benchmarkTargetByID.value.get(form.model_id)?.accounts[0]?.id ?? 0
+	}
+})
+
 async function loadRuns() { try { runs.value = await adminAPI.modelBenchmarks.listRuns({ limit: 100 }) } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
 async function handleCreate() { if (!form.name || !form.model_id || !form.account_id) return; creating.value = true; actionError.value = ''; try { await adminAPI.modelBenchmarks.createPlan({ ...form }); form.name = ''; form.enabled = false; await loadAll() } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } finally { creating.value = false } }
 async function togglePlan(plan: ModelBenchmarkPlan) { try { await adminAPI.modelBenchmarks.updatePlan(plan.id, { name: plan.name, model_id: plan.model_id, account_id: plan.account_id, cron_expression: plan.cron_expression, enabled: !plan.enabled, sample_count: plan.sample_count, max_output_tokens: plan.max_output_tokens, timeout_seconds: plan.timeout_seconds, max_results: plan.max_results }); await loadAll() } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
