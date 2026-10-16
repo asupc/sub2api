@@ -52,3 +52,36 @@
 4. `reasoning_tokens`、cache token、first token 是 nullable 观测字段；缺失只降低 coverage，不算请求失败。
 5. 能力分只按正确性计算；usage 缺失时效率分与综合评级不可比。
 - 2026-10-15 收口补充：`go vet ./...` 通过；最终代码复跑 `go build ./...` 与模型测评专项单测均通过。
+
+## 2026-10-15 本地真实模型测评记录
+
+环境：Docker Compose 本地环境（backend `127.0.0.1:8088`，PostgreSQL/Redis healthy）。执行 `hard-v1` 48 题单采样；为避免后续自动扣费，4 个临时计划测评后已全部停用。
+
+| 模型 | 账号 / Run | 状态 | 能力分 | 效率分 | 综合评级 | Token | 耗时 |
+|---|---|---|---:|---:|---:|---:|---:|
+| glm-5.3-flash | #565 / run 7 | partial，41/48 有效作答 | 78.8 | 95.03 | 81.27 | in 2,977 / out 12,226 / total 15,203 | avg 6.70s，P95 13.13s |
+| glm-5.3 | #565 / run 8 | partial，42/48 有效作答 | 79.2 | 97.53 | 81.97 | in 3,074 / out 11,282 / total 14,356 | avg 6.04s，P95 9.25s |
+| Qwen3.8-Flash | #571 / run 11 | partial，45/48 有效作答 | 75.4 | 85.45 | 76.96 | in 119,760 / out 25,639 / total 145,399 | avg 11.95s，P95 40.44s |
+| MiniMax-M3 | Trae #570 / run 12 | 不可信 partial，仅 3/48 有效作答 | 62.1（仅 answered 口径，不排名） | missing | missing | in 738 / out 1,084 / total 1,822 | avg 3.26s，但 45 题上游失败 |
+
+补充：
+
+- glm-5.3-flash：33 correct / 8 incorrect / 7 execution failed；失败主要为 `upstream returned empty content`。
+- glm-5.3：34 correct / 8 incorrect / 6 execution failed；1 次超时，5 次空内容。
+- Qwen3.8-Flash：35 correct / 7 incorrect / 3 format error / 3 timeout；Qoder usage 覆盖完整，但当前价格目录缺失，cost 显示 0 仅表示未计价。
+- MiniMax-M3：45 题报 `上游返回了未描述的错误`；随后 Trae quota 查询返回 `total=0`，本轮结果不纳入有效排名。
+- DeepSeek-Flash：Qoder #569 两次探测均在自动等待 30 秒重试后返回 `RESOURCE_LIMIT / serviceAvailable=false`；账号剩余额度显示 1457，但模型服务当前不可用，因此未启动 48 题完整测评。
+- 执行中修复并验证：hard-v1 随机素数生成 nil panic、runner 重入并发、Qoder/Trae usage 捕获、Qoder 流式读超时回收、部分 usage 的效率分口径。
+
+## 2026-10-16 题库中文化
+
+- 48 个题目题干与输出契约全部改为中文；JSON 键、数学变量、代码标识与 checker 枚举保留英文技术标识。
+- `hard-v1` suite version 提升为 `1.1.0`，scoring version 保持 `1.0.0`；中英文题库不混合排名或混合绘制可比历史曲线。
+- 新增单测断言每个生成 prompt 均包含中文，并修正“跨 run 变化”测试按 item ID 对比多 run hash 集合。
+- `go test -tags=unit ./internal/service -run 'Test(ModelBenchmarkSuite|GeneratedBenchmark)' -count=1` 通过。
+
+## 2026-10-16 模型选择跟随模型清单
+
+- Backend target 列表改为直接复用 `ModelManifestService.GetManifest()`，再按 active/schedulable/benchmark 支持矩阵过滤账号。
+- 前端新建计划模型下拉直接读取模型清单 API，展示全量模型并支持搜索与平台过滤；仅账号下拉限定为可测评账号，不支持模型显示明确提示并禁用提交。
+- 验证：`go test -tags=unit ./internal/service -run 'TestModelBenchmark...'`、`go test -tags=unit ./cmd/server`、`go build ./...`、`pnpm vitest run src/views/admin/__tests__/ModelBenchmarkView.spec.ts`、`pnpm typecheck`、指定文件 ESLint、`pnpm build` 均通过。

@@ -138,3 +138,18 @@
 - 新增迁移 `243_so_model_capability_benchmark.sql`、Repository、Service、Executor、Runner、Admin API `/admin/model-benchmarks/*` 与前端 `/admin/model-benchmarks` 控制台（指标卡、排行、能力拆解、多指标历史曲线、计划管理、Run 详情）。Phase 1 仅支持 openai / Kimi / Zhipu / DeepSeek / MiniMax / OpenCode / Command Code / Cline 的 Chat Completions API Key 账号，其他目标服务端拒绝。
 - 验证：后端专项单测、repository integration、`go build ./...` 通过；前端 vitest 286/2122、typecheck、lint、build 通过。全量 backend unit 存在 2 个可复现既有失败，integration 有 1 个复跑通过的历史波动，lint 工具 0 issues 但 typechecking context 退出 1；明细见 `openspec/changes/add-model-capability-benchmark/implementation-evidence.md`。
 - 合并：新增文件为主；`wire*.go`、`handler.go`、`routes/admin.go`、`AppSidebar.vue`、`router/index.ts`、admin API/i18n barrel 需手工合并。
+
+### 2026-10-15 模型能力测评本地实测与适配修复
+
+- 新增 Qoder / Trae OAuth 模型测评适配：复用真实平台转发链路，捕获 OpenAI 兼容 usage、逐题文本与耗时；Qoder 流式读增加 context 取消回收，Trae 支持指定 benchmark max tokens。
+- 修复 hard-v1 随机素数题在合数模数下 `ModInverse` nil panic；runner 增加 `TryLock` 防止 cron 重入并发；usage 覆盖达到 80% 有效作答时计算效率分，执行失败不计入能力分分母。
+- 本地 48 题实测：`glm-5.3-flash` 能力分 78.8 / 效率 95.03，`glm-5.3` 能力分 79.2 / 效率 97.53，`Qwen3.8-Flash` 能力分 75.4 / 效率 85.45；`MiniMax-M3` 因 Trae quota 为 0 仅 3/48 有效作答不排名，`DeepSeek-Flash` 因 Qoder `RESOURCE_LIMIT` 未完整执行。实测后 4 个临时计划均已停用，避免后续自动扣费。
+
+### 2026-10-16 模型能力测评题库中文化
+
+- `hard-v1` 全部 48 个动态题目提示改为中文题干与中文输出契约，技术标识、JSON 键和程序判定枚举保留英文以确保自动评分稳定。套件版本从 `1.0.0` 提升到 `1.1.0`，避免中英文题库历史曲线混算；评分版本保持 `1.0.0`。合并：`model_benchmark_suite.go`、`model_benchmark_test.go`。
+
+### 2026-10-16 测评计划模型选择跟随模型清单
+
+- 后端 `/admin/model-benchmarks/targets` 改为直接复用 `ModelManifestService.GetManifest()` 的模型清单结果，再过滤当前可测评账号，消除双份清单聚合逻辑。合并：`model_benchmark_service.go`、`wire*.go`。
+- 前端「新建测评计划」模型下拉改为直接读取 `/admin/models/manifest` 全量模型清单，支持按模型 ID / 显示名搜索和平台过滤；同时保留可测评账号过滤，选中暂不支持模型时显示“当前模型暂无可测评账号”并阻止提交。新增 `ModelBenchmarkView.spec.ts` 覆盖全量清单来源、默认选中可测评模型、搜索与不支持提示。
