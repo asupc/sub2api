@@ -169,3 +169,50 @@
 - 验证：后端 `go build ./...`、`go test -tags=unit ./internal/service ./internal/repository ./migrations ./internal/handler/admin` 通过；新增 `TestModelBenchmarkRegistrySupportsIntegratedPlatformsAndOpenAIOAuth`（9 组目标矩阵）、`TestAccountTestService_Benchmark*`（题目下发 / max_output_tokens 取舍 / usage 上报 / 401 不改账号状态）、`TestModelBenchmarkQueueRun*`（停用计划可排队且不被启用）、`TestModelBenchmarkManualTriggerMigrationIsIdempotent`。前端 vitest 288 文件 / 2128 用例、`typecheck`、`lint:check`、`build`（含 i18n key 完整性）通过。迁移 244 已在本地库应用并核对列与索引。
 - 合并：新增文件为 `ModelBenchmarkPlansView.vue`（+ spec）、`244_so_model_benchmark_manual_trigger.sql`、`model_benchmark_queue_run_test.go`；改动面 `model_benchmark_executor.go`、`model_benchmark_types.go`、`model_benchmark_service.go`、`model_benchmark_repo.go`、`account_test_service.go`、`domain_constants.go`、`model_manifest_service.go`、`wire.go`、`model_benchmark_test.go`、`account_test_service_openai_test.go`、迁移测试、`ModelBenchmarkView.vue`、`ModelManifestView.vue`、`AppSidebar.vue`、`router/index.ts`、admin API 与 i18n barrel 属手工合并面。
 - 已知边界：本地库 openai 平台账号（21 apikey + 511 oauth）均为软删除状态，OpenAI 平台端到端验证需在账号未删除的环境执行；WorkBuddy 计划已可通过目标矩阵（本地账号 #568 具备 access_token）。
+
+### 2026-10-16 模型能力测评多计划并行执行
+
+- runner 从「每 tick 领取 1 个 plan 串行执行」改为「每 tick 领取全部 due plan（limit 100，防御性上限）并行执行」：`ClaimDuePlans` 领取后逐 plan 起 goroutine，`WaitGroup` 等待全部完成再释放 tick 锁（保持 tick 不重叠语义）。每个 plan 独立占用 45 分钟执行预算（`context.WithTimeout` 移入 goroutine 内），不因并行共享而缩水。领取本身仍是 `FOR UPDATE SKIP LOCKED` 原子领取，多实例安全不变。
+- 明确决策：同账号多 plan 并行不做互斥——不同模型通常绑不同账号，无限流冲突；偶发同账号由计划排期自行规避。原「全局并发 1」仅为 MVP 成本兜底，非机制限制。
+- `runScheduled` 的 10 秒固定延迟抽为包级变量 `modelBenchmarkRunnerTickDelay`，测试中缩短为 1ms。
+- 设计文档 `docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md` §7.2 与风险表同步更新（并发 1 → 全部并行，风险表移除「全局并发 1」防线）。
+- 验证：Docker 容器 `go test -tags=unit -count=1 ./internal/service/` 全绿（194.9s）；新增 `model_benchmark_runner_test.go`（全部 due plan 均执行且仅一次 / 无 due plan 不产生执行 / 领取上限覆盖全部 due plan）。
+- 合并：`model_benchmark_runner.go`、`model_benchmark_runner_test.go`（新增）、`docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md`。不影响与上游合并（上游无此模块）。
+
+### 2026-10-16 模型测评 UI 重构与双标题消除
+
+- **双标题消除**：`ModelBenchmarkPlansView.vue`（测评计划）与 `ModelBenchmarkView.vue`（模型能力测评）移除页内手写的冗余 `<h1>` 标题与副标题，由系统的 `AppHeader` 统一接管路由元标题，解决一屏重复多级大标题的视觉问题。
+- **全宽表格卡片重构**：`ModelBenchmarkPlansView.vue` 废除原左侧 42% 常驻表单 + 右侧 58% 挤压表格的双栏布局，改造为全宽卡片表格；计划名称、模型、账号、Cron、状态、下次运行、最近运行及操作列舒展对齐，操作按钮横向整齐排列。
+- **新增测评计划模态框编辑与创建**：新建表单与编辑表单收进 `BaseDialog` 模态弹窗；操作列补充「编辑」按钮，支持回显并修改已有计划的所有配置项（名称、模型、账号、Cron、采样次数、max tokens、超时时间、是否启用），提交调用现有 `updatePlan` 接口更新并刷新列表。
+- **验证**：前端 vitest、typecheck、i18n completeness 检查及全量生产打包 `pnpm build` 均 100% 通过。
+- **合并**：改动面仅在 `frontend/src/views/admin/ModelBenchmarkPlansView.vue`、`ModelBenchmarkView.vue`、`i18n/locales/zh/admin/modelBenchmark.ts` 及单测文件；上游无此模块，不影响与上游合并。
+
+### 2026-10-16 修复 constrained-permutations 题目期望答案公式错误
+
+- **缺陷**：hard-v1 套件的 `constrained-permutations` 族题面为「前 k 个命名元素都必须保持原位置」，正确答案应为 (n-k)!（其余 n-k 个元素自由排列），但生成器误算 n!/k!（`model_benchmark_suite.go` 中 `for i := fixed+1; i <= n` 连乘）——该公式对应的是「保持原相对顺序」约束。导致本地 10 个 run × 2 variant 中所有正常执行的作答（模型均答出正确的 (n−k)!：120/720/5040/40320/362880）全部被 integer checker 误判 0 分。
+- **修复**：连乘改为 `for i := 2; i <= n-fixed`（即 (n-k)!），题面与 salt 不变（同 plan/run 的 prompt_hash 不变，仅判分期望修正）；`ModelBenchmarkSuiteVersion` 1.1.0 → 1.2.0（题目语义变化，历史 run 分数与新题不可比，靠 suite_version 区分；模型清单页「最近测试分数」刻意不过滤版本，行为不受影响）。
+- **回归测试**：新增 `TestModelBenchmarkConstrainedPermutationsAnswer`——遍历 200 个 seed 生成的实例，从题面提取 n、k 独立验证 expected == (n-k)!；`TestModelBenchmarkSuiteGeneratesHardV1` 的版本断言同步 1.2.0。
+- **验证**：Docker 容器 `go test -tags=unit -count=1 -run 'TestModelBenchmark' ./internal/service/` 全绿（含新增回归测试）。
+- **合并**：改动面 `model_benchmark_suite.go`、`model_benchmark_test.go`；上游无此模块，不影响与上游合并。历史 run 的该题 0 分记录不回溯重算，需要干净分数请重跑计划。
+
+### 2026-10-16 模型测评全部题型与判分正确性核实
+
+- **范围**：核实 `hard-v1` 全部 24 题型、2 变体（48 题），保留本轮开始前的排列公式修复与已有工作区变更；记录见 `docs/MODEL_CAPABILITY_BENCHMARK_QUESTION_AUDIT.md`。
+- **错误答案**：区间合并改为真正的最优区间 DP（n=7：168→74）；容斥交集由乘积改为 lcm（1..70 对 6/7/15：46→48）；持钥推理移除随机期望，按条件唯一推导。
+- **题意与能力考察**：补齐 KMP pi 定义、模逆元规范代表、令牌不足拒绝策略、数组形状、调度下标与整数数组字典序；补全布尔赋值、不变量和数值稳定性题的约束与选项；去除并发题/区间下标的答案提示，清理顺序题改为推导 Go defer 逆序。
+- **判分**：普通题按最后一个完整 JSON 对象提取答案；用 json.Number 保留整数精度，支持等价小数/指数整数和嵌套数值数组，区分字符串/数值；严格格式题检查整个响应、重复键和完整结构，禁止额外字段及部分得分；多字段错误原因补齐。
+- **版本**：题库 `1.2.0→1.3.0`、评分 `1.0.0→1.1.0`；run 写入实际执行版本，避免旧计划把新结果标为旧版。历史 run 不自动改分，不自动调用模型重跑。
+- **模块**：`backend/internal/service/model_benchmark_{suite,types,service}.go`、既有 `model_benchmark_test.go` 与新增 `model_benchmark_audit_test.go`；题库方案和核实记录同步更新；`.gitignore` 对核实记录单独放行以便纳入版本管理。
+- **验证**：新增从题面独立复算的 24×2×128=6144 个实例、33 个判分样例、区间全部规模、循环不变量与 256-bit 浮点参考边界。业务层、管理接口、仓储单元测试和 `go build ./...` 均通过；`git diff --check` 通过，golangci-lint 未安装未运行。详细命令状态见核实记录；真实模型与生产验收未执行。
+- **合并影响**：测评纯二开模块及文档；无 schema/迁移变更，不推进 `UPSTREAM-BASE`，不修改上游只读仓库。
+
+### 2026-10-16 模型能力测评 v2：56 题型 / 112 题与公共比较批次
+
+- **题库扩充**：`hard-v1` 题库 `2.0.0`、评分 `2.0.0`，从 24 题型/48 题扩展为 56 题型/112 题。新增抽象归纳、材料与数据、信息充分性、因果与概率、代码纠错和复杂规划 32 个原创题型；原核心题型的图、字符串、权重、并发对照、逻辑选项和输入结构也动态化。
+- **可比性**：新增 `comparison_key`（默认 `baseline-v2`）；题目由比较键 + 采样序号 + 题型 + 变体生成，不同模型同键同卷。run 持久化比较键、输出预算、单题超时、采样数和质量指标；旧 run 默认 `legacy`，不回溯改分。
+- **测量质量**：有效完成率、格式合规率、预算耗尽、能力域覆盖与排名资格分开展示；默认排行要求同版本/同卷/同预算/同超时/同采样、完成率 >=90%、各域覆盖 >=80%、至少 3 次，并显示分数标准差。OpenAI OAuth/Codex 的 provider-managed 预算结果仅诊断。
+- **判分**：新增 witness checker，验证反例、最小不一致子集、资源分配和路线方案的可行性与最优值，接受等价正确解；直连与流式路径识别 length/max_tokens/content_filter/incomplete，截断不按答错计。
+- **执行与数据**：run 总预算、claim 租约和收尾超时按 112 题 × 采样 × 单题超时计算；新增非破坏性迁移 `245_so_model_benchmark_comparison.sql`，只加比较键、预算快照、质量 JSON、索引和数值精度。WorkBuddy/Qoder/Trae 测试路径传递计划输出预算。
+- **模块**：`model_benchmark_{suite,extended_suite,types,service,executor,runner}.go`、repository/handler、`account_test_service.go` 与三平台网关、245 迁移、前端测评 API/两页面/i18n/测试、方案与核实文档。
+- **验证**：原 24 + 新增 32 题型共 14336 个独立复算实例 PASS；受影响后端 unit、迁移测试、`go build ./...`、隔离 PostgreSQL 迁移/仓储/排行/长租约测试、前端 8 个 Vitest、typecheck、指定 ESLint、`pnpm build`、Mocked API 桌面/移动浏览器验收均 PASS；`git diff --check` PASS。golangci-lint 未安装未运行；真实模型、难度校准和生产部署 NOT_RUN。
+- **合并影响**：模型测评为二开模块；新增迁移和 account 测试路径有小段上游冲突面，不推进 `UPSTREAM-BASE`，不修改上游只读仓库。
