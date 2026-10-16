@@ -341,3 +341,21 @@
 - **验证**：`go build ./...`、`go vet -tags=unit ./...` 通过；`pnpm build`（i18n + vue-tsc）通过。
 - **版本号**：`VERSION` 已同步为 `0.2.17`；`UPSTREAM-BASE` 推进至 `b0a02a3304a0a78cdd003ddda1dd23ba02c03084`。
 - **跳过/未同步**：支付链路（用户声明不使用）、README/sponsor/logo、en locale 包（so 已裁剪）、`AccountTableFilters.spec.ts`（上游删除、so 无）、 PaymentView/StripePaymentView/AccountTestModal 路径差异、部分 cropped-module 测试。
+
+### 2026-10-16 模型测评执行器：传输层失败单次重试
+- **描述**：模型能力测评执行器在遇到传输层错误（HTTP client 错误、429、5xx、超时）时自动进行一次重试；4xx 业务错误、格式错误、预算耗尽、内容过滤不重试，避免把可快速失败的请求拖长。终局耗时仍记录为完整两次请求链路长度，避免把重试耗时隐去。
+- **改动文件**：`backend/internal/service/model_benchmark_executor.go`。
+- **与上游合并影响**：无（so 私有功能，不影响上游）。
+
+## 模型能力中心单页融合（2026-10-16）
+
+- **功能描述**：将「模型清单」「测评计划」「模型能力测评」合并为单页 `模型能力中心`，采用 3 Tab（模型能力测评 / 模型清单 / 测评计划），统一状态保留；旧路由深链重定向到对应 tab。
+- **改动文件/模块**：
+  - `frontend/src/views/admin/model-capability/ModelCapabilityCenterView.vue`（新壳）
+  - `frontend/src/views/admin/model-capability/tabs/{OverviewTab,ManifestTab,PlansTab}.vue`（从原 views 抽出主体）
+  - `frontend/src/views/admin/{ModelManifestView,ModelBenchmarkView,ModelBenchmarkPlansView}.vue`（薄包装）
+  - `frontend/src/router/index.ts`（新增 `/admin/model-capability`，旧路由 redirect）
+  - `frontend/src/components/layout/AppSidebar.vue`（3 菜单合并为 1）
+  - `frontend/src/i18n/locales/zh/common.ts`（nav.modelCapabilityCenter）
+  - `docs/model-capability-center-design.html`、`mockups/model-capability-center-ui.html`
+- **与上游合并影响**：纯前端信息架构重排；backend API/schema 不动；旧 URL 仍可通过 redirect 访问，影响只限前端 admin 视图测试/路由断言。

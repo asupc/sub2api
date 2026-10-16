@@ -410,10 +410,6 @@ const PluginIcon = {
   render: () => h(Icon, { name: 'cube' })
 }
 
-const ModelManifestIcon = {
-  render: () => h(Icon, { name: 'cube' })
-}
-
 const BeakerIcon = {
   render: () => h(Icon, { name: 'beaker' })
 }
@@ -669,10 +665,8 @@ const adminNavItems = computed((): NavItem[] => {
         { path: '/admin/accounts', label: t('nav.accountsAll'), icon: null },
       ],
     },
-    // 模型清单与账号供给透视：账号管理的相邻入口，回答「某模型谁在供给/某账号提供哪些模型」
-    { path: '/admin/models', label: t('nav.modelManifest'), icon: ModelManifestIcon },
-    { path: '/admin/benchmark-plans', label: t('nav.benchmarkPlans'), icon: BeakerIcon },
-    { path: '/admin/model-benchmarks', label: t('nav.modelBenchmark'), icon: ChartIcon },
+    // 模型能力中心：融合模型清单、测评计划与模型能力测评
+    { path: '/admin/model-capability', label: t('nav.modelCapabilityCenter'), icon: BeakerIcon },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     {
       path: '/admin/security-audit',

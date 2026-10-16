@@ -182,6 +182,7 @@ export default {
     modelManifest: '模型清单',
     benchmarkPlans: '测评计划',
     modelBenchmark: '模型能力测评',
+    modelCapabilityCenter: '模型能力中心',
     plugins: '插件管理',
     ops: '运维监控',
     settings: '系统设置',

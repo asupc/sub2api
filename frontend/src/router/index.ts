@@ -331,35 +331,26 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/admin/models',
     name: 'AdminModelManifest',
-    component: () => import('@/views/admin/ModelManifestView.vue'),
-    meta: {
-      requiresAuth: true,
-      requiresAdmin: true,
-      title: 'Model Manifest',
-      titleKey: 'admin.modelManifest.title',
-      descriptionKey: 'admin.modelManifest.description'
-    }
+    redirect: { path: '/admin/model-capability', query: { tab: 'manifest' } },
   },
   {
     path: '/admin/benchmark-plans',
     name: 'AdminModelBenchmarkPlans',
-    component: () => import('@/views/admin/ModelBenchmarkPlansView.vue'),
-    meta: {
-      requiresAuth: true,
-      requiresAdmin: true,
-      title: 'Benchmark Plans',
-      titleKey: 'admin.modelBenchmark.plans.pageTitle',
-      descriptionKey: 'admin.modelBenchmark.plans.pageDescription'
-    }
+    redirect: { path: '/admin/model-capability', query: { tab: 'plans' } },
   },
   {
     path: '/admin/model-benchmarks',
     name: 'AdminModelBenchmark',
-    component: () => import('@/views/admin/ModelBenchmarkView.vue'),
+    redirect: { path: '/admin/model-capability', query: { tab: 'overview' } },
+  },
+  {
+    path: '/admin/model-capability',
+    name: 'AdminModelCapabilityCenter',
+    component: () => import('@/views/admin/model-capability/ModelCapabilityCenterView.vue'),
     meta: {
       requiresAuth: true,
       requiresAdmin: true,
-      title: 'Model Capability Benchmark',
+      title: 'Model Capability Center',
       titleKey: 'admin.modelBenchmark.title',
       descriptionKey: 'admin.modelBenchmark.description'
     }
