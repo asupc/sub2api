@@ -12,7 +12,7 @@
 2. **效率分 / Efficiency Score**：独立衡量输出 Token、总 Token、耗时与估算成本。
 3. **综合评级 / Composite Score**：默认 `85% 能力分 + 10% Token 效率 + 5% 耗时效率`，可配置，且必须与能力分分列展示。
 4. **历史曲线**：按套件版本、评分版本、公共试卷批次、输出预算、超时、采样数、模型、账号与时间范围展示趋势。
-5. **测量质量**：分开展示有效完成率、格式合规率、预算耗尽、排名资格与能力域覆盖，不让低覆盖高分进入默认排名。
+5. **测量质量**：分开展示有效完成率、格式合规率、预算耗尽、排名资格与能力域覆盖；排名资格仅作诊断标注，不构成排名门槛。
 
 不把该分数称为 IQ。它是“特定题集、公共试卷批次、评分版本、预算与账号路径下的相对能力表现”。
 
@@ -36,7 +36,7 @@
 - 不把账号健康检查结果当作能力分。
 - 不使用公开基准原题打包进仓库，避免版权与数据污染。
 - 不做人工评分、人工复核流和 LLM 裁判。
-- 不用单次高分下结论；排名要求同试卷、同版本、同预算、足够覆盖且至少 3 次合格 run。
+- 不用聚合均值掩盖最新表现；排名按题库版本展示，取每模型最新一次成功/部分成功 run 的成绩。
 
 ## 3. 题库设计：`hard-v1`
 
@@ -201,9 +201,9 @@ format_compliance_rate = valid_answered / answered
 ```
 
 - 网络失败、上游失败、预算耗尽、内容过滤标记 `execution_failed`，不计入答错。
-- 有效完成率低于 90%，或任一能力域有效覆盖率低于 80%，run 保留诊断分但不参与默认排名。
-- OpenAI OAuth/Codex 无法统一下发输出预算时，`max_output_tokens=0`，结果标记 provider-managed budget，仅作诊断，不混入固定预算排行。
-- 排名还要求同 suite/scoring 版本、同比较键、同输出预算、同超时、同采样数，且至少 3 次合格执行；显示多次分数标准差作为观测波动。
+- 有效完成率低于 90%，或任一能力域有效覆盖率低于 80%，run 的 `ranking_eligible` 置 false；该标记仍计算并展示，但仅作诊断标注，不再是排名门槛。
+- OpenAI OAuth/Codex 无法统一下发输出预算时，`max_output_tokens=0`，结果标记 provider-managed budget；此类 run 同样参与排名，行内以「由上游管理」徽标提示可比性风险。
+- 排名按题库三元组（suite/scoring 版本）过滤，无批次、预算、覆盖与最少次数门槛；每模型取最新一次成功/部分成功 run 的分数，`run_count` 展示该题库下的累计合格执行次数。
 
 ## 5. 历史曲线与可视化
 
@@ -233,8 +233,8 @@ format_compliance_rate = valid_answered / answered
 
 ### 5.3 可信度规则
 
-- 单次 run 显示 `single_run` 标识，不参与默认排名。
-- 默认排名取满足同试卷、同预算、同版本、覆盖门槛的至少 3 次 run 的平均分，并展示标准差。
+- 默认排名取每模型最新一次成功/部分成功 run 的成绩，跑过即可上榜，无最少次数门槛。
+- 排名默认展示最新题库，可切换至历史题库版本；跨题库版本不做直接比较。
 - 分数波动超过 8 点时显示波动提示。
 - 套件、评分版本、比较键或预算变化后必须开启新的历史序列，不做跨版本直接比较。
 
@@ -381,7 +381,8 @@ GET    /admin/model-benchmarks/runs
 GET    /admin/model-benchmarks/runs/:id
 GET    /admin/model-benchmarks/runs/:id/items
 GET    /admin/model-benchmarks/history?comparison_key&max_output_tokens&timeout_seconds&sample_count
-GET    /admin/model-benchmarks/rankings?comparison_key&max_output_tokens&timeout_seconds&sample_count
+GET    /admin/model-benchmarks/rankings?suite_id&suite_version&scoring_version&limit
+GET    /admin/model-benchmarks/rankings/suites
 GET    /admin/model-benchmarks/export
 ```
 
@@ -557,3 +558,12 @@ mockups/model-capability-benchmark-preview.html
 - B-02 的支持矩阵按 v2 更新：直接 Chat Completions API Key、二开 WorkBuddy/Qoder/Trae OAuth 真实转发路径、OpenAI OAuth/Codex Responses 流式诊断通道；其余仍服务端拒绝。
 - E01-E04 的完整闭合证据见 `MODEL_CAPABILITY_BENCHMARK_EXPANSION_PLAN.md` 实施结果。
 - 旧 run 不迁移、不改分、不自动发起请求；`comparison_key=legacy` 与新公共卷隔离。
+
+### 2026-10-16 排名规则修订记录
+
+**结论**：排名改为「跑过即上榜、按题库切换、取最新成绩」。去掉 ranking_eligible / 最少 3 次 / 同批次同预算匹配与 AVG+标准差聚合；`ranking_eligible` 仍在 run 聚合时计算并展示，转为纯诊断标注。新增 `GET /rankings/suites` 题库列表接口，`GET /rankings` 改为 `?suite_id&suite_version&scoring_version&limit`（缺省编译期最新题库）；provider-managed budget（`max_output_tokens=0`）run 全部入榜，行内以「由上游管理」徽标提示。前端排行卡片新增题库下拉（内置套件标「最新」），批次/预算筛选表单只作用于执行记录与历史曲线。
+
+### 2026-10-16 去账号化修订记录（公共网关回环）
+
+**结论**：本文件前文关于「模型 + 账号」绑定、B-02 平台适配矩阵、`account_id` 字段（plans/runs/历史过滤）的描述全部作废。测评计划不再绑定账号，执行改为 HTTP 回环打自身网关 `http://127.0.0.1:{server.port}/v1/chat/completions`（Bearer 测评专用 API Key，经 `model_benchmark_settings` 设置项选择，Key 须已绑定分组）：认证、分组白名单、调度选号、平台协议转换、流式 usage 标准化与计费全部走网关真实链路，任何平台一次覆盖。目标矩阵改为模型级（有可调度账号 + 非图像/视频生成模型）。迁移 `246` 删除 plans/runs 的 `account_id` 列（顺带消除 plans 账号外键的级联删除隐患）。代价：测评流量按所选 Key 正常计费、记用量、占并发槽与 RPM，建议专建测评分组 + Key。旧账号级执行通道（`RunBenchmarkPrompt` 及各平台测试链路 benchmark 感知代码）解除调用后保留。
+

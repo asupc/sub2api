@@ -216,3 +216,83 @@
 - **模块**：`model_benchmark_{suite,extended_suite,types,service,executor,runner}.go`、repository/handler、`account_test_service.go` 与三平台网关、245 迁移、前端测评 API/两页面/i18n/测试、方案与核实文档。
 - **验证**：原 24 + 新增 32 题型共 14336 个独立复算实例 PASS；受影响后端 unit、迁移测试、`go build ./...`、隔离 PostgreSQL 迁移/仓储/排行/长租约测试、前端 8 个 Vitest、typecheck、指定 ESLint、`pnpm build`、Mocked API 桌面/移动浏览器验收均 PASS；`git diff --check` PASS。golangci-lint 未安装未运行；真实模型、难度校准和生产部署 NOT_RUN。
 - **合并影响**：模型测评为二开模块；新增迁移和 account 测试路径有小段上游冲突面，不推进 `UPSTREAM-BASE`，不修改上游只读仓库。
+
+### 2026-10-16 测评计划页错误提示修复（[object Object]）
+
+- **问题**：测评计划有任务执行时编辑保存，后端返回 409 "model benchmark plan is running or not found"，但前端 catch 用 `error instanceof Error ? error.message : String(error)`，而 API 拦截器 reject 的是普通对象（非 Error 实例），`String()` 显示为 `[object Object]`。
+- **修复**：`ModelBenchmarkPlansView.vue` 全部 5 处 catch 改用项目统一的 `extractApiErrorMessage`，正确显示后端 message（含加载、编辑保存、启停、手动执行、删除）。
+- **模块**：`frontend/src/views/admin/ModelBenchmarkPlansView.vue`；纯前端展示层，无后端/迁移变更。
+- **验证**：该页 Vitest（4 用例）与 `pnpm typecheck` 通过。
+- **合并影响**：无（二开页面，上游无此文件）。
+
+### 2026-10-16 修复 OpenCode Go 模型测评 MissingSessionID 400
+
+- **问题**：模型测评（benchmark executor）对 OpenCode Go 账号走通用 Chat Completions 直连路径，该路径既不带 `x-opencode-session` 头（官方上游 2026-09-05 起强制，缺失即 400 `MissingSessionID`），也不收敛规范客户端 UA，且不按模型分流——muse-spark/gpt/grok 系列按官方端点表仅在 Responses 端点提供，直连 `/chat/completions` 本身就选错端点。账号连接测试路径此前已修复（协议路由 + UA + session 头齐全），测评路径漏同步。
+- **修复**：`ModelBenchmarkExecutor.Execute` 将 OpenCode Go 账号并入流式捕获通道（`executeSourceIntegrated` → `AccountTestService.RunBenchmarkPrompt`），即真实转发路径：按模型协议路由（muse-spark→Responses 等）、UA 收敛、session 头生成全部复用既有逻辑。其余平台（kimi/zhipu/deepseek/minimax/cline 等）仍走通用直连。
+- **模块**：`backend/internal/service/model_benchmark_executor.go`（分流条件 + 注释）、`model_benchmark_test.go`（新增 `TestModelBenchmarkOpenCodeGoUsesStreamingChannel` 回归测试）。
+- **验证**：`internal/service` 全包 `go test -tags=unit` 通过（195s）。
+- **合并影响**：模型测评为二开模块；`model_benchmark_test.go` 上游无此文件。不推进 `UPSTREAM-BASE`。
+
+### 2026-10-16 测评计划表单布局统一
+
+- **调整**：新建/编辑测评计划弹窗中,名称与公共试卷批次原先独占整行(公共试卷批次 label 间距与帮助文字样式也不同),观感与双列区不一致;现将两字段并入双列 grid,表单 8 字段两两并排(名称/模型、账号/Cron、采样数/输出预算、单题超时/公共试卷批次),公共试卷批次帮助文字降为 11px 小字(与模型平台提示同款式)。
+- **模块**：`frontend/src/views/admin/ModelBenchmarkPlansView.vue`;纯模板布局调整,无逻辑/接口变更。
+- **验证**：该页 Vitest(4 用例)与 `pnpm typecheck` 通过。
+- **合并影响**：无(二开页面,上游无此文件)。
+
+### 2026-10-16 模型测评排名规则调整（跑过即上榜 / 题库可切换 / 取最新成绩）
+
+- **调整**：排名接口去掉全部门槛——ranking_eligible 资格、至少 3 次执行、同批次（comparison_key）与同预算三元组精确匹配、AVG+标准差聚合；改为按题库三元组（suite_id/suite_version/scoring_version）过滤，每模型取最新一次 success/partial run 的成绩（窗口函数 ROW_NUMBER，同分平局按 run_count DESC、model_id ASC）。`ranking_eligible` 仍在 run 聚合时计算并在执行记录中展示，转为纯诊断标注。provider-managed budget（max_output_tokens=0）run 全部入榜，前端行内以「由上游管理」徽标提示可比性。
+- **新接口**：`GET /admin/model-benchmarks/rankings/suites`（列出存在可排名执行的题库版本组合）；`GET /rankings` 参数改为 `?suite_id&suite_version&scoring_version&limit`（缺省编译期最新题库），旧参数静默忽略。API 契约变更：分数均值→最新值、删 `score_stddev`、`run_count` 语义改为该题库累计合格执行次数。
+- **前端**：排行卡片新增题库下拉（内置套件标「最新」，历史题库按最近执行时间排列，切换只刷新排名区）；批次/预算筛选表单只作用于执行记录与历史曲线，不影响排名；删 ±标准差展示。
+- **模块**：`backend/internal/service/model_benchmark_types.go`（Ranking 删 ScoreStddev、接口签名、新增 RankingSuite DTO 与 RankingFilters）、`model_benchmark_service.go`（合并 ListRankings/ListComparisonRankings、新增 ListRankingSuites）、`backend/internal/repository/model_benchmark_repo.go`（SQL 重写 + ListRankingSuites）、`backend/internal/handler/admin/model_benchmark_handler.go`、`backend/internal/server/routes/admin.go`；`frontend/src/api/admin/modelBenchmarks.ts`、`views/admin/ModelBenchmarkView.vue`、`i18n/locales/zh/admin/modelBenchmark.ts`；测试 `model_benchmark_comparison_test.go`（断言重写 + 历史题库覆盖）、`ModelBenchmarkView.spec.ts`（mock 补 listRankingSuites、用例重写）；文档 `docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md`（5 处规则描述 + 修订记录）、openspec spec.md scenario 修订。无数据库迁移。
+- **验证**：后端 Docker golang:1.27.2 `go build` + `go test -tags=unit`（repository/service/handler/server/routes 全绿）；前端 Vitest（4 用例）+ typecheck + build（含 i18n 完整性检查）通过。
+- **合并影响**：模型测评为二开模块，上游无对应文件；不推进 `UPSTREAM-BASE`。
+
+### 2026-10-16 模型能力测评全景重构（以模型为中心 / 双视角分离 / 专属透视抽屉）
+
+- **背景与痛点**：原有评测大盘以低频批次运维表单占据首屏黄金位置；多维能力柱状图硬编码取自全局最后一次 Run，与选定模型脱节误导；历史折线图受后端强制默认值锁死导致历史点缺失；列表页无法按模型过滤与下钻。
+- **架构重塑**：
+  - **双视角分离**：引入 Tab 导航，解耦「模型能力中心（Leaderboard & Capability Matrix，核心视角）」与「评测执行流水（Runs Table，运维流水视角）」。
+  - **模型全景透视抽屉 (Model Detail Drawer)**：榜单支持实时模糊搜索与多指标排序，点击任意模型行/卡片立即滑出全景抽屉，聚合展示该模型的：最新评分指标、9 维能力画像雷达图、历史评分/延迟/Token 演进折线图、该模型专属历史 Runs 列表以及快捷【立即评测此模型】。
+  - **折线图与雷达图**：开发轻量纯 SVG 响应式雷达图（`RadarChart.vue`）与交互式折线走势图（`TrendLineChart.vue`，支持指标切换与时间轴 Tooltip），零重型第三方库负担。
+  - **单次 Run 深度检视**：单次评测详情抽取为独立模态框（`RunDetailModal.vue`），支持题目用例按状态/类别筛选并展开完整 Prompt 与模型思维链推理（Reasoning）。
+- **后端适配**：
+  - `ModelBenchmarkRanking` 补充 `category_scores` 字段，榜单查询一次性带出 9 维能力分布。
+  - 放宽 `ListHistory` 逻辑：当指定 `model_id` 时不强制锁死默认批次与预算条件，使得能获取单模型的全量演进历史。
+  - 新增单模型全景透视接口：`GET /admin/model-benchmarks/models/:model_id/overview`（返回排名、最新Run、关联计划、历史趋势、最近10次Runs）。
+- **模块**：
+  - 后端：`internal/service/model_benchmark_types.go`、`internal/service/model_benchmark_service.go`、`internal/repository/model_benchmark_repo.go`、`internal/handler/admin/model_benchmark_handler.go`、`internal/server/routes/admin.go`。
+  - 前端：`api/admin/modelBenchmarks.ts`、`views/admin/ModelBenchmarkView.vue`、`views/admin/components/benchmark/{ModelLeaderboard,ModelDetailDrawer,RadarChart,TrendLineChart,RunsTable,RunDetailModal}.vue`、`i18n/locales/zh/admin/modelBenchmark.ts`。
+  - 测试：更新 `ModelBenchmarkView.spec.ts` 适配新架构与抽屉下钻用例。
+- **验证**：后端 Docker 单元测试通过；前端 `pnpm check:i18n` + `pnpm typecheck` + `pnpm test:run` + `pnpm build` 全绿。
+- **合并影响**：模型测评为二开模块，上游无对应文件；不推进 `UPSTREAM-BASE`。
+
+
+### 2026-10-16 测评计划去账号化：改走公共网关回环
+
+- **背景**：测评目标矩阵按平台逐个适配（此前 WorkBuddy/Antigravity 相继漏列，"有账号选不了"反复出现）。用户决策：计划不再绑定账号，直接走公共网关由调度统一选号，一次性覆盖全部平台。
+- **架构**：executor 不再直连上游、不再复用账号测试通道，改为 HTTP 回环打自身网关 `http://127.0.0.1:{server.port}/v1/chat/completions`（Bearer 测评 Key）——认证、分组白名单、复合路由、调度、平台协议转换、流式 usage 标准化与计费全部走真实链路。载荷为标准 OpenAI Chat Completions（真实题目、temperature=0、max_tokens、stream + include_usage）；SSE 聚合 delta 文本 / finish_reason / usage。内部函数调用方案已评估并否决：转发与 failover 编排深度耦合 `*gin.Context`，复刻即双份链路。
+- **测评身份设置**：新增 `model_benchmark_settings` 设置项（Rectifier 四步模式），存回环认证用 API Key ID；保存校验 Key 存在、启用、未过期且已绑定分组（未分组 Key 会被网关 `RequireGroupAssignment` 拦截）。API Key 明文存储可经 `GetKeyAndOwnerID` 取回。新端点 `GET/PUT /admin/model-benchmarks/settings`。
+- **目标矩阵改为模型级**：`IsSupportedModelBenchmarkTarget`（按账号）删除，替换为 `isModelBenchmarkSupportedModel`（有可调度账号 + 非图像/视频生成模型）。`ListTargets` 不再逐账号过滤，任何平台的模型均可测评。
+- **数据库**：迁移 `246_so_model_benchmark_gateway_mode.sql`——`plans.account_id`（原带 ON DELETE CASCADE 外键，删账号会级联删计划，隐患一并消除）与索引、`runs.account_id` 删除；`upstream_model_id` 语义改为网关响应回写模型名（请求模型名兜底）。
+- **代价说明（真实链路）**：测评流量按所选 Key 正常计费、记用量、占用户并发槽与 RPM；建议专建测评分组 + Key。多计划并行时共享该用户的并发/RPM 配额。
+- **旧通道代码保留未删**：`AccountTestService.RunBenchmarkPrompt` 与各平台测试链路的 benchmark 感知载荷/事件（qoder/trae/openai-oauth 适配）解除调用后保留——普通"测试连接"路径共存无冲突，且属上游同步敏感区，不做无谓删改。
+- **模块**：`backend/migrations/246_*.sql`、`internal/repository/model_benchmark_repo.go`、`internal/service/model_benchmark_{types,service,executor}.go`、`setting_features.go`、`settings_view.go`、`domain_constants.go`、`wire.go`、`cmd/server/wire_gen.go`、`internal/handler/admin/model_benchmark_handler.go`、`internal/server/routes/admin.go`；前端 `api/admin/modelBenchmarks.ts`、`views/admin/ModelBenchmarkPlansView.vue`（删账号列/下拉/校验，新增测评设置卡片：分组→Key 两级下拉）、`components/benchmark/RunDetailModal.vue`（删账号徽标）、`i18n/locales/zh/admin/modelBenchmark.ts`；测试 `model_benchmark_test.go`（回环 httptest 网关 + 模型级矩阵 + 设置校验）、`model_benchmark_execution_budget_test.go`、`model_benchmark_{audit,queue_run,runner}_test.go`、`model_benchmark_migration_test.go`、`model_benchmark_comparison_test.go`、`model_benchmark_repo_test.go`、`ModelBenchmarkPlansView.spec.ts`、`ModelBenchmarkView.spec.ts`。
+- **验证**：后端 Docker golang:1.27.2 `go build ./...`、`go vet -tags=unit ./...`、`go test -tags=unit`（service/repository/migrations/handler 全绿；config 包 3 个用例为容器环境既有失败，stash 基线复现确认与本次无关）；前端全量 Vitest 288 文件 / 2131 用例全过（exit 1 来自 `KeyUsageView.spec.ts` 自身动画帧 teardown 竞态的 2 个 unhandled error，与测评文件零依赖、单跑该 spec 即通过，属既有问题）+ typecheck + build（含 i18n 完整性检查）通过；迁移 246 已在本地库应用并核对（两表 account_id 列与索引已消除）。
+- **合并影响**：模型测评为二开模块，上游无对应文件；wire_gen.go 为生成物（provider 签名收窄后同步更新）；不推进 `UPSTREAM-BASE`。
+
+### 2026-10-16 复合分组同族多平台统一调度（所有权多平台从 fail-closed 改为合并池）
+
+- **背景**：同一公开模型名被多个平台的可调度账号在 `model_mapping` 显式认领时（生产实例：`deepseek-v4-pro` 同时映射于 qoder 与 workbuddy 账号，两侧上游各自健康），上游设计 fail-closed 拒绝（"model is exposed by multiple provider platforms" → 503 no available accounts，请求不出网关），跨供应商容量无法互备。
+- **语义变更**：所有权解析（`resolveCompositeModelOwnership`）返回排序去重的平台集合；集合成员同属一个网关族（`domain.UsesOpenAIGateway` 二分，typesafe 属 GatewayHandler 族）时，两条调度链的候选池合并为全部认领平台的认领账号，负载均衡与账号级 failover 跨平台生效；**跨族歧义保留 fail-closed**（一条请求只能进一条协议链），Reason 追加 "configure an explicit composite route" 提示并打 `composite_model_ownership_cross_family` 告警日志。显式路由 > 所有权 > 前缀探测器的优先级不变。
+- **实现**：
+  - 解析层：`CompositeModelOwnership` 删 `TargetPlatform/Ambiguous` 改 `TargetPlatforms []string`；`CompositeRouteDecision` 新增 `TargetPlatforms`（单平台决策仍只填 `TargetPlatform`，既有消费者零改动）；ctx 新增集合 key `ResolvedTargetPlatforms`，多平台时**不写单值**。
+  - 回填（计费零改动核心）：新增 `ContextWithSelectedAccountPlatform`，在 11 处选号成功点（Gateway 族 8 处 ProfitGate 相邻 + OpenAI 族 Responses/Messages/chat_completions/WS）把实际账号平台回填为单值 `ResolvedTargetPlatform`——`QuotaPlatform`、渠道费率、ops 平台归因等 20+ 处单值读取自动正确；failover 重选每次重写。账号不在候选集合内时不回填（防假归属）。
+  - Gateway 族池：`resolveSchedulingPlatforms`/`listSchedulableAccountsForPlatforms`（逐平台复用既有单平台快照桶后按账号 ID 合并去重，**快照桶/Mode 零结构改动**）；`isAccountAllowedForPlatforms`；`SelectAccountWithLoadAwareness`/`SelectAccountForModelWithExclusions`/`selectAccountForModelWithPlatform` 平台参数切片化；粘性判定与模型路由（`anyModelRoutingAppliesToPlatforms` 并集）随集合泛化。
+  - OpenAI 族池：新增 `openAIPlatformConstraint` 贯穿 eligibility/recheck/legacy 链；`SelectAccountWithSchedulerForCapability` 的 `platformOverride ...string` 语义升级为"全部值=候选集"（既有单值调用点零改动）；`OpenAIAccountScheduleRequest` 增 `Platforms`+`AllowsPlatform`；`listSchedulableAccountsForConstraint` 多平台合并。归属闸门（`source==account_model` 仅显式认领账号可服务）按账号判定，多平台池天然延续。
+  - 入口：`getGroupPlatform` 集合时返回排序首成员作族代表（仅 handler 链分发，不用于池过滤）；grok 专属门（voice/realtime/web_search/x_search/video edit/extension）与 openai-only 门（embeddings）改交集判定 `resolvedPlatformSetIntersects`；images 多平台时交集恰 {openai}/{grok} 才放行、含两者保守 404；gemini v1beta 中间件集合含 gemini 时塌缩单值。handler 前置门（`ensureCompositeTargetPlatform`/`compositeTargetPlatformAllowed`/`compositeTargetPlatformResolved`）支持集合（探测器不得覆盖集合、白名单交集放行）；WS 守卫集合全部成员 ∈ {openai,grok} 才放行；grok/CN dispatch 豁免改"集合含任一成员"。
+  - 计费准入：`CheckBillingEligibility` 内部在"平台为空且 ctx 携带集合"时按 `checkUserPlatformQuotaEligibilityAnyOf` 预检——任一候选平台有余量即放行、全部拒绝才拒绝（调用点零改动）；计量仍按回填后的实际平台，`RecordUsage` 既有 composite→account.Platform 兜底保留。
+- **已知限制**：/v1beta 入口多平台集合塌缩为 gemini 单池；Codex 能力广告（`openai_codex_model_metadata`）维持跨平台别名 fail-closed（仅 text、不广告推理等级）；在途预留估算对多平台 fail-open（空平台桶→无账号基准）；OpenAI WS 多平台集合 transport 放宽为 Any 由调度器按账号能力匹配。
+- **验证**：Docker golang:1.27.2 `go build ./...` 通过；`go test -tags=unit` 全绿（service 195s + handler/admin/server/routes/repository）。新增测试：`TestCompositeRouteResolverMergesSameFamilyMultiPlatformOwnership` / `...DoesNotGuessCrossFamilyAccountOwnership`（解析器）、`TestCompositeTargetPlatformMiddlewareMultiPlatformOwnershipWritesSetNotSingle` / `TestGetGroupPlatformMultiPlatformSetReturnsFamilyRepresentative` / `TestResolvedPlatformSetIntersectsGatesMultiPlatformRequests`（入口）、`TestGatewayService_SelectAccountForModelWithExclusions_CompositeMultiPlatformPool`（Gateway 族跨平台 failover+归属闸门）、`TestOpenAIGatewayService_SelectAccountWithScheduler_MultiPlatformUnifiedPool`（OpenAI 族）、`TestContextWithSelectedAccountPlatformBackfillsActualPlatform`（回填）。生产冒烟（部署后执行）：deepseek-v4-pro 双平台负载均衡、单平台故障转移、粘性、usage_log 平台归属、跨族 503+提示日志。
+- **合并影响**：composite 解析/调度链为二开密集区（`gateway_scheduling.go`/`openai_account_scheduler.go`/`openai_gateway_scheduling.go` 与上游高冲突面重合），上游同步时按本条目语义重放；不推进 `UPSTREAM-BASE`。

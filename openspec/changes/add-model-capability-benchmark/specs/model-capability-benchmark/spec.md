@@ -92,6 +92,8 @@
 ### Requirement: 历史曲线必须按版本隔离
 系统 MUST 保存每次 run 的总分、分类分、Token、耗时、成本、成功率和状态，并提供历史曲线查询。历史比较 MUST 绑定相同 `suite_id + suite_version + scoring_version`。管理端 MUST 支持能力分、分类分、输出 Token、总 Token、平均耗时、P95 耗时、估算成本和多模型对比曲线。
 
+> 2026-10-16 修订：排名改为按题库三元组（`suite_id + suite_version + scoring_version`）过滤，取每模型最新一次 success/partial run 的成绩，不再要求最少 3 次、同批次同预算或覆盖门槛；默认展示最新题库，可切换历史题库版本。
+
 #### Scenario: 套件版本升级
 - **WHEN** 套件或评分版本变化
 - **THEN** 新旧 run MUST NOT 默认聚合到同一条可比曲线
@@ -100,7 +102,7 @@
 #### Scenario: 单次 run
 - **WHEN** 某模型只有一个成功 run
 - **THEN** 曲线可以展示该点
-- **THEN** 默认排名 MUST 标记其为 single run 而不是稳定排名
+- **THEN** 默认排名 MUST 取该 run 的分数并作为该模型的最新成绩展示
 
 ### Requirement: 管理端提供可视化测评控制台
 系统 MUST 在后台提供模型能力测评页面，包含总览指标、模型排行、历史曲线、能力拆解、题库预览、计划管理、run 详情和逐题判定原因。排行 MUST 展示能力分、效率分、综合评级、Token、耗时、成本和最近趋势。run 详情 MUST 能解释每题得分、Token、耗时和错误类型。
