@@ -1,5 +1,7 @@
 # Implementation Evidence
 
+> 2026-10-16 说明：文首 MVP 记录为历史证据；当前 v2 状态、支持矩阵和最终验证见文末“2026-10-16 v2 智力能力扩充证据”。
+
 > 日期：2026-10-15。证据只覆盖本变更；`PASS` 不外推到生产、真实模型或业务验收。
 
 ## 已实现范围
@@ -85,3 +87,32 @@
 - Backend target 列表改为直接复用 `ModelManifestService.GetManifest()`，再按 active/schedulable/benchmark 支持矩阵过滤账号。
 - 前端新建计划模型下拉直接读取模型清单 API，展示全量模型并支持搜索与平台过滤；仅账号下拉限定为可测评账号，不支持模型显示明确提示并禁用提交。
 - 验证：`go test -tags=unit ./internal/service -run 'TestModelBenchmark...'`、`go test -tags=unit ./cmd/server`、`go build ./...`、`pnpm vitest run src/views/admin/__tests__/ModelBenchmarkView.spec.ts`、`pnpm typecheck`、指定文件 ESLint、`pnpm build` 均通过。
+
+## 2026-10-16 v2 智力能力扩充证据
+
+### 后端与题库
+
+| 检查 | 结果 | 说明 |
+|---|---|---|
+| `go test -tags=unit ./internal/service -run 'Test(ModelBenchmark|GeneratedBenchmark)' -count=1` | PASS | 原 24 题型 6144 实例 + 新增 32 题型 8192 实例，共 14336 个独立复算 |
+| `go test -tags=unit ./internal/service ./internal/repository ./internal/handler/admin ./migrations -count=1` | PASS | 覆盖业务层、仓储、管理 API、迁移内容与执行预算 |
+| `go build ./...` | PASS | 后端编译 |
+| isolated PostgreSQL fixture comparison repository test | PASS | 243/244/245 顺序与重复执行、legacy、比较/预算过滤、排名标准差、长租约、数值精度 |
+| isolated PostgreSQL migration integration test | PASS | 通过 `SUB2API_INTEGRATION_EXTERNAL_DSN` 迁移链创建核心表和 v2 列 |
+
+### 前端与浏览器
+
+| 检查 | 结果 | 说明 |
+|---|---|---|
+| `pnpm --dir frontend typecheck` | PASS | vue-tsc 0 errors |
+| 指定 ModelBenchmark Vitest | PASS | 2 files / 8 tests |
+| 指定 ModelBenchmark ESLint | PASS | 本次改动文件无问题 |
+| `pnpm --dir frontend build` | PASS | i18n、类型与生产构建通过 |
+| Mocked API Chromium | PASS | 桌面 / 390px 移动端；比较条件、公共批次保存、九域、诊断 run、无页面错误、无移动端横向溢出 |
+
+### 边界
+
+- 未运行真实模型 v2 测评，未做难度校准，未部署生产，未验证真实生产数据库迁移。
+- `golangci-lint` 在当前后端容器不可用，未运行；不能用上述测试替代 lint 结论。
+- 传输层单次重试、CSV 导出、429/5xx 完整矩阵仍是后续项。
+- 旧历史 run 保留原始分数和 `legacy` 比较键，不自动重算或自动发起请求。

@@ -567,7 +567,11 @@ func (s *AccountTestService) testWorkbuddyAccountConnection(c *gin.Context, acco
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	payloadBytes, _ := json.Marshal(createOpenAIChatCompletionsTestPayload(testModelID, prompt))
+	payload := createOpenAIChatCompletionsTestPayload(testModelID, prompt)
+	if isBenchmarkAccountTest(c) {
+		payload["max_tokens"] = modelBenchmarkOutputLimit(c)
+	}
+	payloadBytes, _ := json.Marshal(payload)
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 /v2/chat/completions 测试连接"})
 

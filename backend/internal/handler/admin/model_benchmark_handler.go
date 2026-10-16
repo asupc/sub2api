@@ -23,6 +23,7 @@ func NewModelBenchmarkHandler(benchmarkService *service.ModelBenchmarkService) *
 }
 
 type modelBenchmarkPlanRequest struct {
+	ComparisonKey   string `json:"comparison_key"`
 	Name            string `json:"name" binding:"required"`
 	SuiteID         string `json:"suite_id"`
 	ModelID         string `json:"model_id" binding:"required"`
@@ -36,7 +37,7 @@ type modelBenchmarkPlanRequest struct {
 }
 
 func (r modelBenchmarkPlanRequest) toPlan() *service.ModelBenchmarkPlan {
-	plan := &service.ModelBenchmarkPlan{Name: r.Name, SuiteID: r.SuiteID, ModelID: r.ModelID, AccountID: r.AccountID, CronExpression: r.CronExpression, SampleCount: r.SampleCount, MaxOutputTokens: r.MaxOutputTokens, TimeoutSeconds: r.TimeoutSeconds, MaxResults: r.MaxResults}
+	plan := &service.ModelBenchmarkPlan{ComparisonKey: r.ComparisonKey, Name: r.Name, SuiteID: r.SuiteID, ModelID: r.ModelID, AccountID: r.AccountID, CronExpression: r.CronExpression, SampleCount: r.SampleCount, MaxOutputTokens: r.MaxOutputTokens, TimeoutSeconds: r.TimeoutSeconds, MaxResults: r.MaxResults}
 	if r.Enabled != nil {
 		plan.Enabled = *r.Enabled
 	}
@@ -145,7 +146,7 @@ func (h *ModelBenchmarkHandler) QueueRun(c *gin.Context) {
 
 // ListRuns GET /admin/model-benchmarks/runs
 func (h *ModelBenchmarkHandler) ListRuns(c *gin.Context) {
-	filters := service.ModelBenchmarkRunFilters{ModelID: c.Query("model_id"), Status: c.Query("status"), Limit: parseModelBenchmarkLimit(c.Query("limit"), 50), Offset: parseModelBenchmarkOffset(c.Query("offset"))}
+	filters := service.ModelBenchmarkRunFilters{MaxOutputTokens: modelBenchmarkQueryInt(c, "max_output_tokens"), TimeoutSeconds: modelBenchmarkQueryInt(c, "timeout_seconds"), SampleCount: modelBenchmarkQueryInt(c, "sample_count"), ComparisonKey: c.Query("comparison_key"), ModelID: c.Query("model_id"), Status: c.Query("status"), Limit: parseModelBenchmarkLimit(c.Query("limit"), 50), Offset: parseModelBenchmarkOffset(c.Query("offset"))}
 	if id, err := strconv.ParseInt(c.Query("plan_id"), 10, 64); err == nil && id > 0 {
 		filters.PlanID = &id
 	}
@@ -187,7 +188,7 @@ func (h *ModelBenchmarkHandler) ListRunItems(c *gin.Context) {
 
 // ListHistory GET /admin/model-benchmarks/history
 func (h *ModelBenchmarkHandler) ListHistory(c *gin.Context) {
-	filters := service.ModelBenchmarkHistoryFilters{SuiteID: c.Query("suite_id"), SuiteVersion: c.Query("suite_version"), ScoringVersion: c.Query("scoring_version"), ModelID: c.Query("model_id"), Limit: parseModelBenchmarkLimit(c.Query("limit"), 500)}
+	filters := service.ModelBenchmarkHistoryFilters{MaxOutputTokens: modelBenchmarkQueryInt(c, "max_output_tokens"), TimeoutSeconds: modelBenchmarkQueryInt(c, "timeout_seconds"), SampleCount: modelBenchmarkQueryInt(c, "sample_count"), ComparisonKey: c.Query("comparison_key"), SuiteID: c.Query("suite_id"), SuiteVersion: c.Query("suite_version"), ScoringVersion: c.Query("scoring_version"), ModelID: c.Query("model_id"), Limit: parseModelBenchmarkLimit(c.Query("limit"), 500)}
 	if id, err := strconv.ParseInt(c.Query("account_id"), 10, 64); err == nil && id > 0 {
 		filters.AccountID = &id
 	}
@@ -211,7 +212,7 @@ func (h *ModelBenchmarkHandler) ListHistory(c *gin.Context) {
 
 // ListRankings GET /admin/model-benchmarks/rankings
 func (h *ModelBenchmarkHandler) ListRankings(c *gin.Context) {
-	rankings, err := h.service.ListRankings(c.Request.Context(), parseModelBenchmarkLimit(c.Query("limit"), 50))
+	rankings, err := h.service.ListComparisonRankings(c.Request.Context(), parseModelBenchmarkLimit(c.Query("limit"), 50), service.ModelBenchmarkHistoryFilters{ComparisonKey: c.Query("comparison_key"), MaxOutputTokens: modelBenchmarkQueryInt(c, "max_output_tokens"), TimeoutSeconds: modelBenchmarkQueryInt(c, "timeout_seconds"), SampleCount: modelBenchmarkQueryInt(c, "sample_count")})
 	if err != nil {
 		response.InternalError(c, err.Error())
 		return
@@ -255,4 +256,12 @@ func writeModelBenchmarkError(c *gin.Context, err error) {
 	default:
 		response.ErrorFrom(c, err)
 	}
+}
+
+func modelBenchmarkQueryInt(c *gin.Context, key string) int {
+	value, err := strconv.Atoi(c.Query(key))
+	if err != nil || value < 0 || value > 100000 {
+		return 0
+	}
+	return value
 }

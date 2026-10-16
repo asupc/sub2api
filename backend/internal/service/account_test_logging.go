@@ -47,3 +47,14 @@ func logAccountTestError(c *gin.Context, message string) {
 		zap.String("error", truncateString(message, 2048)),
 	)
 }
+
+const accountTestBenchmarkLimitKey = "account_test_benchmark_limit"
+
+func modelBenchmarkOutputLimit(c *gin.Context) int {
+	if c != nil {
+		if limit := c.GetInt(accountTestBenchmarkLimitKey); limit >= 128 && limit <= 4096 {
+			return limit
+		}
+	}
+	return defaultModelBenchmarkMaxOutputTokens
+}

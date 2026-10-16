@@ -18,6 +18,7 @@ export interface ModelBenchmarkSuite {
 }
 
 export interface ModelBenchmarkPlan {
+  comparison_key: string
   id: number
   name: string
   suite_id: string
@@ -42,6 +43,7 @@ export interface ModelBenchmarkPlan {
 }
 
 export interface ModelBenchmarkPlanRequest {
+  comparison_key?: string
   name: string
   suite_id?: string
   model_id: string
@@ -54,7 +56,22 @@ export interface ModelBenchmarkPlanRequest {
   max_results?: number
 }
 
+export interface ModelBenchmarkQuality {
+  completion_rate: number
+  format_compliance_rate: number
+  format_error_count: number
+  budget_exhausted_count: number
+  ranking_eligible: boolean
+  ranking_reason: string
+  category_coverage: Record<string, number>
+}
+
 export interface ModelBenchmarkRun {
+  comparison_key: string
+  max_output_tokens: number
+  timeout_seconds: number
+  sample_count: number
+  quality?: ModelBenchmarkQuality
   id: number
   plan_id: number
   suite_id: string
@@ -117,6 +134,10 @@ export interface ModelBenchmarkRunItem {
 }
 
 export interface ModelBenchmarkHistoryPoint {
+  comparison_key: string
+  max_output_tokens: number
+  timeout_seconds: number
+  sample_count: number
   run_id: number
   model_id: string
   account_id: number
@@ -133,6 +154,11 @@ export interface ModelBenchmarkHistoryPoint {
 }
 
 export interface ModelBenchmarkRanking {
+  comparison_key: string
+  max_output_tokens: number
+  timeout_seconds: number
+  sample_count: number
+  score_stddev?: number | null
   model_id: string
   suite_id: string
   suite_version: string
@@ -202,8 +228,8 @@ export async function listHistory(params?: Record<string, string | number>): Pro
   return data ?? []
 }
 
-export async function listRankings(limit = 50): Promise<ModelBenchmarkRanking[]> {
-  const { data } = await apiClient.get<ModelBenchmarkRanking[]>('/admin/model-benchmarks/rankings', { params: { limit } })
+export async function listRankings(limit = 50, comparisonKey = 'baseline-v2', budget: Record<string, number> = {}): Promise<ModelBenchmarkRanking[]> {
+  const { data } = await apiClient.get<ModelBenchmarkRanking[]>('/admin/model-benchmarks/rankings', { params: { limit, comparison_key: comparisonKey, ...budget } })
   return data ?? []
 }
 

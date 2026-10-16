@@ -65,6 +65,9 @@ func (s *ModelBenchmarkService) CreatePlan(ctx context.Context, input *ModelBenc
 	input.SuiteID = ModelBenchmarkSuiteID
 	input.SuiteVersion = ModelBenchmarkSuiteVersion
 	input.ScoringVersion = ModelBenchmarkScoringVer
+	if input.ComparisonKey == "" {
+		input.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+	}
 	if input.Name == "" || input.ModelID == "" || input.CronExpression == "" {
 		return nil, fmt.Errorf("%w: name, model_id and cron_expression are required", ErrModelBenchmarkInvalidPlan)
 	}
@@ -81,17 +84,17 @@ func (s *ModelBenchmarkService) CreatePlan(ctx context.Context, input *ModelBenc
 	if input.SampleCount <= 0 {
 		input.SampleCount = 1
 	}
-	if err := validateModelBenchmarkPlanLimits(input); err != nil {
-		return nil, err
-	}
 	if input.MaxOutputTokens <= 0 {
-		input.MaxOutputTokens = 768
+		input.MaxOutputTokens = 2048
 	}
 	if input.TimeoutSeconds <= 0 {
 		input.TimeoutSeconds = 90
 	}
 	if input.MaxResults <= 0 {
 		input.MaxResults = 50
+	}
+	if err := validateModelBenchmarkPlanLimits(input); err != nil {
+		return nil, err
 	}
 	if input.Enabled {
 		next := time.Now().Add(time.Minute)
@@ -122,6 +125,9 @@ func (s *ModelBenchmarkService) UpdatePlan(ctx context.Context, id int64, input 
 		existing.Enabled = true
 	} else if input.Enabled == false {
 		existing.Enabled = false
+	}
+	if input.ComparisonKey != "" {
+		existing.ComparisonKey = input.ComparisonKey
 	}
 	if input.SampleCount > 0 {
 		existing.SampleCount = input.SampleCount
@@ -213,15 +219,59 @@ func (s *ModelBenchmarkService) ListHistory(ctx context.Context, filters ModelBe
 	if filters.ScoringVersion == "" {
 		filters.ScoringVersion = ModelBenchmarkScoringVer
 	}
+	if filters.ComparisonKey == "" && filters.SuiteVersion == ModelBenchmarkSuiteVersion {
+		filters.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+	}
+	if filters.SuiteVersion == ModelBenchmarkSuiteVersion {
+		if filters.MaxOutputTokens <= 0 {
+			filters.MaxOutputTokens = 2048
+		}
+		if filters.TimeoutSeconds <= 0 {
+			filters.TimeoutSeconds = 90
+		}
+		if filters.SampleCount <= 0 {
+			filters.SampleCount = 1
+		}
+	}
 	return s.repo.ListHistory(ctx, filters)
 }
 
 // ListRankings returns models with at least three comparable runs.
-func (s *ModelBenchmarkService) ListRankings(ctx context.Context, limit int) ([]*ModelBenchmarkRanking, error) {
-	return s.repo.ListRankings(ctx, ModelBenchmarkSuiteID, ModelBenchmarkSuiteVersion, ModelBenchmarkScoringVer, limit)
+func (s *ModelBenchmarkService) ListRankings(ctx context.Context, limit int, comparisonKeys ...string) ([]*ModelBenchmarkRanking, error) {
+	key := ModelBenchmarkDefaultComparisonKey
+	if len(comparisonKeys) > 0 && comparisonKeys[0] != "" {
+		key = comparisonKeys[0]
+	}
+	return s.ListComparisonRankings(ctx, limit, ModelBenchmarkHistoryFilters{ComparisonKey: key})
+}
+func (s *ModelBenchmarkService) ListComparisonRankings(ctx context.Context, limit int, filters ModelBenchmarkHistoryFilters) ([]*ModelBenchmarkRanking, error) {
+	if filters.ComparisonKey == "" {
+		filters.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+	}
+	if filters.MaxOutputTokens <= 0 {
+		filters.MaxOutputTokens = 2048
+	}
+	if filters.TimeoutSeconds <= 0 {
+		filters.TimeoutSeconds = 90
+	}
+	if filters.SampleCount <= 0 {
+		filters.SampleCount = 1
+	}
+	return s.repo.ListRankings(ctx, ModelBenchmarkSuiteID, ModelBenchmarkSuiteVersion, ModelBenchmarkScoringVer, filters.ComparisonKey, limit, filters.MaxOutputTokens, filters.TimeoutSeconds, filters.SampleCount)
 }
 
 func validateModelBenchmarkPlanLimits(plan *ModelBenchmarkPlan) error {
+	if plan.ComparisonKey == "" {
+		plan.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+	}
+	if len(plan.ComparisonKey) > 64 {
+		return fmt.Errorf("%w: comparison_key exceeds 64 characters", ErrModelBenchmarkInvalidPlan)
+	}
+	for _, c := range plan.ComparisonKey {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return fmt.Errorf("%w: comparison_key only accepts letters, numbers, dot, underscore and hyphen", ErrModelBenchmarkInvalidPlan)
+		}
+	}
 	if plan.SampleCount < 1 || plan.SampleCount > 3 ||
 		plan.MaxOutputTokens < 128 || plan.MaxOutputTokens > 4096 ||
 		plan.TimeoutSeconds < 10 || plan.TimeoutSeconds > 600 ||
@@ -240,16 +290,23 @@ func (s *ModelBenchmarkService) ExecutePlan(ctx context.Context, plan *ModelBenc
 	if err != nil {
 		return err
 	}
-	run := &ModelBenchmarkRun{PlanID: plan.ID, SuiteID: plan.SuiteID, SuiteVersion: plan.SuiteVersion, ScoringVersion: plan.ScoringVersion, ModelID: plan.ModelID, UpstreamModelID: account.GetMappedModel(plan.ModelID), AccountID: plan.AccountID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
+	// Generation and scoring use the built-in implementation, including for older plans.
+	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 2 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: account.GetMappedModel(plan.ModelID), AccountID: plan.AccountID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
+	if account.Platform == PlatformOpenAI && account.IsOpenAIOAuthLike() {
+		run.MaxOutputTokens = 0
+	}
+	if run.ComparisonKey == "" {
+		run.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+	}
 	run, err = s.repo.CreateRun(ctx, run)
 	if err != nil {
 		return err
 	}
-	generated := GenerateModelBenchmarkItems(plan.ID, run.ID)
-	items := make([]ModelBenchmarkRunItem, 0, len(generated)*plan.SampleCount)
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(len(generated)*plan.SampleCount*plan.TimeoutSeconds+30)*time.Second)
+	items := make([]ModelBenchmarkRunItem, 0, run.ItemCount)
+	runCtx, cancel := context.WithTimeout(ctx, ModelBenchmarkRunBudget(plan))
 	defer cancel()
-	for sample := 1; sample <= plan.SampleCount; sample++ {
+	for sample := 1; sample <= max(plan.SampleCount, 1); sample++ {
+		generated := GenerateModelBenchmarkComparisonItems(run.ComparisonKey, sample)
 		for _, generatedItem := range generated {
 			select {
 			case <-runCtx.Done():
@@ -280,11 +337,19 @@ func (s *ModelBenchmarkService) ExecutePlan(ctx context.Context, plan *ModelBenc
 }
 
 func (s *ModelBenchmarkService) finishRun(ctx context.Context, plan *ModelBenchmarkPlan, run *ModelBenchmarkRun, items []ModelBenchmarkRunItem, execErr error) error {
+	ctx = context.WithoutCancel(ctx)
+	finishCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ctx = finishCtx
 	now := time.Now()
 	run.FinishedAt = &now
 	AggregateModelBenchmarkRun(run, items)
 	if execErr != nil {
-		run.Status = "failed"
+		run.Status = "partial"
+		if run.AnsweredCount == 0 {
+			run.Status = "failed"
+		}
+		run.Quality.RankingEligible = false
 		run.ErrorMessage = execErr.Error()
 	}
 	aggregateModelBenchmarkUsage(run, items)

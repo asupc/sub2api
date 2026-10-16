@@ -1,7 +1,7 @@
 # 模型能力测评实施计划（Model Capability Benchmark）
 
-> 状态：MVP 已实施，尚未做真实模型验收；剩余缺口见 OpenSpec `tasks.md` 与 `implementation-evidence.md`。
-> 日期：2026-10-15
+> 状态：v2 题库与比较机制已实施并通过本地/模拟验收；尚未做真实模型智力校准与生产验收。
+> 日期：2026-10-16（v2 扩充）
 > 可视化预览：`mockups/model-capability-benchmark-preview.html`
 
 ## 1. 定位与核心结论
@@ -11,16 +11,17 @@
 1. **能力分 / Intelligence Score**：只由正确性计算，不被 Token 用量或耗时污染。
 2. **效率分 / Efficiency Score**：独立衡量输出 Token、总 Token、耗时与估算成本。
 3. **综合评级 / Composite Score**：默认 `85% 能力分 + 10% Token 效率 + 5% 耗时效率`，可配置，且必须与能力分分列展示。
-4. **历史曲线**：按套件版本、模型、账号、时间范围展示能力分、分类分、Token、耗时、成本趋势，并支持多模型对比。
+4. **历史曲线**：按套件版本、评分版本、公共试卷批次、输出预算、超时、采样数、模型、账号与时间范围展示趋势。
+5. **测量质量**：分开展示有效完成率、格式合规率、预算耗尽、排名资格与能力域覆盖，不让低覆盖高分进入默认排名。
 
-不把该分数称为 IQ。它是“特定题集、特定评分版本、特定账号路径下的相对能力表现”。
+不把该分数称为 IQ。它是“特定题集、公共试卷批次、评分版本、预算与账号路径下的相对能力表现”。
 
 ## 2. 目标与非目标
 
 ### Goals
 
 - 支持定时和手动触发模型测评。
-- 题目难度面向当前强模型：`hard-v1` 全部为难度 3-5，不包含送分题。
+- 题目难度面向当前强模型：`hard-v1 v2.0.0` 覆盖 56 个题型、112 题、9 个能力域；D3-D5 仍为配置标签，待真实模型校准。
 - 所有答案由服务端程序自动判定，不使用 LLM-as-judge。
 - 记录输入 / 输出 / 推理 / 缓存 Token、总耗时、估算成本和错误类型。
 - 保留每次 run 与每题明细，支持历史曲线和多模型对比。
@@ -35,94 +36,69 @@
 - 不把账号健康检查结果当作能力分。
 - 不使用公开基准原题打包进仓库，避免版权与数据污染。
 - 不做人工评分、人工复核流和 LLM 裁判。
-- 不用单次高分下结论；排名默认基于多次成功 run。
+- 不用单次高分下结论；排名要求同试卷、同版本、同预算、足够覆盖且至少 3 次合格 run。
 
 ## 3. 题库设计：`hard-v1`
 
 ### 3.1 套件规模
 
-| 套件 | 题量 | 难度 | 用途 |
-|---|---:|---|---|
-| `hard-v1` | 48 | D3-D5 | 默认正式测评 |
-| `ultra-v1` | 96（Phase 2） | D4-D5 | 旗舰模型细分排名 |
-| `spot-check-v1` | 12（Phase 2） | D3-D4 | 低成本巡检，不用于正式排名 |
-
-第一版只实现 `hard-v1`。
-
-### 3.2 题量分布
-
-| 能力维度 | 题量 | 类别权重 | 难度分布 |
+| 套件 / 版本 | 题型 | 题量 | 状态 |
 |---|---:|---:|---|
-| 高级数学与组合推理 | 10 | 22% | D3×3，D4×5，D5×2 |
-| 算法、复杂度与不变量 | 10 | 24% | D3×3，D4×4，D5×3 |
-| 多约束逻辑与形式推理 | 8 | 18% | D3×2，D4×4，D5×2 |
-| 代码缺陷与符号执行 | 8 | 18% | D3×2，D4×4，D5×2 |
-| 规划、调度与图论 | 6 | 10% | D3×2，D4×3，D5×1 |
-| 精确指令与抗干扰 | 6 | 8% | D3×2，D4×3，D5×1 |
+| `hard-v1` suite `2.0.0` / scoring `2.0.0` | 56 | 112 | 当前正式测评 |
+| `hard-v1` suite `1.3.0` / scoring `1.1.0` | 24 | 48 | 历史修正版，仅用于隔离旧证据 |
+| `hard-v1` 1.1.0 / 1.2.0 | 24 | 48 | 含已知题库缺陷，不作能力结论 |
 
-难度权重：
+公共试卷批次默认 `baseline-v2`。批次、采样序号、题型与变体共同生成确定性实例；同一批次和采样序号下，不同模型拿到同题。采样序号 1..3 生成三份独立试卷，重复执行同序号主要衡量稳定性。
 
-- D3 = 1.0
-- D4 = 1.5
-- D5 = 2.2
+### 3.2 能力域与权重
 
-最终题目权重 = 类别权重归一系数 × 难度权重，运行前由题库加载器计算并写入 run item 快照。
+| 能力域 | 题型数 | 题数 | 类别权重 | 难度分布（题型） |
+|---|---:|---:|---:|---|
+| 抽象归纳 abstraction | 6 | 12 | 14% | D4×4，D5×2 |
+| 材料与数据 understanding | 6 | 12 | 12% | D4×4，D5×2 |
+| 形式逻辑 logic | 8 | 16 | 14% | D4×4，D5×4 |
+| 因果与概率 causal | 4 | 8 | 8% | D4×1，D5×3 |
+| 算法复杂度 algorithms | 7 | 14 | 12% | D3×1，D4×3，D5×3 |
+| 代码与程序推演 code | 9 | 18 | 12% | D3×1，D4×6，D5×2 |
+| 规划调度 planning | 7 | 14 | 12% | D4×2，D5×5 |
+| 数学组合 math | 6 | 12 | 10% | D4×3，D5×3 |
+| 精确指令 instruction | 3 | 6 | 6% | D4×2，D5×1 |
+| **合计** | **56** | **112** | **100%** | D3×2，D4×29，D5×25 |
 
-### 3.3 题目家族与动态参数
+最终题目权重先在能力域内按题型数量归一，再乘难度权重（D3=1.0、D4=1.5、D5=2.2）。因此每个能力域总分占比等于上表类别权重，不因题型数量重复放大。
 
-`hard-v1` 采用 **24 个题目家族 × 每家族 2 个动态实例 = 48 题**：
+### 3.3 公共试卷与动态参数
 
-- 每个家族有固定考察目标、checker 和输出 schema。
-- 每次 run 使用 `plan_id + run_id + item_family + suite_salt` 生成确定性随机参数。
-- 数字、集合、图边、约束条件、变量名可变，标准答案由 Go 生成器同步计算。
-- 数据库保存 `family_id`、`suite_version`、`scoring_version`、`prompt_hash`，不保存服务端 salt。
-- 同一 run 内可复现，跨 run 不完全重复，降低缓存与题库泄漏影响。
+- 每个题型有固定考察目标、checker、输出 schema 和两个变体。
+- 实例输入由比较键、采样序号、题型、变体与套件 salt 派生；不使用 plan/run/account ID，消除“不同模型不同题”的混杂。
+- 图结构、字符串、权重、条件、选项标签和干扰材料可变；核心题型也避免只替换案例编号。
+- 数据库保存 `family_id`、`category`、`difficulty`、`prompt_hash`、比较键与预算快照，不保存服务端 salt 或标准答案。
+- 同一 run 内可复现；不同比较键或采样序号生成独立试卷，降低缓存与题库泄漏影响。
 
-### 3.4 高难度题型示例
+### 3.4 v2 新增能力域
 
-以下为题型家族，不直接作为固定原题入库：
+1. **抽象归纳**：仿射规则、符号替换、序列变换、网格对称、关系复合、有限状态机。
+2. **材料与数据**：账本 reconciliation、多跳记录、单位换算、加权比例、长上下文版本关联、版本化政策。
+3. **形式逻辑与信息充分性**：偏序关系、Horn 规则闭包、量词真值、约束蕴含、最小不一致子集、缺失信息。
+4. **因果与概率**：干预期望、个体反事实、贝叶斯后验、辛普森分组/汇总差异。
+5. **代码与纠错**：循环边界、逆波兰表达式、错误程序反例、证明首错步骤。
+6. **规划调度**：依赖最早完成、二维资源背包、时间窗路线、库存订货策略。
+7. **精确指令**：抗干扰提取、嵌套筛选与输出形状约束。
 
-1. **模运算与数论**：大整数幂取模、逆元、同余方程组，输出 JSON 数值。
-2. **组合计数**：受限排列、环染色、容斥计数，要求精确整数。
-3. **概率与期望**：马尔可夫链期望步数或吸收概率，输出分数或小数并带容差。
-4. **动态规划**：带字典序 tie-break 的背包 / 区间 DP，输出最优值与决策序列。
-5. **图算法**：带负权检测的最短路、最小生成树唯一性、强连通缩点结果。
-6. **贪心反例**：判断给定贪心策略是否产生最优解，并给出反例编号。
-7. **复杂度分析**：递归式、均摊复杂度、最坏与平均差异，输出复杂度枚举值。
-8. **程序不变量**：循环不变量选择，多字段部分计分。
-9. **符号执行**：给定分支与输入域，输出可达路径编号集合。
-10. **代码缺陷定位**：并发竞态、整数溢出、off-by-one、时间比较错误，输出缺陷类型与行号。
-11. **多约束满足**：时间、资源、优先级、互斥约束，输出完整排序。
-12. **调度优化**：单机 / 双机 job scheduling，输出 makespan 与顺序。
-13. **依赖解析**：循环依赖检测与拓扑序 tie-break。
-14. **逻辑证明**：判断蕴含、矛盾、可满足，输出 SAT model 或 UNSAT certificate type。
-15. **信息更新**：公共知识 / 声明一致性推理，输出唯一可能集合。
-16. **矩阵推理**：稀疏矩阵乘法结果的非零坐标集合。
-17. **字符串算法**：KMP 失配函数、后缀数组片段、最小编辑路径。
-18. **数值稳定性**：识别浮点误差来源并输出稳定公式编号。
-19. **资源边界**：流量整形 / token bucket 状态推演，输出多时刻容量。
-20. **异常路径**：错误包装、临时资源清理顺序，输出最终错误链。
-21. **精确格式**：在干扰文本中输出严格 JSON，不允许额外字段。
-22. **自校验**：模型需先验证自身答案是否满足全部约束，再输出最终字段。
-23. **反直觉陷阱**：包含看似可简化但不可简化的条件，防止公式套用。
-24. **多目标权衡**：在约束下选择 Pareto 最优方案集合。
+原 24 个核心题型保留，但拓扑图、KMP 字符串、区间权重、并发安全/竞态、不变量选项、贪心面额、持钥陈述、清理注册顺序、Pareto 输入与数值稳定性选项均改为动态生成。
 
 ### 3.5 输出契约
 
 每题要求模型只输出一个 JSON 对象，例如：
 
 ```json
-{
-  "answer": {"value": 73920, "path": ["B", "A", "D", "C"]},
-  "check": {"constraint_1": true, "constraint_2": false},
-  "confidence": 0.82
-}
+{"answer": {"value": 51, "first_merge_left_index": 0}}
 ```
 
 服务端判定规则：
 
-- 只接受最后一个合法 JSON 对象，忽略外层 code fence。
-- 先做 JSON Schema 校验，再做 checker 判定。
+- 普通正确性题接受最后一个合法 JSON 对象中的 `answer`，容忍外层 code fence 和说明文字；数组、对象中的 JSON 数值按数值语义比较，整数判分不经过 float64 舍入。
+- `strict-schema` 是精确指令题：整个响应必须是仅含 `answer` 的 JSON 对象，不接受说明文字、code fence、重复键或额外字段；答案结构和值必须全部匹配，不给字段部分分。
 - 非法 JSON：格式部分不得分；若关键字段缺失，该题不得分。
 - 网络失败、上游不可用、超时：标记 `execution_failed`，不得按答错计 0 污染能力分。
 - 答案错误：能力分按 0 处理。
@@ -133,15 +109,21 @@
 | Checker | 用途 |
 |---|---|
 | `exact` | 归一化字符串 / 枚举精确匹配 |
-| `integer` | 大整数精确匹配 |
+| `integer` | int64 范围内整数精确匹配，解码保留数值精度 |
 | `number_tolerance` | 数值与小数容差 |
 | `set` | 无序集合 |
 | `sequence` | 有序序列 |
 | `fields` | 多字段部分得分 |
-| `boolean_matrix` | 布尔矩阵 |
-| `schema_only` | 结构与约束字段校验 |
+| `schema_only` | 精确结构与约束字段校验 |
+| `witness` | 验证模型给出的反例 / 调度 / 不一致子集本身是否可行且达到最优值，接受所有等价正确解 |
 
-所有 scorer 必须是纯 Go 函数，不访问 DB、网络或全局时钟，便于确定性单测。
+所有 scorer 必须是纯 Go 函数，不访问 DB、网络或全局时钟，便于确定性单测。多字段题仅 `fields` 给部分分；`schema_only` 和 witness 均为全对或全错。
+
+### 3.7 题库正确性核实（2026-10-16）
+
+题目、标准答案、比较语义或 checker 变更必须升级对应版本。当前题库为 `2.0.0`、评分为 `2.0.0`；run 记录实际执行版本、比较键和预算快照，不能沿用旧计划创建时的标签。旧 run 保留原始证据，标为 `legacy` 比较键，不自动回溯改分或发起上游测评。
+
+原 24 题型与新增 32 题型的题意、唯一性、答案推导、独立复算及边界回归见 [题库正确性核实记录](MODEL_CAPABILITY_BENCHMARK_QUESTION_AUDIT.md)。核实题库正确性不等同于证明全部题目达到 D3-D5 的测量难度，也不等同于真实模型验收。
 
 ## 4. 评分与指标设计
 
@@ -210,6 +192,19 @@ composite_score = intelligence_score × 0.85
 - 历史曲线必须能单独查看能力分、Token、耗时、成本，避免只看综合分造成误读。
 - 网络导致的极端耗时可标记 outlier，但不自动剔除，剔除策略需管理员明确操作。
 
+### 4.4 测量质量与排名资格
+
+```text
+valid_answered = answered - format_error
+completion_rate = valid_answered / planned_items
+format_compliance_rate = valid_answered / answered
+```
+
+- 网络失败、上游失败、预算耗尽、内容过滤标记 `execution_failed`，不计入答错。
+- 有效完成率低于 90%，或任一能力域有效覆盖率低于 80%，run 保留诊断分但不参与默认排名。
+- OpenAI OAuth/Codex 无法统一下发输出预算时，`max_output_tokens=0`，结果标记 provider-managed budget，仅作诊断，不混入固定预算排行。
+- 排名还要求同 suite/scoring 版本、同比较键、同输出预算、同超时、同采样数，且至少 3 次合格执行；显示多次分数标准差作为观测波动。
+
 ## 5. 历史曲线与可视化
 
 ### 5.1 曲线指标
@@ -217,7 +212,7 @@ composite_score = intelligence_score × 0.85
 历史页面支持：
 
 1. 能力分趋势。
-2. 数学 / 算法 / 逻辑 / 代码 / 规划 / 指令分类分趋势。
+2. 九个能力域分类分趋势：抽象归纳、材料与数据、逻辑、因果概率、算法、代码、规划、数学、指令。
 3. 输出 Token 与总 Token 趋势。
 4. 耗时趋势：平均值、P95、最大值。
 5. 估算成本趋势。
@@ -228,8 +223,9 @@ composite_score = intelligence_score × 0.85
 ### 5.2 过滤与交互
 
 - 时间范围：24h / 7d / 30d / 90d / custom。
-- 套件：`hard-v1`，必须绑定 `suite_version + scoring_version`。
+- 套件：`hard-v1`，必须绑定 `suite_version + scoring_version + comparison_key`。
 - 模型：单选或多选。
+- 比较条件：输出预算、单题超时、采样数；诊断 run 可查看但不混入固定预算排名。
 - 账号：全部 / 指定账号。
 - 状态：仅成功 / 包含 partial。
 - 图表交互：显示数值点、异常 run 标记、导出 CSV、打开对应 run 详情。
@@ -238,9 +234,9 @@ composite_score = intelligence_score × 0.85
 ### 5.3 可信度规则
 
 - 单次 run 显示 `single_run` 标识，不参与默认排名。
-- 默认排名取最近 3 次成功 run 的加权平均：最新 3、次新 2、更早 1。
+- 默认排名取满足同试卷、同预算、同版本、覆盖门槛的至少 3 次 run 的平均分，并展示标准差。
 - 分数波动超过 8 点时显示波动提示。
-- 套件或评分版本变化后必须开启新的历史序列，不做跨版本直接比较。
+- 套件、评分版本、比较键或预算变化后必须开启新的历史序列，不做跨版本直接比较。
 
 ## 6. 数据库设计
 
@@ -365,13 +361,12 @@ backend/internal/handler/admin/model_benchmark_handler.go
 ### 7.2 调度与并发
 
 - 独立 cron runner，不修改现有 scheduled account test 语义。
-- 每分钟扫描 due plan。
-- 使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取，防止多实例重复执行。
-- 全局 benchmark 并发默认 1，可配置上限 2。
+- 每分钟扫描 due plan，使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 原子领取。
+- 每个 tick 领取全部 due plan 并行执行；同账号并行不做互斥，由计划排期自行规避。
 - 单 plan 内题目默认串行，避免打爆账号限流。
-- 每题独立 timeout，run 总 timeout 为题数 × 单题 timeout + 固定裕量。
-- 优雅停机时未完成 run 标记 `partial`，不伪装 success。
-- 计划默认 `enabled=false`。
+- 每题独立 timeout；run 预算为 `112 × sample_count × timeout + 2 分钟` 收尾裕量。
+- 领取租约覆盖完整 run 预算 + 1 分钟，不因 112 题长 run 被其他实例重复领取。
+- 服务停机取消执行上下文；已完成题目与 partial 证据用独立收尾超时持久化，不伪装 success。
 
 ### 7.3 API
 
@@ -385,8 +380,8 @@ POST   /admin/model-benchmarks/plans/:id/run
 GET    /admin/model-benchmarks/runs
 GET    /admin/model-benchmarks/runs/:id
 GET    /admin/model-benchmarks/runs/:id/items
-GET    /admin/model-benchmarks/history
-GET    /admin/model-benchmarks/rankings
+GET    /admin/model-benchmarks/history?comparison_key&max_output_tokens&timeout_seconds&sample_count
+GET    /admin/model-benchmarks/rankings?comparison_key&max_output_tokens&timeout_seconds&sample_count
 GET    /admin/model-benchmarks/export
 ```
 
@@ -401,68 +396,69 @@ GET    /admin/model-benchmarks/export
 1. **总览卡片**：最近 run、平均能力分、Token 用量、平均耗时、估算成本、活跃计划。
 2. **模型排行**：能力分、效率分、综合评级、输出 Token、耗时、成本、最近趋势 sparkline。
 3. **历史曲线**：多指标切换、多模型对比、异常点标记、run 详情跳转。
-4. **能力拆解**：六类分类分条形图 / 雷达图。
-5. **题库预览**：题目家族、难度、checker、类别权重；不展示标准答案。
-6. **计划管理**：模型、账号、套件、Cron、采样数、Token 上限、超时、启用状态。
-7. **Run 详情**：状态、分数、Token、耗时、每题输出、错误与判定原因。
+4. **能力拆解**：九类分类分条形图。
+5. **比较条件**：公共试卷批次、输出预算、超时与采样数；诊断与合格结果分开展示。
+6. **题库预览**：题目家族、难度、checker、类别权重；不展示标准答案。
+7. **计划管理**：模型、账号、套件、Cron、比较键、采样数、Token 上限、超时、启用状态。
+8. **Run 详情**：状态、分数、完成率、格式合规率、预算耗尽、排名资格、Token、耗时、每题输出、错误与判定原因。
 
 ## 9. 实施阶段
 
 ### Phase 0：方案确认
 
-- [ ] 确认 `hard-v1` 48 题规模与难度分布。
-- [ ] 确认默认综合评级权重 `85 / 10 / 5`。
-- [ ] 确认默认 Cron（建议每周一次）与全局并发（建议 1）。
-- [x] 确认第一阶段支持的模型平台范围：仅支持 OpenAI 网关下可通过 Chat Completions 直连的 API Key 账号（openai / Kimi / Zhipu / DeepSeek / MiniMax / OpenCode / Command Code / Cline）。OpenAI OAuth/Codex、Claude/Anthropic、Gemini、Grok、Antigravity、WorkBuddy/Qoder/Trae、TypeSafe 与媒体/Realtime 模型先显式禁用，待 Phase 2 适配。
+- [x] 确认 `hard-v1` v2 为 56 题型 / 112 题；难度标签待真实模型校准。
+- [x] 确认默认综合评级权重 `85 / 10 / 5`。
+- [x] 确认默认 Cron 为每周一次；全局并发为每 tick 全部 due plan 并行（2026-10-16）。
+- [x] 支持矩阵：openai / Kimi / Zhipu / DeepSeek / MiniMax / OpenCode / Command Code / Cline 的 OpenAI 兼容 Chat Completions API Key；二开 WorkBuddy / Qoder / Trae OAuth 经真实源码集成路径；OpenAI OAuth/Codex 经 Responses 流式通道（预算由上游管理，仅诊断）。Claude/Anthropic、Gemini、Grok、Antigravity、TypeSafe 与媒体/Realtime 模型仍服务端拒绝。
 
 ### Phase 1：数据与评分内核
 
-- [ ] 新增 SQL migration 与 repository。
-- [ ] 实现题目家族、动态生成器和 suite hash。
-- [ ] 实现 checker 与分数聚合。
-- [ ] 单测覆盖非法 JSON、部分得分、数值容差、集合、序列、usage 缺失。
+- [x] 新增 SQL migration 与 repository。
+- [x] 实现题目家族、动态生成器和 suite hash。
+- [x] 实现 checker 与分数聚合。
+- [x] 单测覆盖非法 JSON、部分得分、数值容差、集合、序列、usage 缺失。
 
 ### Phase 2：执行器
 
-- [ ] 实现非流式优先请求与流式 fallback。
-- [ ] 采集 usage、latency、first token、错误分类。
-- [ ] 支持每题独立 timeout 与传输层单次重试。
-- [ ] 用 httptest / fake upstream 覆盖成功、失败、超时、格式错误。
+- [x] 实现非流式优先请求与流式 fallback。
+- [x] 采集 usage、latency、first token、错误分类。
+- [ ] 支持每题独立 timeout 与传输层单次重试（timeout 已实施；传输层单次重试仍未实施）。
+- [x] 用 httptest / fake upstream 覆盖成功、失败、超时、格式错误。
 
 ### Phase 3：调度器
 
-- [ ] 实现独立 cron runner。
-- [ ] 实现 due plan 原子领取。
-- [ ] 实现优雅停机和 partial 状态。
-- [ ] 集成测试覆盖重复领取、多计划、失败恢复。
+- [x] 实现独立 cron runner。
+- [x] 实现 due plan 原子领取。
+- [x] 实现优雅停机和 partial 状态。
+- [x] 集成测试覆盖重复领取、多计划、失败恢复。
 
 ### Phase 4：管理 API
 
-- [ ] 实现 plans / runs / items / history / rankings API。
-- [ ] 增加参数校验、分页、排序、导出。
-- [ ] Handler 测试覆盖权限、非法参数和错误响应。
+- [x] 实现 plans / runs / items / history / rankings API。
+- [x] 增加参数校验、分页与排序；导出仍未实施。
+- [x] Handler 测试覆盖错误响应；权限沿用 admin 路由中间件。
 
 ### Phase 5：前端页面
 
-- [ ] 新增 API client 与类型。
-- [ ] 新增模型测评页面和路由。
-- [ ] 实现排行、曲线、分类拆解、计划管理、run 详情。
-- [ ] 补齐 zh i18n 与 Vitest。
+- [x] 新增 API client 与类型。
+- [x] 新增模型测评页面和路由。
+- [x] 实现排行、曲线、分类拆解、计划管理、run 详情。
+- [x] 补齐 zh i18n 与 Vitest。
 
 ### Phase 6：验收与记录
 
-- [ ] 后端 unit / integration / lint。
-- [ ] 前端 test / typecheck / build。
-- [ ] 本地数据库迁移重复执行测试。
+- [ ] 后端 unit / integration / lint（当前 unit 与 build 已通过；integration 和 lint 见最终核实记录）。
+- [x] 前端指定 Vitest / typecheck / build 已通过。
+- [x] 本地隔离 PostgreSQL 迁移重复执行测试已通过。
 - [ ] 用 fixture 上游完成完整 fake E2E。
 - [ ] 真实模型仅做小样本冒烟，明确标记环境与账号。
-- [ ] 更新 `CHANGELOG-SO.md`。
+- [x] 更新 `CHANGELOG-SO.md`。
 
 ## 10. 验收标准
 
 1. 默认安装后不自动发起任何测评请求。
 2. 创建计划后，能按 Cron 和手动触发执行。
-3. 48 题全部生成动态实例并保存 `prompt_hash`。
+3. 112 题全部生成动态实例并保存 `prompt_hash`。
 4. 答案评分完全由服务端程序完成。
 5. Token、耗时、成本指标逐题与逐 run 可见。
 6. usage 缺失时明确显示 `missing`，不虚构效率分。
@@ -480,7 +476,7 @@ GET    /admin/model-benchmarks/export
 | 上游 usage 缺失 | 标记 missing，效率分不可比 |
 | 网络耗时干扰模型能力 | 能力分与效率分分离 |
 | 账号路径影响公平性 | 固定模型 + 账号，展示平台与映射目标 |
-| 成本失控 | 默认关闭、题量上限、全局并发 1、预算提示 |
+| 成本失控 | 默认关闭、题量上限、预算提示 |
 | 多实例重复执行 | `FOR UPDATE SKIP LOCKED` |
 | 题库过拟合 | 保留多套生成家族，后续引入新版本 |
 | 历史误读 | suite/scoring 版本隔离，显示 single_run 与波动 |
@@ -553,3 +549,11 @@ mockups/model-capability-benchmark-preview.html
 - S-01：效率分明确使用“可见输出 Token 效率”，总 Token / 推理 / 缓存 / 成本独立展示。
 - S-02：成本优先使用现有 BillingService 定价；缺价显式 `pricing_source=missing`，不虚构成本。
 - S-03：run item 保存脱敏 prompt snapshot、prompt hash、family / checker / weight 与错误原因，并随 `max_results` 清理。
+
+### 2026-10-16 v2 扩充复核记录
+
+**结论**：通过。此次复核覆盖 56 题型 / 112 题、公共比较批次、预算隔离、覆盖率门槛、非破坏性迁移、执行时限、流式截断证据、管理端 UI 和移动端布局。历史 MVP 记录中“前端专项测试未完成”的结论已被本轮 8 个 Vitest、typecheck、ESLint、build 和 Mocked API Chromium 验收取代；CSV 导出、传输层单次重试、真实模型难度校准和生产部署仍为未完成项。
+
+- B-02 的支持矩阵按 v2 更新：直接 Chat Completions API Key、二开 WorkBuddy/Qoder/Trae OAuth 真实转发路径、OpenAI OAuth/Codex Responses 流式诊断通道；其余仍服务端拒绝。
+- E01-E04 的完整闭合证据见 `MODEL_CAPABILITY_BENCHMARK_EXPANSION_PLAN.md` 实施结果。
+- 旧 run 不迁移、不改分、不自动发起请求；`comparison_key=legacy` 与新公共卷隔离。

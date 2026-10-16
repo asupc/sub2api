@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode"
@@ -18,10 +20,11 @@ import (
 func TestModelBenchmarkSuiteGeneratesHardV1(t *testing.T) {
 	suite := GetModelBenchmarkSuite()
 	require.Equal(t, "hard-v1", suite.ID)
-	require.Equal(t, "1.1.0", suite.Version)
-	require.Equal(t, 48, suite.ItemCount)
+	require.Equal(t, "2.0.0", suite.Version)
+	require.Equal(t, "2.0.0", suite.ScoringVersion)
+	require.Equal(t, 112, suite.ItemCount)
 	items := GenerateModelBenchmarkItems(1, 2)
-	require.Len(t, items, 48)
+	require.Len(t, items, 112)
 	seen := map[string]bool{}
 	for _, item := range items {
 		require.False(t, seen[item.ID], "duplicate item %s", item.ID)
@@ -43,6 +46,28 @@ func TestModelBenchmarkSuiteGeneratesHardV1(t *testing.T) {
 	other := GenerateModelBenchmarkItems(1, 3)
 	require.NotEqual(t, items[0].PromptHash, other[0].PromptHash)
 	require.Equal(t, items[0].PromptHash, GenerateModelBenchmarkItems(1, 2)[0].PromptHash)
+}
+
+// 回归：constrained-permutations 题「前 fixed 个元素保持原位置」的正确答案是 (n-fixed)!，
+// 旧实现误用 n!/fixed!（"保持相对顺序"的公式）导致所有模型被误判 0 分。
+func TestModelBenchmarkConstrainedPermutationsAnswer(t *testing.T) {
+	spec := modelBenchmarkFamilySpec{id: "constrained-permutations", category: "math", difficulty: 5, checker: "integer"}
+	re := regexp.MustCompile(`计算 (\d+) 个不同元素的排列数，要求前 (\d+) 个`)
+	for variant := 1; variant <= 2; variant++ {
+		for offset := 0; offset < 100; offset++ {
+			rng := newModelBenchmarkRNG(modelBenchmarkSeed(1, int64(1000+offset), spec.id, variant))
+			prompt, expected := generateModelBenchmarkInstance(spec, rng, variant)
+			match := re.FindStringSubmatch(prompt)
+			require.NotNil(t, match, "unexpected prompt: %s", prompt)
+			n, _ := strconv.Atoi(match[1])
+			fixed, _ := strconv.Atoi(match[2])
+			want := 1
+			for i := 2; i <= n-fixed; i++ {
+				want *= i
+			}
+			require.Equal(t, want, expected, "n=%d fixed=%d prompt=%s", n, fixed, prompt)
+		}
+	}
 }
 
 type modelBenchmarkManifestAccountSource struct {

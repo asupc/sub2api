@@ -3,11 +3,13 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import ModelBenchmarkPlansView from '../ModelBenchmarkPlansView.vue'
 
-const { getModelManifest, listSuites, listTargets, listPlans, queueRun, showSuccess, showError } = vi.hoisted(() => ({
+const { getModelManifest, listSuites, listTargets, listPlans, createPlan, updatePlan, queueRun, showSuccess, showError } = vi.hoisted(() => ({
   getModelManifest: vi.fn(),
   listSuites: vi.fn(),
   listTargets: vi.fn(),
   listPlans: vi.fn(),
+  createPlan: vi.fn(),
+  updatePlan: vi.fn(),
   queueRun: vi.fn(),
   showSuccess: vi.fn(),
   showError: vi.fn(),
@@ -16,7 +18,7 @@ const { getModelManifest, listSuites, listTargets, listPlans, queueRun, showSucc
 vi.mock('@/api/admin', () => ({
   default: {
     models: { getModelManifest },
-    modelBenchmarks: { listSuites, listTargets, listPlans, queueRun },
+    modelBenchmarks: { listSuites, listTargets, listPlans, createPlan, updatePlan, queueRun },
   },
 }))
 
@@ -138,17 +140,63 @@ describe('admin ModelBenchmarkPlansView', () => {
     expect(wrapper.text()).toContain('admin.modelBenchmark.status.disabled')
   })
 
-  it('offers the full manifest as model options and marks unsupported targets', async () => {
+  it('offers the full manifest as model options and marks unsupported targets in modal', async () => {
     const wrapper = mountView()
     await flushPromises()
 
+    // 点击“新建测评计划”打开弹窗
+    const createButton = wrapper.findAll('button').find(button => button.text().includes('admin.modelBenchmark.plans.create'))
+    expect(createButton).toBeTruthy()
+    await createButton!.trigger('click')
+    await flushPromises()
+
     // 全量模型清单（含不可测评模型）都进入模型下拉，平台选择已被移除
-    expect(wrapper.text()).not.toContain('admin.modelBenchmark.plans.platformFilter')
-    await wrapper.find('[role="listbox"], .select-trigger').trigger('click')
+    expect(document.body.textContent).not.toContain('admin.modelBenchmark.plans.platformFilter')
+    const trigger = document.body.querySelector('[role="listbox"], .select-trigger') as HTMLElement
+    expect(trigger).toBeTruthy()
+    trigger.click()
     await flushPromises()
     const optionLabels = document.body.textContent ?? ''
     expect(optionLabels).toContain('supported-model')
     expect(optionLabels).toContain('unsupported-model')
+    document.body.innerHTML = ''
+  })
+
+  it('allows opening the edit plan dialog and updating an existing plan', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    updatePlan.mockReset().mockResolvedValue(buildPlan({ name: 'weekly-hard-updated' }))
+
+    const editButton = wrapper.findAll('button').find(button => button.text() === 'common.edit')
+    expect(editButton).toBeTruthy()
+    await editButton!.trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('admin.modelBenchmark.plans.edit')
+    const nameInput = document.body.querySelector('input[placeholder="admin.modelBenchmark.plans.namePlaceholder"]') as HTMLInputElement
+    expect(nameInput).toBeTruthy()
+    expect(nameInput.value).toBe('weekly-hard')
+
+    const comparisonInput = document.body.querySelector('#benchmark-comparison-key') as HTMLInputElement
+    expect(comparisonInput.value).toBe('baseline-v2')
+    comparisonInput.value = 'shared-study-2'
+    comparisonInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushPromises()
+
+    // 提交编辑表单
+    const form = document.body.querySelector('form')
+    expect(form).toBeTruthy()
+    form!.dispatchEvent(new Event('submit'))
+    await flushPromises()
+
+    expect(updatePlan).toHaveBeenCalledWith(7, expect.objectContaining({
+      name: 'weekly-hard',
+      model_id: 'supported-model',
+      comparison_key: 'shared-study-2',
+    }))
+    expect(showSuccess).toHaveBeenCalled()
+    document.body.innerHTML = ''
   })
 
   it('asks for confirmation before queuing and reports success', async () => {

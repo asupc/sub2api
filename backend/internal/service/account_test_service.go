@@ -908,7 +908,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	// 拒绝，故仅在 API Key 直连路径下发输出预算。
 	benchmarkMaxTokens := 0
 	if isBenchmarkAccountTest(c) && !isOAuth {
-		benchmarkMaxTokens = defaultModelBenchmarkMaxOutputTokens
+		benchmarkMaxTokens = modelBenchmarkOutputLimit(c)
 	}
 	payload := createOpenAITestPayloadWithPrompt(upstreamTestModelID, isOAuth, prompt, benchmarkMaxTokens)
 	if isBenchmarkAccountTest(c) {
@@ -2994,6 +2994,7 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 				}
 			}
 			if finishReason, ok := choice["finish_reason"].(string); ok && finishReason != "" {
+				s.sendEvent(c, TestEvent{Type: "benchmark_finish", Text: finishReason})
 				seenFinish = true
 			}
 		}
@@ -3055,6 +3056,15 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 			// 采集 Token/成本（无 usage 时上层标记 missing，不虚构）。与 Chat
 			// Completions 测试流同样无条件上报，普通测试路径忽略该事件类型。
 			if responseData, ok := data["response"].(map[string]any); ok {
+				if responseData["status"] == "incomplete" {
+					reason := "incomplete"
+					if details, ok := responseData["incomplete_details"].(map[string]any); ok {
+						if value, ok := details["reason"].(string); ok {
+							reason = value
+						}
+					}
+					s.sendEvent(c, TestEvent{Type: "benchmark_finish", Text: reason})
+				}
 				if usage, ok := responseData["usage"].(map[string]any); ok {
 					s.sendEvent(c, TestEvent{Type: "benchmark_usage", Data: usage})
 				}
@@ -3068,6 +3078,27 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 			}
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil
+		case "response.incomplete":
+			reason := "incomplete"
+			if responseData, ok := data["response"].(map[string]any); ok {
+				if usage, ok := responseData["usage"].(map[string]any); ok {
+					s.sendEvent(c, TestEvent{Type: "benchmark_usage", Data: usage})
+				}
+				if details, ok := responseData["incomplete_details"].(map[string]any); ok {
+					if value, ok := details["reason"].(string); ok {
+						reason = value
+					}
+				}
+				if !seenDelta {
+					if raw, err := json.Marshal(responseData); err == nil {
+						if text := extractOpenAIResponsesText(raw); text != "" {
+							s.sendEvent(c, TestEvent{Type: "content", Text: text})
+						}
+					}
+				}
+			}
+			s.sendEvent(c, TestEvent{Type: "benchmark_finish", Text: reason})
+			return s.sendErrorAndEnd(c, "OpenAI response incomplete: "+reason)
 		case "response.failed":
 			errorMsg := "OpenAI response failed"
 			if responseData, ok := data["response"].(map[string]any); ok {
@@ -3401,21 +3432,33 @@ type AccountTestBenchmarkResult struct {
 	ErrorMessage string
 	LatencyMs    int64
 	Usage        map[string]any
+	FinishReason string
 }
 
 // RunBenchmarkPrompt executes a real account test with a benchmark prompt and captures text/usage.
-func (s *AccountTestService) RunBenchmarkPrompt(ctx context.Context, accountID int64, modelID, prompt string) AccountTestBenchmarkResult {
+func (s *AccountTestService) RunBenchmarkPrompt(ctx context.Context, accountID int64, modelID, prompt string, maxTokens ...int) AccountTestBenchmarkResult {
 	startedAt := time.Now()
 	w := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(w)
 	ginCtx.Request = (&http.Request{}).WithContext(ctx)
 	ginCtx.Set(accountTestBackgroundKey, true)
 	ginCtx.Set(accountTestBenchmarkKey, true)
+	if len(maxTokens) > 0 {
+		ginCtx.Set(accountTestBenchmarkLimitKey, maxTokens[0])
+	}
 
 	testErr := s.TestAccountConnection(ginCtx, accountID, modelID, prompt, AccountTestModeDefault)
 	result := AccountTestBenchmarkResult{LatencyMs: time.Since(startedAt).Milliseconds()}
 	result.ResponseText, result.ErrorMessage = parseTestSSEOutput(w.Body.String())
 	result.Usage = parseBenchmarkUsageSSEOutput(w.Body.String())
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if strings.HasPrefix(line, "data: ") {
+			var event TestEvent
+			if json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event) == nil && event.Type == "benchmark_finish" {
+				result.FinishReason = event.Text
+			}
+		}
+	}
 	if testErr != nil && result.ErrorMessage == "" {
 		result.ErrorMessage = testErr.Error()
 	}

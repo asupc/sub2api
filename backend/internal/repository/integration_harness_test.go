@@ -50,6 +50,26 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Windows/dev container escape hatch: run a explicitly selected integration test
+	// against an isolated external PostgreSQL schema. The caller must constrain
+	// -run to tests that only need integrationDB (migration tests do).
+	if externalDSN := os.Getenv("SUB2API_INTEGRATION_EXTERNAL_DSN"); externalDSN != "" {
+		db, err := openSQLWithRetry(ctx, externalDSN, 30*time.Second)
+		if err != nil {
+			log.Printf("failed to open external integration db: %v", err)
+			os.Exit(1)
+		}
+		if err := ApplyMigrations(ctx, db); err != nil {
+			_ = db.Close()
+			log.Printf("failed to apply migrations to external integration db: %v", err)
+			os.Exit(1)
+		}
+		integrationDB = db
+		code := m.Run()
+		_ = db.Close()
+		os.Exit(code)
+	}
+
 	if !dockerIsAvailable(ctx) {
 		// In CI we expect Docker to be available so integration tests should fail loudly.
 		if os.Getenv("CI") != "" {

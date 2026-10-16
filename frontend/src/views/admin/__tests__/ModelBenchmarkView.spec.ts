@@ -3,17 +3,19 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import ModelBenchmarkView from '../ModelBenchmarkView.vue'
 
-const { listSuites, listRankings, listRuns, listHistory } = vi.hoisted(() => ({
+const { listSuites, listRankings, listRuns, listHistory, getRun, listRunItems } = vi.hoisted(() => ({
   listSuites: vi.fn(),
   listRankings: vi.fn(),
   listRuns: vi.fn(),
   listHistory: vi.fn(),
+  getRun: vi.fn(),
+  listRunItems: vi.fn(),
 }))
 
 vi.mock('@/api/admin', () => ({
   default: {
     models: {},
-    modelBenchmarks: { listSuites, listRankings, listRuns, listHistory },
+    modelBenchmarks: { listSuites, listRankings, listRuns, listHistory, getRun, listRunItems },
   },
 }))
 
@@ -42,8 +44,8 @@ function mountView() {
 describe('admin ModelBenchmarkView', () => {
   beforeEach(() => {
     listSuites.mockReset().mockResolvedValue([{
-      id: 'hard-v1', version: '1.1.0', scoring_version: '1.0.0', item_count: 48,
-      family_count: 24, min_difficulty: 3, max_difficulty: 5, category_weights: {},
+      id: 'hard-v1', version: '2.0.0', scoring_version: '2.0.0', item_count: 112,
+      family_count: 56, min_difficulty: 3, max_difficulty: 5, category_weights: {},
     }])
     listRankings.mockReset().mockResolvedValue([{
       model_id: 'glm-5.3', suite_id: 'hard-v1', suite_version: '1.1.0', scoring_version: '1.0.0',
@@ -52,6 +54,8 @@ describe('admin ModelBenchmarkView', () => {
     }])
     listRuns.mockReset().mockResolvedValue([])
     listHistory.mockReset().mockResolvedValue([])
+    getRun.mockReset()
+    listRunItems.mockReset().mockResolvedValue([])
   })
 
   afterEach(() => {
@@ -69,6 +73,44 @@ describe('admin ModelBenchmarkView', () => {
     expect(wrapper.text()).not.toContain('admin.modelBenchmark.plans.title')
     // 提供跳转到测评计划页的入口
     expect(wrapper.text()).toContain('admin.modelBenchmark.stats.managePlans')
+  })
+
+  it('applies identical comparison keys and budgets to rankings and history', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    expect(listRankings).toHaveBeenLastCalledWith(50, 'baseline-v2', { max_output_tokens: 2048, timeout_seconds: 90, sample_count: 1 })
+    await wrapper.get('input[aria-label="公共试卷批次"]').setValue('reasoning-study-2')
+    await wrapper.get('input[aria-label="输出预算"]').setValue(4096)
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+    expect(listRankings).toHaveBeenLastCalledWith(50, 'reasoning-study-2', { max_output_tokens: 4096, timeout_seconds: 90, sample_count: 1 })
+    expect(listHistory).toHaveBeenLastCalledWith(expect.objectContaining({ comparison_key: 'reasoning-study-2', max_output_tokens: 4096 }))
+    // Diagnostic runs with provider-managed budgets remain discoverable.
+    expect(listRuns).toHaveBeenLastCalledWith({ limit: 100, comparison_key: 'reasoning-study-2' })
+  })
+
+  it('shows new domains and explains low-coverage results without ranking them', async () => {
+    const run = {
+      id: 20, model_id: 'diagnostic-model', suite_version: '2.0.0', status: 'partial',
+      comparison_key: 'baseline-v2', max_output_tokens: 2048, timeout_seconds: 90, sample_count: 1,
+      category_scores: { abstraction: 70, understanding: 60, causal: 55 }, intelligence_score: 65,
+      quality: { completion_rate: 40, format_compliance_rate: 95, format_error_count: 2, budget_exhausted_count: 3, ranking_eligible: false, ranking_reason: 'insufficient_coverage', category_coverage: {} },
+    }
+    listRuns.mockResolvedValue([run])
+    getRun.mockResolvedValue(run)
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('40.0%')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.comparison.diagnostic')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.category.abstraction')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.category.understanding')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.category.causal')
+    const row = wrapper.findAll('tr').find(item => item.text().includes('diagnostic-model'))
+    await row!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('admin.modelBenchmark.fields.formatCompliance')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.fields.budgetExhausted')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.comparison.coverageReason')
   })
 
   it('renders run records and loads them on mount', async () => {

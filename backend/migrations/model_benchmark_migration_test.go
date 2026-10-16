@@ -31,3 +31,13 @@ func TestModelBenchmarkManualTriggerMigrationIsIdempotent(t *testing.T) {
 	require.Contains(t, sql, "CREATE INDEX IF NOT EXISTS idx_model_benchmark_plans_manual")
 	require.False(t, strings.Contains(strings.ToLower(sql), "drop table"), "benchmark migration must be forward-only and non-destructive")
 }
+
+func TestModelBenchmarkComparisonMigrationIsNonDestructive(t *testing.T) {
+	raw, err := FS.ReadFile("245_so_model_benchmark_comparison.sql")
+	require.NoError(t, err)
+	text := string(raw)
+	require.Contains(t, text, "DEFAULT 'legacy'")
+	require.Contains(t, text, "DEFAULT 'baseline-v2'")
+	require.Contains(t, text, "NUMERIC(16,10)")
+	require.NotContains(t, strings.ToLower(text), "drop table")
+}

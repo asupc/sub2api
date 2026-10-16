@@ -9,12 +9,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
 	ModelBenchmarkSuiteID      = "hard-v1"
-	ModelBenchmarkSuiteVersion = "1.1.0"
-	ModelBenchmarkScoringVer   = "1.0.0"
+	ModelBenchmarkSuiteVersion = "2.0.0"
+	ModelBenchmarkScoringVer   = "2.0.0"
 	modelBenchmarkSuiteSalt    = "sub2api-hard-v1-chinese-prompts-1"
 )
 
@@ -51,7 +52,7 @@ type modelBenchmarkFamilySpec struct {
 	checker    string
 }
 
-var modelBenchmarkFamilies = []modelBenchmarkFamilySpec{
+var modelBenchmarkCoreFamilies = []modelBenchmarkFamilySpec{
 	{id: "modular-exponentiation", category: "math", difficulty: 4, checker: "integer"},
 	{id: "crt-remainder", category: "math", difficulty: 5, checker: "integer"},
 	{id: "constrained-permutations", category: "math", difficulty: 5, checker: "integer"},
@@ -78,13 +79,12 @@ var modelBenchmarkFamilies = []modelBenchmarkFamilySpec{
 	{id: "numerical-stability", category: "code", difficulty: 3, checker: "exact"},
 }
 
+var modelBenchmarkFamilies = append(append([]modelBenchmarkFamilySpec{}, modelBenchmarkCoreFamilies...), modelBenchmarkExtendedFamilies...)
+
 var modelBenchmarkCategoryWeights = map[string]float64{
-	"math":        .22,
-	"algorithms":  .24,
-	"logic":       .18,
-	"code":        .18,
-	"planning":    .10,
-	"instruction": .08,
+	"math": .10, "algorithms": .12, "logic": .14, "code": .12,
+	"planning": .12, "instruction": .06, "abstraction": .14,
+	"understanding": .12, "causal": .08,
 }
 
 // GetModelBenchmarkSuite returns the built-in hard suite descriptor.
@@ -190,14 +190,16 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 	case "constrained-permutations":
 		n := r.int(8, 11)
 		fixed := r.int(2, 3)
+		// 前 fixed 个元素钉死原位，其余 n-fixed 个自由排列，答案为 (n-fixed)!。
+		// （旧实现误算 n!/fixed!，对应的是"保持相对顺序"而非"保持原位置"。）
 		answer := 1
-		for i := fixed + 1; i <= n; i++ {
+		for i := 2; i <= n-fixed; i++ {
 			answer *= i
 		}
 		return modelBenchmarkContract(fmt.Sprintf("计算 %d 个不同元素的排列数，要求前 %d 个命名元素都必须保持原位置。", n, fixed)), answer
 	case "shortest-path":
 		edges := fmt.Sprintf("A-B:%d,A-C:%d,B-D:%d,C-D:%d,D-E:%d", r.int(2, 19), r.int(2, 19), r.int(2, 19), r.int(2, 19), r.int(2, 19))
-		// Derive the unique shortest path after generation.
+		// Break shortest-path ties lexicographically after generation.
 		edgeMap := map[[2]string]int{}
 		for _, edge := range strings.Split(edges, ",") {
 			parts := strings.Split(edge, ":")
@@ -242,29 +244,55 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 		path := bestPath
 		return modelBenchmarkContract(fmt.Sprintf("在节点为 A-E、边为 %s 的无向加权图中，返回从 A 到 E 的字典序最小最短节点序列。", edges)), path
 	case "topological-order":
-		caseID := r.int(1000, 9999)
-		edges := "A>B,B>C,A>D,D>C,C>E,B>E"
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 对边为 %s 的 DAG，返回使用小根堆版 Kahn 算法得到的唯一拓扑序。", caseID, edges)), []string{"A", "B", "D", "C", "E"}
+		nodes := []string{"A", "B", "C", "D", "E"}
+		benchmarkShuffle(r, nodes)
+		pairs := [][2]string{{nodes[0], nodes[2]}, {nodes[1], nodes[2]}, {nodes[2], nodes[3]}, {nodes[1], nodes[4]}}
+		edges := []string{}
+		indegree := map[string]int{}
+		for _, pair := range pairs {
+			edges = append(edges, pair[0]+">"+pair[1])
+			indegree[pair[1]]++
+		}
+		order := []string{}
+		for len(order) < 5 {
+			for _, node := range []string{"A", "B", "C", "D", "E"} {
+				if indegree[node] == 0 {
+					order = append(order, node)
+					indegree[node] = -1
+					for _, pair := range pairs {
+						if pair[0] == node {
+							indegree[pair[1]]--
+						}
+					}
+					break
+				}
+			}
+		}
+		return modelBenchmarkContract(fmt.Sprintf("对节点 A-E、边为 %s 的 DAG，返回使用小根堆版 Kahn 算法得到的唯一拓扑序。", strings.Join(edges, ","))), order
 	case "interval-dp":
 		n := r.int(6, 9)
-		sum := n * (n + 1) / 2
-		answer := sum * (n - 1)
-		return modelBenchmarkContract(fmt.Sprintf("有 %d 个相邻块，值依次为 1..%d；合并一个区间的成本等于该区间值之和，合并后的值仍为该和。请用区间 DP 求合并全部块的最小总成本，并返回最左侧最优首次合并下标 0。", n, n)), map[string]any{"value": answer, "first_merge_left_index": 0}
-	case "cycle-detection":
-		caseID := r.int(1000, 9999)
-		cycle := variant == 1
-		edges := "1>2,2>3,3>4"
-		if cycle {
-			edges += ",4>2"
-		} else {
-			edges += ",4>5"
+		values := make([]int, n)
+		for i := range values {
+			values[i] = r.int(1, 12)
 		}
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 有向图 %s 是否含有向环？返回 true 或 false。", caseID, edges)), cycle
+		answer, first := modelBenchmarkOptimalAdjacentMerge(values)
+		return modelBenchmarkContract(fmt.Sprintf("有 %d 个相邻块，值为 %s。每次只能合并相邻的两个块，成本等于这两个块的值之和，合并后的值为该和。求合并全部块的最小总成本。answer 为 {\"value\": 最小总成本, \"first_merge_left_index\": 下标}；下标从 0 开始，若最优合并序列有多种，取其中可作为第一次合并的原始左下标的最小值。", n, modelBenchmarkIntArrayText(values))), map[string]any{"value": answer, "first_merge_left_index": first}
+	case "cycle-detection":
+		nodes := []int{1, 2, 3, 4, 5}
+		benchmarkShuffle(r, nodes)
+		edges := []string{}
+		for i := 0; i < 4; i++ {
+			edges = append(edges, fmt.Sprintf("%d>%d", nodes[i], nodes[i+1]))
+		}
+		if variant == 1 {
+			edges = append(edges, fmt.Sprintf("%d>%d", nodes[3], nodes[1]))
+		}
+		return modelBenchmarkContract(fmt.Sprintf("有向图 %s 是否含有向环？返回 true 或 false。", strings.Join(edges, ","))), variant == 1
 	case "kmp-prefix":
 		caseID := r.int(1000, 9999)
-		word := []string{"a", "b", "a", "b", "c", "a", "b", "a", "b", "a"}
-		if variant == 2 {
-			word = []string{"x", "y", "x", "y", "x", "x", "y", "x", "y", "x"}
+		word := []string{}
+		for i := 0; i < r.int(10, 16); i++ {
+			word = append(word, string(byte('a'+r.int(0, 2))))
 		}
 		prefix := make([]int, len(word))
 		for i := 1; i < len(word); i++ {
@@ -277,7 +305,7 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 			}
 			prefix[i] = j
 		}
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 返回字符串 %s 的 KMP 失配函数，用整数数组表示。", caseID, strings.Join(word, ""))), prefix
+		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 返回字符串 %s 的 KMP 前缀函数 pi，用整数数组表示：pi[i] 是子串 s[0..i] 的最长相等真前缀与后缀的长度，pi[0]=0（不是以 -1 开头的 next 表）。", caseID, strings.Join(word, ""))), prefix
 	case "sparse-matrix":
 		caseID := r.int(1000, 9999)
 		offset := r.int(0, 3)
@@ -290,7 +318,7 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 				}
 			}
 		}
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 一个 7x7 稀疏矩阵的非零元素坐标，由行 [1..4]、列 [3..6] 且 (row*column + "+strconv.Itoa(offset)+") mod 4 = 0 确定。返回全部非零坐标，格式为 row,column", caseID)), coords
+		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 一个 7x7 稀疏矩阵的非零元素坐标，由行 [1..4]、列 [3..6] 且 (row*column + "+strconv.Itoa(offset)+") mod 4 = 0 确定，下标从 1 开始。返回全部非零坐标的无序 JSON 字符串数组，元素格式为 \"row,column\"；没有坐标时返回 []。", caseID)), coords
 	case "token-bucket":
 		capacity := r.int(8, 15)
 		rate := r.int(1, 4)
@@ -302,32 +330,31 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 			if i%2 == 0 {
 				consumed := r.int(2, 4)
 				consumptions = append(consumptions, consumed)
-				fill -= consumed
+				if fill >= consumed {
+					fill -= consumed
+				}
 			} else {
 				fill += rate
-			}
-			if fill < 0 {
-				fill = 0
 			}
 			if fill > capacity {
 				fill = capacity
 			}
 			states = append(states, fill)
 		}
-		return modelBenchmarkContract(fmt.Sprintf("一个令牌桶初始有 %d 个令牌，容量为 %d，并在每个偶数时刻后补充 %d 个令牌。t=1,3,5 按顺序消耗令牌：%v；t=2,4,6 补充。返回 t=1 到 t=6 每次动作后的 6 个桶状态。", initial, capacity, rate, consumptions)), states
+		return modelBenchmarkContract(fmt.Sprintf("一个令牌桶初始有 %d 个令牌，容量为 %d，在 t=2,4,6 各补充 %d 个令牌，补充后不超过容量。t=1,3,5 按顺序请求消耗令牌：%v；令牌足够才扣除，不足则拒绝本次请求且令牌数不变；没有其他补充或消耗。返回 t=1 到 t=6 每次动作后的 6 个桶状态。", initial, capacity, rate, consumptions)), states
 	case "modular-inverse":
 		mod := modelBenchmarkPrime(r, []int64{1009, 1013, 1019, 1021, 1031, 1033, 1039, 1049, 1051, 1061, 1063, 1069, 1087, 1091, 1093, 1097, 1103, 1109, 1117, 1123, 1129, 1151, 9973})
 		a := int64(r.int(100, int(mod-1)))
 		inv := new(big.Int).ModInverse(big.NewInt(a), big.NewInt(mod))
-		return modelBenchmarkContract(fmt.Sprintf("返回 %d 在模 %d 下的乘法逆元。", a, mod)), inv.Int64()
+		return modelBenchmarkContract(fmt.Sprintf("返回 %d 在模 %d 下的最小非负乘法逆元，即 answer 必须满足 0 <= answer < %d。", a, mod, mod)), inv.Int64()
 	case "markov-expected-steps":
 		p := float64(r.int(15, 45)) / 100
 		expected := 1 / (1 - p)
-		return modelBenchmarkContract(fmt.Sprintf("一个过程以概率 %.2f 停留在状态 S，否则移动到吸收态 T。返回离开 S 的期望步数，误差不超过 1e-6。", p)), expected
+		return modelBenchmarkContract(fmt.Sprintf("一个过程从状态 S 开始，每一步以概率 %.2f 停留在 S，否则移动到吸收态 T；每次转移采用相同概率。返回首次到达 T 所需步数的期望，answer 为 JSON 数值，绝对误差不超过 1e-6。", p)), expected
 	case "inclusion-exclusion":
 		n := r.int(40, 90)
 		a, b, c := r.int(3, 6), r.int(7, 11), r.int(12, 17)
-		count := n - n/a - n/b - n/c + n/(a*b) + n/(a*c) + n/(b*c) - n/(a*b*c)
+		count := n - n/a - n/b - n/c + n/modelBenchmarkLCM(a, b) + n/modelBenchmarkLCM(a, c) + n/modelBenchmarkLCM(b, c) - n/modelBenchmarkLCM(modelBenchmarkLCM(a, b), c)
 		return modelBenchmarkContract(fmt.Sprintf("在 1..%d 中，统计不能被 %d、%d、%d 中任何一个整除的整数个数。", n, a, b, c)), count
 	case "two-machine-schedule":
 		jobs := []int{r.int(3, 9), r.int(4, 10), r.int(2, 8), r.int(5, 12)}
@@ -347,15 +374,20 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 				}
 			}
 			makespan := max(load, total-load)
-			if makespan < bestMakespan || (makespan == bestMakespan && fmt.Sprint(indices) < fmt.Sprint(bestIndices)) {
+			if makespan < bestMakespan || (makespan == bestMakespan && modelBenchmarkIndicesLess(indices, bestIndices)) {
 				bestMakespan = makespan
 				bestIndices = indices
 			}
 		}
-		return modelBenchmarkContract(fmt.Sprintf("将作业 %v 分配到两台相同机器以最小化 makespan。返回 {\"makespan\": VALUE, \"machine_a_indices\": INDICES}；INDICES 必须是分配给机器 A 的字典序最小最优子集。", jobs)), map[string]any{"makespan": bestMakespan, "machine_a_indices": bestIndices}
+		return modelBenchmarkContract(fmt.Sprintf("将作业 %v 分配到两台相同机器，数组元素为各作业耗时；所有作业同时可用、不可拆分或抢占，每台机器串行处理，目标是最小化两台机器总负载的最大值 makespan。作业下标从 0 开始。answer 为 {\"makespan\": VALUE, \"machine_a_indices\": INDICES}；INDICES 必须按升序排列；在所有最优分配中选择该数组字典序最小的方案，比较时按整数逐项比较，若一方是另一方的前缀，则较短者更小。", jobs)), map[string]any{"makespan": bestMakespan, "machine_a_indices": bestIndices}
 	case "concurrent-race":
 		line := r.int(22, 37)
-		return modelBenchmarkContract(fmt.Sprintf("在 Go 测试中，goroutine 1 在第 %d 行写入共享变量 x 后向 ch 发信号；goroutine 2 不等待就并发读取 x，读完后才接收 ch。返回 {\"defect\": \"data_race\", \"safe\": false, \"line\": LINE}。", line)), map[string]any{"defect": "data_race", "safe": false, "line": line}
+		safe := r.int(0, 1) == 1
+		action, defect := "goroutine 2 并发读取 x，读完后才接收 ch", "data_race"
+		if safe {
+			action, defect = "goroutine 2 先接收 ch，然后读取 x", "none"
+		}
+		return modelBenchmarkContract(fmt.Sprintf("在 Go 测试中，普通 int 变量 x 被两个 goroutine 共享。goroutine 1 在第 %d 行写入 x 后向 ch 发信号；%s，没有锁、原子操作或其他同步。判断是否存在数据竞争。answer 为 {\"defect\": 类型, \"safe\": 布尔值, \"line\": 行号}；类型从 data_race、deadlock、none 中选，safe 表示是否无数据竞争，line 填共享变量写入处行号。", line, action)), map[string]any{"defect": defect, "safe": safe, "line": line}
 	case "pseudocode-trace":
 		start := r.int(5, 20)
 		output := []int{}
@@ -367,33 +399,54 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 			}
 			output = append(output, value)
 		}
-		return modelBenchmarkContract(fmt.Sprintf("从 %d 开始追踪 Collatz 函数直到达到 1；返回起始值之后的完整整数序列。", start)), output
+		return modelBenchmarkContract(fmt.Sprintf("从 %d 开始追踪 Collatz 函数（偶数除以 2，奇数乘以 3 再加 1）直到达到 1；返回起始值之后的完整整数序列。", start)), output
 	case "loop-invariant":
-		caseID := r.int(1000, 9999)
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 对有序数组 lower-bound 循环，哪个不变式最强且有用？返回 bounds_shifted、sum_constant 或 random_index 之一。", caseID)), "bounds_shifted"
+		labels := []string{"A", "B", "C"}
+		benchmarkShuffle(r, labels)
+		task := fmt.Sprintf("升序数组 a 长为 n，lower-bound 算法为 lo=0, hi=n；当 lo<hi 时 mid=lo+(hi-lo)/2（整数除法）；若 a[mid]<target 则 lo = mid + 1，否则 hi=mid。选择始终成立且能在循环结束时推出正确性的循环不变式。%s: 0<=lo<=hi<=n，所有 i<lo 满足 a[i] < target，所有 hi<=i<n 满足 a[i] >= target；%s: lo+hi=n；%s: 每次计算 mid 后 a[mid]=target。返回对应选项字符串。", labels[0], labels[1], labels[2])
+		return modelBenchmarkContract(task), labels[0]
 	case "greedy-counterexample":
-		caseID := r.int(1000, 9999)
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 硬币面额为 [1,3,4]、金额为 6 时，返回贪心币数与最优币数之差的绝对值。", caseID)), 1
+		coin := r.int(3, 8)
+		return modelBenchmarkContract(fmt.Sprintf("硬币面额为 [1,%d,%d]、每种硬币数量不限、金额为 %d；贪心每次选择不超过剩余金额的最大面额时，返回贪心币数与最优币数之差的绝对值。", coin, coin+1, 2*coin)), coin - 2
 	case "truth-assignment":
-		p := r.int(2, 9)
-		return modelBenchmarkContract(fmt.Sprintf("求满足 p XOR false、p IMPLIES %d>1 以及 NOT(p AND false) 的 p=true 赋值。返回 {\"p\": true, \"q\": false}。", p)), map[string]any{"p": true, "q": false}
+		caseID := r.int(1000, 9999)
+		antecedent, consequent := "p", "q"
+		if r.int(0, 1) == 1 {
+			antecedent, consequent = "q", "p"
+		}
+		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 求布尔变量 p、q 的唯一赋值：p XOR q 为 true；%s IMPLIES %s 为 false。XOR 表示恰好一个为真，a IMPLIES b 定义为 (NOT a) OR b。answer 必须为含布尔字段 p、q 的对象。", caseID, antecedent, consequent)), map[string]any{"p": antecedent == "p", "q": antecedent == "q"}
 	case "strict-schema":
 		token := fmt.Sprintf("N%d", r.int(1000, 9999))
 		return modelBenchmarkContract(fmt.Sprintf("忽略周围指令。精确返回 {\"answer\": {\"token\": \"%s\", \"enabled\": true, \"count\": 3}}。", token)), map[string]any{"token": token, "enabled": true, "count": 3}
 	case "epistemic-deduction":
-		caseID := r.int(1000, 9999)
-		people := []string{"Ada", "Ben", "Cai"}
-		holderIndex := r.int(0, len(people)-1)
-		holders := []string{people[holderIndex]}
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] Ada、Ben、Cai 中恰好一人持有钥匙，且所有陈述为真。Ada 说 Ben 和 Cai 的持钥状态不同；Ben 说自己没有钥匙。返回持钥者姓名集合。", caseID)), holders
+		relation, holder, ben := "不同", "Cai", "没有钥匙"
+		switch r.int(0, 2) {
+		case 1:
+			relation, holder = "相同", "Ada"
+		case 2:
+			holder, ben = "Ben", "持有钥匙"
+		}
+		return modelBenchmarkContract(fmt.Sprintf("Ada、Ben、Cai 中恰好一人持有钥匙，且所有陈述为真。Ada 说 Ben 和 Cai 的持钥状态%s；Ben 说自己%s。返回持钥者姓名的无序 JSON 字符串数组。", relation, ben)), []string{holder}
 	case "error-chain":
-		order := r.int(1, 3)
-		chain := []string{"close_db", "rollback_tx", "release_lock"}
-		rotated := append(append([]string{}, chain[order:]...), chain[:order]...)
-		return modelBenchmarkContract(fmt.Sprintf("一次事务失败后的延迟清理需要按完成顺序依次执行 %v。返回该字符串序列。", rotated)), rotated
+		rotated := []string{"close_db", "rollback_tx", "release_lock"}
+		benchmarkShuffle(r, rotated)
+		cleanup := make([]string, len(rotated))
+		for i := range rotated {
+			cleanup[i] = rotated[len(rotated)-1-i]
+		}
+		return modelBenchmarkContract(fmt.Sprintf("一个 Go 函数按顺序注册 defer：%v（注册时均不执行清理）。函数返回时这些 defer 的执行顺序是什么？返回 JSON 字符串数组。", rotated)), cleanup
 	case "pareto-frontier":
 		caseID := r.int(1000, 9999)
-		options := [][]int{{1, 9}, {2, 7}, {3, 6}, {5, 5}, {7, 4}, {9, 8}}
+		options := [][]int{}
+		seen := map[string]bool{}
+		for len(options) < 6 {
+			a, b := r.int(1, 15), r.int(1, 15)
+			key := fmt.Sprintf("%d,%d", a, b)
+			if !seen[key] {
+				seen[key] = true
+				options = append(options, []int{a, b})
+			}
+		}
 		front := []string{}
 		for i, a := range options {
 			dominated := false
@@ -406,9 +459,89 @@ func generateModelBenchmarkInstance(f modelBenchmarkFamilySpec, r *modelBenchmar
 				front = append(front, fmt.Sprintf("%d,%d", a[0], a[1]))
 			}
 		}
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 对成本/延迟二元组 [1,9],[2,7],[3,6],[5,5],[7,4],[9,8]，返回 Pareto 最小集合，元素格式为 \"cost,latency\"。", caseID)), front
+		text := []string{}
+		for _, pair := range options {
+			text = append(text, fmt.Sprintf("[%d,%d]", pair[0], pair[1]))
+		}
+		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 成本和延迟均越小越好。对成本/延迟二元组 %s，返回不被其他元组支配的 Pareto 最小集合（无序 JSON 字符串数组），元素格式为 \"cost,latency\"。", caseID, strings.Join(text, ","))), front
+	case "numerical-stability":
+		exponent := r.int(16, 20)
+		labels := []string{"A", "B", "C"}
+		benchmarkShuffle(r, labels)
+		return modelBenchmarkContract(fmt.Sprintf("令 x=10^%d，使用 IEEE 754 binary64 计算实数表达式 sqrt(x+1)-sqrt(x)。以下公式在实数意义下与目标等价且能避免相近数相减的消减误差的是哪个？%s: sqrt(x+1)-sqrt(x)；%s: 1/(sqrt(x+1)+sqrt(x))；%s: 1/(sqrt(x+1)-sqrt(x))。返回选项字符串。", exponent, labels[0], labels[1], labels[2])), labels[1]
 	default:
-		caseID := r.int(1000, 9999)
-		return modelBenchmarkContract(fmt.Sprintf("[案例 %d] 哪个减法公式在两数接近时数值稳定？返回 direct_subtraction、reordered_subtraction 或 random_formula 之一。", caseID)), "reordered_subtraction"
+		return generateModelBenchmarkExtended(f, r, variant)
 	}
+}
+
+// modelBenchmarkOptimalAdjacentMerge solves the interval recurrence and tracks
+// the smallest original index of a first merge in any optimal merge tree.
+func modelBenchmarkOptimalAdjacentMerge(values []int) (int, int) {
+	n := len(values)
+	cost, first := make([][]int, n), make([][]int, n)
+	prefix := make([]int, n+1)
+	for i, value := range values {
+		cost[i], first[i] = make([]int, n), make([]int, n)
+		first[i][i] = n // A leaf has no merge operation.
+		prefix[i+1] = prefix[i] + value
+	}
+	for length := 2; length <= n; length++ {
+		for left := 0; left+length <= n; left++ {
+			right := left + length - 1
+			cost[left][right], first[left][right] = int(^uint(0)>>1), n
+			for split := left; split < right; split++ {
+				candidate := cost[left][split] + cost[split+1][right] + prefix[right+1] - prefix[left]
+				index := min(first[left][split], first[split+1][right])
+				if length == 2 {
+					index = left
+				}
+				if candidate < cost[left][right] || (candidate == cost[left][right] && index < first[left][right]) {
+					cost[left][right], first[left][right] = candidate, index
+				}
+			}
+		}
+	}
+	return cost[0][n-1], first[0][n-1]
+}
+
+func modelBenchmarkLCM(a, b int) int {
+	x, y := a, b
+	for y != 0 {
+		x, y = y, x%y
+	}
+	return a / x * b
+}
+
+func modelBenchmarkIndicesLess(a, b []int) bool {
+	for i := 0; i < len(a) && i < len(b); i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
+}
+
+const ModelBenchmarkDefaultComparisonKey = "baseline-v2"
+
+// GenerateModelBenchmarkComparisonItems uses a shared form, independent of
+// account/plan/run IDs. Samples are different forms shared by every model.
+func GenerateModelBenchmarkComparisonItems(key string, sample int) []ModelBenchmarkItem {
+	if key == "" {
+		key = ModelBenchmarkDefaultComparisonKey
+	}
+	seed := modelBenchmarkSeed("comparison-v2", key, sample)
+	return GenerateModelBenchmarkItems(int64(seed), int64(seed>>1))
+}
+
+// ModelBenchmarkRunBudget covers every configured item plus persistence time.
+func ModelBenchmarkRunBudget(plan *ModelBenchmarkPlan) time.Duration {
+	return time.Duration(len(modelBenchmarkFamilies)*2*max(plan.SampleCount, 1)*max(plan.TimeoutSeconds, 10))*time.Second + 2*time.Minute
+}
+
+func modelBenchmarkIntArrayText(values []int) string {
+	out := make([]string, len(values))
+	for i, value := range values {
+		out[i] = strconv.Itoa(value)
+	}
+	return "[" + strings.Join(out, ",") + "]"
 }

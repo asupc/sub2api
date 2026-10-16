@@ -109,7 +109,8 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 	}
 	var parsed struct {
 		Choices []struct {
-			Message struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
 				Content any `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
@@ -122,11 +123,17 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 		return modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream returned no choices"))
 	}
 	content := normalizeModelBenchmarkChatContent(parsed.Choices[0].Message.Content)
-	if content == "" {
+	if content == "" && modelBenchmarkIncompleteReason(parsed.Choices[0].FinishReason) == "" {
 		return modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream returned empty content"))
 	}
 
 	result := ModelBenchmarkScoreAnswer(item, content)
+	if reason := modelBenchmarkIncompleteReason(parsed.Choices[0].FinishReason); reason != "" {
+		result = modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream response incomplete: %s", parsed.Choices[0].FinishReason))
+		result.ResponseText = content
+		result.FailureReason = reason
+	}
+
 	latency := time.Since(start).Milliseconds()
 	result.LatencyMS = &latency
 	result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(parsed.Usage)
@@ -143,7 +150,7 @@ func (e *ModelBenchmarkExecutor) executeSourceIntegrated(ctx context.Context, pl
 	}
 	capturedChan := make(chan AccountTestBenchmarkResult, 1)
 	go func() {
-		capturedChan <- e.accountTests.RunBenchmarkPrompt(ctx, plan.AccountID, plan.ModelID, item.Prompt)
+		capturedChan <- e.accountTests.RunBenchmarkPrompt(ctx, plan.AccountID, plan.ModelID, item.Prompt, plan.MaxOutputTokens)
 	}()
 	var captured AccountTestBenchmarkResult
 	select {
@@ -151,6 +158,18 @@ func (e *ModelBenchmarkExecutor) executeSourceIntegrated(ctx context.Context, pl
 	case <-ctx.Done():
 		_ = ctx.Err()
 		return modelBenchmarkExecutionFailure(item, fmt.Errorf("source-integrated benchmark timed out: %w", ctx.Err()))
+	}
+	if reason := modelBenchmarkIncompleteReason(captured.FinishReason); reason != "" {
+		result := modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream response incomplete: %s", captured.FinishReason))
+		result.FailureReason = reason
+		result.ResponseText = captured.ResponseText
+		result.LatencyMS = &captured.LatencyMs
+		result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(captured.Usage)
+		if result.InputTokens != nil && result.OutputTokens != nil && result.TotalTokens != nil {
+			result.UsageSource = "upstream"
+		}
+		e.applyCost(&result, upstreamModel)
+		return result
 	}
 	if captured.ErrorMessage != "" || captured.ResponseText == "" {
 		message := captured.ErrorMessage
@@ -341,4 +360,16 @@ func truncateModelBenchmarkText(value []byte, limit int) string {
 		return string(value)
 	}
 	return string(value[:limit]) + "..."
+}
+
+func modelBenchmarkIncompleteReason(reason string) string {
+	switch reason {
+	case "length", "max_tokens", "max_output_tokens":
+		return "budget_exhausted"
+	case "content_filter":
+		return "content_filtered"
+	case "incomplete":
+		return "incomplete_response"
+	}
+	return ""
 }
