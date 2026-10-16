@@ -28,6 +28,9 @@ type ModelBenchmarkPlan struct {
 	MaxResults      int        `json:"max_results"`
 	RunningStatus   string     `json:"running_status"`
 	ClaimExpiresAt  *time.Time `json:"claim_expires_at"`
+	// ManualTriggerAt 非空表示存在一次性手动排队请求（停用计划也可排队）；runner
+	// 领取时清空。enabled 仍只表示是否按 cron 周期调度。
+	ManualTriggerAt *time.Time `json:"manual_trigger_at"`
 	LastRunAt       *time.Time `json:"last_run_at"`
 	NextRunAt       *time.Time `json:"next_run_at"`
 	CreatedAt       time.Time  `json:"created_at"`
@@ -135,6 +138,17 @@ type ModelBenchmarkRanking struct {
 	LastRunAt         time.Time `json:"last_run_at"`
 }
 
+// ModelBenchmarkLatestScore 是某模型最近一次成功/部分成功 run 的分数快照，
+// 供模型清单页展示「最近测试分数」。不做套件版本隔离（前端按返回版本标注差异）。
+type ModelBenchmarkLatestScore struct {
+	ModelID           string    `json:"model_id"`
+	IntelligenceScore float64   `json:"intelligence_score"`
+	SuiteID           string    `json:"suite_id"`
+	SuiteVersion      string    `json:"suite_version"`
+	ScoringVersion    string    `json:"scoring_version"`
+	ScoredAt          time.Time `json:"scored_at"`
+}
+
 // ModelBenchmarkRepository is the persistence port for benchmark plans and evidence.
 type ModelBenchmarkRepository interface {
 	CreatePlan(ctx context.Context, plan *ModelBenchmarkPlan) (*ModelBenchmarkPlan, error)
@@ -153,6 +167,7 @@ type ModelBenchmarkRepository interface {
 	ListItems(ctx context.Context, runID int64) ([]*ModelBenchmarkRunItem, error)
 	ListHistory(ctx context.Context, filters ModelBenchmarkHistoryFilters) ([]*ModelBenchmarkHistoryPoint, error)
 	ListRankings(ctx context.Context, suiteID, suiteVersion, scoringVersion string, limit int) ([]*ModelBenchmarkRanking, error)
+	LatestScores(ctx context.Context) (map[string]ModelBenchmarkLatestScore, error)
 	PruneRuns(ctx context.Context, planID int64, keep int) error
 }
 

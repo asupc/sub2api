@@ -26,6 +26,16 @@ export default {
     platformAll: '全部',
     availableAccounts: '可用 / 总账号',
     concurrencyPool: '可用并发池',
+    benchmark: {
+      label: '最近测试分数',
+      untested: '未测评',
+      tooltip: '最近一次模型能力测评的能力分（{date}，套件 {version}）',
+      tooltipNoVersion: '最近一次模型能力测评的能力分（{date}）',
+      sortLabel: '排序：',
+      sortScore: '按最近分数',
+      sortDefault: '默认排序',
+      scoreHint: '按最近一次测评能力分降序，未测评的排在最后'
+    },
     healthyTag: '正常供应',
     dangerTag: '断供告警',
     dangerAlert: '严重警报：当前所有挂载此模型的账号均不可调度，客户请求该模型将无法得到响应！',

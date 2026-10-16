@@ -33,6 +33,8 @@ export interface ModelBenchmarkPlan {
   max_results: number
   running_status: 'idle' | 'running'
   claim_expires_at?: string | null
+  /** 非空表示存在一次性手动排队请求（停用计划亦可排队） */
+  manual_trigger_at?: string | null
   last_run_at?: string | null
   next_run_at?: string | null
   created_at: string
@@ -174,6 +176,7 @@ export async function deletePlan(id: number): Promise<void> {
   await apiClient.delete(`/admin/model-benchmarks/plans/${id}`)
 }
 
+/** 手动排队一次执行；停用计划同样可排队（跑完仍保持停用） */
 export async function queueRun(id: number): Promise<ModelBenchmarkPlan> {
   const { data } = await apiClient.post<ModelBenchmarkPlan>(`/admin/model-benchmarks/plans/${id}/run`)
   return data

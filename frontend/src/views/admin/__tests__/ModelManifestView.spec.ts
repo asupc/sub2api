@@ -110,6 +110,13 @@ function buildManifest() {
   }
 }
 
+// 带测评分数的清单：claude-alpha 有分数，gpt-beta 未测评（用于验证降序与末位）
+function buildScoredManifest() {
+  const manifest = buildManifest()
+  manifest.models[0] = { ...manifest.models[0], benchmark_score: 78.8, benchmark_suite_version: '1.1.0', benchmark_scored_at: '2026-10-15T22:01:55Z' }
+  return manifest
+}
+
 const wrappers: ReturnType<typeof mount>[] = []
 
 function mountView() {
@@ -176,6 +183,20 @@ describe('admin ModelManifestView', () => {
 
     const modelIds = wrapper.findAll('.text-sm.font-bold').map(node => node.text())
     expect(modelIds).toEqual(['gpt-beta'])
+  })
+
+  it('shows the latest benchmark score and sorts scored models first', async () => {
+    getModelManifest.mockResolvedValue(buildScoredManifest())
+    const wrapper = mountView()
+    await flushPromises()
+
+    // 最近测试分数列展示分数；未测评模型显示未测评
+    expect(wrapper.text()).toContain('78.8')
+    expect(wrapper.text()).toContain('admin.modelManifest.benchmark.untested')
+
+    // 默认按分数降序：有分数的 claude-alpha 必须排在未测评的 gpt-beta 之前
+    const modelIds = wrapper.findAll('.text-sm.font-bold').map(node => node.text())
+    expect(modelIds).toEqual(['claude-alpha', 'gpt-beta'])
   })
 
   it('switches to account view and lists inverted account rows', async () => {

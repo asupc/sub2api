@@ -261,7 +261,7 @@ func (s *AccountTestService) testTraeAccountConnection(c *gin.Context, account *
 
 	payload := createOpenAIChatCompletionsTestPayload(testModelID, prompt)
 	if isBenchmarkAccountTest(c) {
-		payload["max_tokens"] = 4096
+		payload["max_tokens"] = defaultModelBenchmarkMaxOutputTokens
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})

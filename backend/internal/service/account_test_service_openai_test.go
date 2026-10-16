@@ -704,3 +704,135 @@ func TestAccountTestService_OpenAIChatCompletionsPathRejectsNonJSONStream(t *tes
 	require.Contains(t, recorder.Body.String(), "/v1/chat/completions")
 	require.NotContains(t, recorder.Body.String(), `"success":true`)
 }
+
+// --- 模型能力测评上下文（benchmark）专项 ---
+
+// benchmarkTestContext 构造带测评标记的 gin 上下文，模拟 RunBenchmarkPrompt 的调用环境。
+func benchmarkTestContext() (*gin.Context, *httptest.ResponseRecorder) {
+	ctx, recorder := newTestContext()
+	ctx.Set(accountTestBackgroundKey, true)
+	ctx.Set(accountTestBenchmarkKey, true)
+	return ctx, recorder
+}
+
+func TestAccountTestService_BenchmarkOpenAIOAuthSendsPromptWithoutMaxOutputTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, recorder := benchmarkTestContext()
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = io.NopCloser(strings.NewReader(
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":40,"output_tokens":12,"total_tokens":52}}}` + "\n\n"))
+
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+	svc := &AccountTestService{httpUpstream: upstream}
+	account := &Account{
+		ID:          95,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{"access_token": "test-token"},
+	}
+	const prompt = `请只输出一个 JSON 对象：{"answer":7}`
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.6-sol", prompt, AccountTestModeDefault)
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+
+	body, err := io.ReadAll(upstream.requests[0].Body)
+	require.NoError(t, err)
+
+	// 测评必须把真实题目送出（而不是探测用的 "hi"）
+	require.Equal(t, prompt, gjson.GetBytes(body, "input.0.content.0.text").String())
+	// Codex OAuth 端点不接受 max_output_tokens：下发会被上游 400 拒绝
+	require.False(t, gjson.GetBytes(body, "max_output_tokens").Exists())
+	// 测评使用极简 JSON 契约，而不是 Codex base instructions
+	require.Equal(t, modelBenchmarkInstructions, gjson.GetBytes(body, "instructions").String())
+	// Responses 流的 usage 必须作为 benchmark_usage 事件上报，供测评采集
+	require.Contains(t, recorder.Body.String(), "benchmark_usage")
+}
+
+func TestAccountTestService_BenchmarkOpenAIAPIKeySendsMaxOutputTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := benchmarkTestContext()
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{}}` + "\n\n"))
+
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+	svc := &AccountTestService{
+		httpUpstream: upstream,
+		cfg:          &config.Config{Security: config.SecurityConfig{URLAllowlist: config.URLAllowlistConfig{Enabled: false}}},
+	}
+	account := &Account{
+		ID:          96,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{"api_key": "sk-test"},
+		Extra:       map[string]any{openai_compat.ExtraKeyResponsesSupported: true},
+	}
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.6-sol", "return 7", AccountTestModeDefault)
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 1)
+
+	body, err := io.ReadAll(upstream.requests[0].Body)
+	require.NoError(t, err)
+	// API Key 直连路径照常下发输出预算
+	require.Equal(t, int64(defaultModelBenchmarkMaxOutputTokens), gjson.GetBytes(body, "max_output_tokens").Int())
+}
+
+func TestAccountTestService_NonBenchmarkOpenAIOAuthKeepsProbeDefaults(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := newTestContext()
+
+	resp := newJSONResponse(http.StatusOK, "")
+	resp.Body = io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{}}` + "\n\n"))
+
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{resp}}
+	svc := &AccountTestService{httpUpstream: upstream}
+	account := &Account{
+		ID:          97,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Concurrency: 1,
+		Credentials: map[string]any{"access_token": "test-token"},
+	}
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.6-sol", "", AccountTestModeDefault)
+	require.NoError(t, err)
+
+	body, err := io.ReadAll(upstream.requests[0].Body)
+	require.NoError(t, err)
+	// 空 prompt 回落到探测用的 "hi"
+	require.Equal(t, "hi", gjson.GetBytes(body, "input.0.content.0.text").String())
+	// 非测评路径沿用 Codex/Responses 正式 instructions，不换成测评契约
+	require.NotEqual(t, modelBenchmarkInstructions, gjson.GetBytes(body, "instructions").String())
+	// 非测评路径不下发输出预算
+	require.False(t, gjson.GetBytes(body, "max_output_tokens").Exists())
+}
+
+func TestAccountTestService_BenchmarkOpenAIUnauthorizedDoesNotMutateAccountState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := benchmarkTestContext()
+
+	upstream := &queuedHTTPUpstream{responses: []*http.Response{
+		newJSONResponse(http.StatusUnauthorized, `{"error":{"message":"token expired"}}`),
+	}}
+	repo := &openAIAccountTestRepo{}
+	svc := &AccountTestService{httpUpstream: upstream, accountRepo: repo}
+	account := &Account{
+		ID:          98,
+		Platform:    PlatformOpenAI,
+		Type:        AccountTypeOAuth,
+		Status:      StatusActive,
+		Concurrency: 1,
+		Credentials: map[string]any{"access_token": "test-token"},
+	}
+
+	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.6-sol", "prompt", AccountTestModeDefault)
+	require.Error(t, err)
+	// 测评是后台批任务：单题 401 不得把生产账号打成永久错误态
+	require.Zero(t, repo.setErrorID, "benchmark run must not mutate account error state")
+}

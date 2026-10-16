@@ -341,6 +341,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/admin/benchmark-plans',
+    name: 'AdminModelBenchmarkPlans',
+    component: () => import('@/views/admin/ModelBenchmarkPlansView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Benchmark Plans',
+      titleKey: 'admin.modelBenchmark.plans.pageTitle',
+      descriptionKey: 'admin.modelBenchmark.plans.pageDescription'
+    }
+  },
+  {
     path: '/admin/model-benchmarks',
     name: 'AdminModelBenchmark',
     component: () => import('@/views/admin/ModelBenchmarkView.vue'),

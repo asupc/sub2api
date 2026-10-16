@@ -835,7 +835,7 @@ func (s *AccountTestService) testQoderAccountConnection(c *gin.Context, account 
 
 	benchmarkMaxTokens := 0
 	if isBenchmarkAccountTest(c) {
-		benchmarkMaxTokens = 4096
+		benchmarkMaxTokens = defaultModelBenchmarkMaxOutputTokens
 	}
 	payloadBytes, _ := json.Marshal(createQoderModelBenchmarkPayload(testModelID, prompt, benchmarkMaxTokens))
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})

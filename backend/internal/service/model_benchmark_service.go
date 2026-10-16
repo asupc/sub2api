@@ -170,17 +170,20 @@ func (s *ModelBenchmarkService) DeletePlan(ctx context.Context, id int64) error 
 	return s.repo.DeletePlan(ctx, id)
 }
 
-// QueueRun sets an enabled plan due now; the runner claims it atomically.
+// QueueRun 手动排队一次执行。停用计划同样可排队（跑完仍是停用，不启动 cron）；
+// runner 通过 manual_trigger_at 原子领取并清空标记。计划运行中时 UpdatePlan 的
+// running_status='idle' 条件会命中 0 行，由 handler 映射为 409。
 func (s *ModelBenchmarkService) QueueRun(ctx context.Context, id int64) (*ModelBenchmarkPlan, error) {
 	plan, err := s.repo.GetPlan(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if !plan.Enabled {
-		return nil, fmt.Errorf("%w: plan is disabled", ErrModelBenchmarkInvalidPlan)
-	}
 	now := time.Now()
-	plan.NextRunAt = &now
+	plan.ManualTriggerAt = &now
+	if plan.Enabled {
+		// 启用计划同时对齐 next_run_at，保持既有「启用即尽快执行」语义。
+		plan.NextRunAt = &now
+	}
 	return s.repo.UpdatePlan(ctx, plan)
 }
 

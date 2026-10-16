@@ -36,6 +36,8 @@ func NewModelBenchmarkExecutor(accounts ModelBenchmarkAccountSource, upstream HT
 }
 
 // IsSupportedModelBenchmarkTarget enforces the benchmark adapter matrix.
+// 三类目标：API Key 直连（OpenAI 兼容非二开平台）、二开源码集成三平台 OAuth、
+// OpenAI OAuth/Codex（走 Responses 流式）。
 func IsSupportedModelBenchmarkTarget(account *Account, modelID string) bool {
 	if account == nil || strings.TrimSpace(modelID) == "" {
 		return false
@@ -44,11 +46,17 @@ func IsSupportedModelBenchmarkTarget(account *Account, modelID string) bool {
 	if mapped == "" || isOpenAIImageModel(mapped) || isGrokImageGenerationModel(mapped) || isGrokVideoGenerationModel(mapped) {
 		return false
 	}
-	switch account.Platform {
-	case PlatformQoder, PlatformTrae:
+	// 二开源码集成三平台（workbuddy/qoder/trae）：OAuth 账号经各自真实转发路径测评，
+	// 出站占位 token 由 GetOpenAIProtocolAPIKey 按平台分派（trae=jwt，其余 access_token）。
+	if IsSourceIntegratedPlatform(account.Platform) {
 		return account.Type == AccountTypeOAuth && strings.TrimSpace(account.GetOpenAIProtocolAPIKey()) != ""
 	}
-	if account.Type != AccountTypeAPIKey || !account.IsOpenAICompatible() || IsSourceIntegratedPlatform(account.Platform) {
+	// OpenAI OAuth/Codex：走 Responses API 流式测评。
+	if account.Platform == PlatformOpenAI && account.IsOpenAIOAuthLike() {
+		// Agent Identity 账号按请求签名，不持有可校验的 access token。
+		return account.IsOpenAIAgentIdentity() || strings.TrimSpace(account.GetOpenAIAccessToken()) != ""
+	}
+	if account.Type != AccountTypeAPIKey || !account.IsOpenAICompatible() {
 		return false
 	}
 	switch account.Platform {
@@ -69,7 +77,9 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 		return modelBenchmarkExecutionFailure(item, fmt.Errorf("unsupported benchmark target"))
 	}
 	upstreamModel := account.GetMappedModel(plan.ModelID)
-	if account.Platform == PlatformQoder || account.Platform == PlatformTrae {
+	// 二开三平台与 OpenAI OAuth/Codex 均无通用非流式端点，统一走
+	// AccountTestService 的流式捕获通道（含 usage 采集与文本聚合）。
+	if IsSourceIntegratedPlatform(account.Platform) || (account.Platform == PlatformOpenAI && account.IsOpenAIOAuthLike()) {
 		return e.executeSourceIntegrated(ctx, plan, item, upstreamModel)
 	}
 	payload := map[string]any{

@@ -902,7 +902,20 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	if isOAuth {
 		upstreamTestModelID = normalizeOpenAIModelForUpstream(credentialAccount, testModelID)
 	}
-	payload := createOpenAITestPayload(upstreamTestModelID, isOAuth)
+	// 模型测评经此路径执行时必须携带真实题目；普通连通性测试保持原有的 "hi"
+	// 探测语义。OpenAI OAuth/Codex 走 ChatGPT 内部端点，该端点不接受
+	// max_output_tokens（见 openAICodexOAuthUnsupportedFields），下发会被 400
+	// 拒绝，故仅在 API Key 直连路径下发输出预算。
+	benchmarkMaxTokens := 0
+	if isBenchmarkAccountTest(c) && !isOAuth {
+		benchmarkMaxTokens = defaultModelBenchmarkMaxOutputTokens
+	}
+	payload := createOpenAITestPayloadWithPrompt(upstreamTestModelID, isOAuth, prompt, benchmarkMaxTokens)
+	if isBenchmarkAccountTest(c) {
+		// Codex base instructions 是编码 agent 提示，与测评「只返回一个 JSON 对象」
+		// 的输出契约冲突，会显著抬高 format_error 比例；测评改用极简契约。
+		payload["instructions"] = modelBenchmarkInstructions
+	}
 	payloadBytes, _ := json.Marshal(payload)
 
 	// Send test_start event once. A task-invalid Agent Identity response may
@@ -987,13 +1000,17 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 			c.Request = c.Request.WithContext(markAgentIdentityTaskRecoveryTried(ctx))
 			return s.testOpenAIAccountConnection(c, account, modelID, prompt, mode)
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			s.reconcileOpenAI429State(ctx, account, resp.Header, body)
-		}
-		// 401 Unauthorized: 标记账号为永久错误
-		if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
-			errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
-			_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
+		// 模型测评是 48 题串行的后台批任务：单题 429/401 不应改写生产账号状态
+		// （否则一次测评就会把账号打入冷却或 error 态），仅上报该题失败。
+		if !isBenchmarkAccountTest(c) {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				s.reconcileOpenAI429State(ctx, account, resp.Header, body)
+			}
+			// 401 Unauthorized: 标记账号为永久错误
+			if resp.StatusCode == http.StatusUnauthorized && s.accountRepo != nil {
+				errMsg := fmt.Sprintf("Authentication failed (401): %s", string(body))
+				_ = s.accountRepo.SetError(ctx, account.ID, errMsg)
+			}
 		}
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
@@ -2787,6 +2804,20 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 
 // createOpenAITestPayload creates a test payload for OpenAI Responses API
 func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
+	return createOpenAITestPayloadWithPrompt(modelID, isOAuth, "hi", 0)
+}
+
+// createOpenAITestPayloadWithPrompt 允许指定用户输入与输出预算。模型测评需要把
+// 真实题目作为 prompt 送出（默认 "hi" 会让 OAuth/Codex 测评跑空题），maxTokens
+// 为 0 时不下发 max_output_tokens 字段。
+// 注意：ChatGPT 内部 Codex 端点的评测调用必须传 maxTokens=0——max_output_tokens
+// 属 openAICodexOAuthUnsupportedFields（转发路径会剥离，测试路径不经该 transform，
+// 下发会被上游以 unsupported parameter 400 拒绝）。
+func createOpenAITestPayloadWithPrompt(modelID string, isOAuth bool, prompt string, maxTokens int) map[string]any {
+	testPrompt := strings.TrimSpace(prompt)
+	if testPrompt == "" {
+		testPrompt = "hi"
+	}
 	payload := map[string]any{
 		"model": modelID,
 		"input": []map[string]any{
@@ -2795,7 +2826,7 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 				"content": []map[string]any{
 					{
 						"type": "input_text",
-						"text": "hi",
+						"text": testPrompt,
 					},
 				},
 			},
@@ -2810,6 +2841,9 @@ func createOpenAITestPayload(modelID string, isOAuth bool) map[string]any {
 
 	// All accounts require instructions for Responses API
 	payload["instructions"] = openai.DefaultInstructions
+	if maxTokens > 0 {
+		payload["max_output_tokens"] = maxTokens
+	}
 
 	return payload
 }
@@ -2970,6 +3004,10 @@ func (s *AccountTestService) processOpenAIChatCompletionsStream(c *gin.Context, 
 func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader) error {
 	reader := bufio.NewReader(body)
 	seenCompleted := false
+	// 部分上游（Codex 系）只在终态事件的 response.output 里给完整文本，不发
+	// response.output_text.delta。没有 delta 时用终态输出兜底，避免模型测评
+	// 把整题答案当空内容处理。
+	seenDelta := false
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -3009,9 +3047,25 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 		case "response.output_text.delta":
 			// OpenAI Responses API uses "delta" field for text content
 			if delta, ok := data["delta"].(string); ok && delta != "" {
+				seenDelta = true
 				s.sendEvent(c, TestEvent{Type: "content", Text: delta})
 			}
 		case "response.completed", "response.done":
+			// Responses API 的 usage 挂在终态事件的 response.usage 上；模型测评依赖它
+			// 采集 Token/成本（无 usage 时上层标记 missing，不虚构）。与 Chat
+			// Completions 测试流同样无条件上报，普通测试路径忽略该事件类型。
+			if responseData, ok := data["response"].(map[string]any); ok {
+				if usage, ok := responseData["usage"].(map[string]any); ok {
+					s.sendEvent(c, TestEvent{Type: "benchmark_usage", Data: usage})
+				}
+				if !seenDelta {
+					if encoded, err := json.Marshal(responseData); err == nil {
+						if text := extractOpenAIResponsesText(encoded); strings.TrimSpace(text) != "" {
+							s.sendEvent(c, TestEvent{Type: "content", Text: text})
+						}
+					}
+				}
+			}
 			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
 			return nil
 		case "response.failed":

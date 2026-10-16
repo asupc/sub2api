@@ -173,6 +173,89 @@ func TestGeneratedBenchmarkFamiliesVaryAcrossRuns(t *testing.T) {
 	}
 }
 
+func TestModelBenchmarkRegistrySupportsIntegratedPlatformsAndOpenAIOAuth(t *testing.T) {
+	cases := []struct {
+		name    string
+		account *Account
+		want    bool
+	}{
+		{
+			name: "workbuddy oauth with access token",
+			account: &Account{ID: 1, Platform: PlatformWorkbuddy, Type: AccountTypeOAuth, Credentials: map[string]any{
+				"access_token": "wb-token", "model_mapping": map[string]any{"deepseek-v4.1-flash": "deepseek-v4.1-flash"},
+			}},
+			want: true,
+		},
+		{
+			name:    "workbuddy oauth without token",
+			account: &Account{ID: 2, Platform: PlatformWorkbuddy, Type: AccountTypeOAuth, Credentials: map[string]any{}},
+			want:    false,
+		},
+		{
+			name: "qoder oauth with access token",
+			account: &Account{ID: 3, Platform: PlatformQoder, Type: AccountTypeOAuth, Credentials: map[string]any{
+				"access_token": "qoder-token", "model_mapping": map[string]any{"Qwen3.8-Flash": "Qwen3.8-Flash"},
+			}},
+			want: true,
+		},
+		{
+			name: "trae oauth uses jwt credential",
+			account: &Account{ID: 4, Platform: PlatformTrae, Type: AccountTypeOAuth, Credentials: map[string]any{
+				"jwt": "trae-jwt", "model_mapping": map[string]any{"minimax-m3": "minimax-m3"},
+			}},
+			want: true,
+		},
+		{
+			name: "openai oauth with access token",
+			account: &Account{ID: 5, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{
+				"access_token": "oa-token", "model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"},
+			}},
+			want: true,
+		},
+		{
+			name:    "openai oauth without access token",
+			account: &Account{ID: 6, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{}},
+			want:    false,
+		},
+		{
+			name: "openai apikey stays supported",
+			account: &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{
+				"api_key": "sk-test", "model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"},
+			}},
+			want: true,
+		},
+		{
+			name: "anthropic apikey remains unsupported",
+			account: &Account{ID: 8, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Credentials: map[string]any{
+				"api_key": "sk-ant", "model_mapping": map[string]any{"claude-sonnet-5": "claude-sonnet-5"},
+			}},
+			want: false,
+		},
+		{
+			name: "image model target rejected",
+			account: &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{
+				"api_key": "sk-test", "model_mapping": map[string]any{"gpt-image-2": "gpt-image-2"},
+			}},
+			want: false,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			modelID := testCase.account.GetMappedModel(firstModelMappingKey(testCase.account))
+			require.Equal(t, testCase.want, IsSupportedModelBenchmarkTarget(testCase.account, modelID))
+		})
+	}
+}
+
+// firstModelMappingKey 取账号映射里的首个对外模型名；无映射时回落到通用模型名，
+// 以保证「图片模型」等用例仍能命中排除分支。
+func firstModelMappingKey(account *Account) string {
+	for key := range account.GetModelMapping() {
+		return key
+	}
+	return "gpt-5.6-sol"
+}
+
 func modelBenchmarkPtrInt64(value int64) *int64 { return &value }
 
 func TestModelBenchmarkAggregateCompositeWeights(t *testing.T) {

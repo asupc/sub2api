@@ -40,6 +40,11 @@ export interface ModelManifestItem {
   /** true = 0 可调度账号（断供告警） */
   has_warning: boolean
   accounts: ModelManifestAccountItem[]
+  /** 最近一次模型能力测评的能力分；null 表示尚未测评 */
+  benchmark_score?: number | null
+  /** 该分数所属的套件版本（跨版本分数不完全可比） */
+  benchmark_suite_version?: string
+  benchmark_scored_at?: string | null
 }
 
 export interface ModelManifestResponse {

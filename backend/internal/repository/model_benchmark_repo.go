@@ -22,7 +22,7 @@ func (r *modelBenchmarkRepository) CreatePlan(ctx context.Context, plan *service
 		INSERT INTO model_benchmark_plans
 			(name, suite_id, suite_version, scoring_version, model_id, account_id, cron_expression, enabled, sample_count, max_output_tokens, timeout_seconds, max_results, next_run_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,last_run_at,next_run_at,created_at,updated_at
+		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at
 	`, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.AccountID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt)
 	return scanModelBenchmarkPlan(row)
 }
@@ -51,10 +51,10 @@ func (r *modelBenchmarkRepository) ListPlans(ctx context.Context) ([]*service.Mo
 
 func (r *modelBenchmarkRepository) UpdatePlan(ctx context.Context, plan *service.ModelBenchmarkPlan) (*service.ModelBenchmarkPlan, error) {
 	row := r.db.QueryRowContext(ctx, `
-		UPDATE model_benchmark_plans SET name=$2,suite_id=$3,suite_version=$4,scoring_version=$5,model_id=$6,account_id=$7,cron_expression=$8,enabled=$9,sample_count=$10,max_output_tokens=$11,timeout_seconds=$12,max_results=$13,next_run_at=$14,updated_at=NOW()
+		UPDATE model_benchmark_plans SET name=$2,suite_id=$3,suite_version=$4,scoring_version=$5,model_id=$6,account_id=$7,cron_expression=$8,enabled=$9,sample_count=$10,max_output_tokens=$11,timeout_seconds=$12,max_results=$13,next_run_at=$14,manual_trigger_at=$15,updated_at=NOW()
 		WHERE id=$1 AND running_status='idle'
-		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,last_run_at,next_run_at,created_at,updated_at
-	`, plan.ID, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.AccountID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt)
+		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at
+	`, plan.ID, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.AccountID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt, plan.ManualTriggerAt)
 	return scanModelBenchmarkPlan(row)
 }
 
@@ -72,9 +72,14 @@ func (r *modelBenchmarkRepository) ClaimDuePlans(ctx context.Context, now time.T
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// cron due 仅对启用计划生效；手动排队（manual_trigger_at）对停用计划同样生效，
+	// 且优先于周期任务（用户点“立即执行”期望尽快跑）。停用计划不参与 cron 分支，
+	// 避免其遗留的 next_run_at 旧值把已停用计划反复拉起。
 	rows, err := tx.QueryContext(ctx, modelBenchmarkPlanSelect+`
-		WHERE enabled=true AND next_run_at <= $1 AND (running_status='idle' OR claim_expires_at < $1)
-		ORDER BY next_run_at ASC LIMIT $2 FOR UPDATE SKIP LOCKED
+		WHERE ((enabled = TRUE AND next_run_at <= $1) OR manual_trigger_at IS NOT NULL)
+		  AND (running_status='idle' OR claim_expires_at < $1)
+		ORDER BY (manual_trigger_at IS NULL) ASC, COALESCE(manual_trigger_at, next_run_at) ASC
+		LIMIT $2 FOR UPDATE SKIP LOCKED
 	`, now, limit)
 	if err != nil {
 		return nil, err
@@ -93,7 +98,8 @@ func (r *modelBenchmarkRepository) ClaimDuePlans(ctx context.Context, now time.T
 		return nil, err
 	}
 	for _, plan := range plans {
-		if _, err := tx.ExecContext(ctx, `UPDATE model_benchmark_plans SET running_status='running',claim_expires_at=$2,updated_at=NOW() WHERE id=$1`, plan.ID, now.Add(lease)); err != nil {
+		// 领取即消费一次性手动排队标记，避免同一请求被重复执行。
+		if _, err := tx.ExecContext(ctx, `UPDATE model_benchmark_plans SET running_status='running',claim_expires_at=$2,manual_trigger_at=NULL,updated_at=NOW() WHERE id=$1`, plan.ID, now.Add(lease)); err != nil {
 			return nil, err
 		}
 	}
@@ -280,6 +286,31 @@ func (r *modelBenchmarkRepository) PruneRuns(ctx context.Context, planID int64, 
 	return err
 }
 
+// LatestScores 返回每个模型最近一次成功/部分成功 run 的能力分快照。
+// 刻意不做套件版本过滤：模型清单页展示的是「最近测试分数」，跨版本的历史分数
+// 也应可见（前端按返回值标注版本差异）；亦不设最少 run 次数门槛（排名接口才需要）。
+func (r *modelBenchmarkRepository) LatestScores(ctx context.Context) (map[string]service.ModelBenchmarkLatestScore, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT ON (model_id) model_id, intelligence_score, suite_id, suite_version, scoring_version, created_at
+		FROM model_benchmark_runs
+		WHERE status IN ('success','partial') AND intelligence_score IS NOT NULL
+		ORDER BY model_id, created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]service.ModelBenchmarkLatestScore{}
+	for rows.Next() {
+		var score service.ModelBenchmarkLatestScore
+		if err := rows.Scan(&score.ModelID, &score.IntelligenceScore, &score.SuiteID, &score.SuiteVersion, &score.ScoringVersion, &score.ScoredAt); err != nil {
+			return nil, err
+		}
+		out[score.ModelID] = score
+	}
+	return out, rows.Err()
+}
+
 func modelBenchmarkCoverageJSON(coverage map[string]bool) []byte {
 	if coverage == nil {
 		coverage = map[string]bool{}
@@ -288,7 +319,7 @@ func modelBenchmarkCoverageJSON(coverage map[string]bool) []byte {
 	return raw
 }
 
-const modelBenchmarkPlanSelect = `SELECT id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,last_run_at,next_run_at,created_at,updated_at FROM model_benchmark_plans`
+const modelBenchmarkPlanSelect = `SELECT id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at FROM model_benchmark_plans`
 const modelBenchmarkRunSelect = `SELECT id,plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,account_id,status,intelligence_score,efficiency_score,composite_score,category_scores,item_count,answered_count,correct_count,input_tokens,output_tokens,total_tokens,estimated_cost,avg_latency_ms,p95_latency_ms,usage_source,usage_field_coverage,error_message,started_at,finished_at,created_at FROM model_benchmark_runs`
 const modelBenchmarkItemSelect = `SELECT id,run_id,item_id,family_id,category,difficulty,weight,prompt_hash,prompt_snapshot,response_text,status,score,earned_points,possible_points,checker_type,failure_reason,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,total_tokens,estimated_cost,usage_source,usage_field_coverage,pricing_source,latency_ms,first_token_ms,error_message,created_at FROM model_benchmark_run_items`
 
@@ -296,7 +327,7 @@ type modelBenchmarkScanner interface{ Scan(dest ...any) error }
 
 func scanModelBenchmarkPlan(row modelBenchmarkScanner) (*service.ModelBenchmarkPlan, error) {
 	p := &service.ModelBenchmarkPlan{}
-	err := row.Scan(&p.ID, &p.Name, &p.SuiteID, &p.SuiteVersion, &p.ScoringVersion, &p.ModelID, &p.AccountID, &p.CronExpression, &p.Enabled, &p.SampleCount, &p.MaxOutputTokens, &p.TimeoutSeconds, &p.MaxResults, &p.RunningStatus, &p.ClaimExpiresAt, &p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt)
+	err := row.Scan(&p.ID, &p.Name, &p.SuiteID, &p.SuiteVersion, &p.ScoringVersion, &p.ModelID, &p.AccountID, &p.CronExpression, &p.Enabled, &p.SampleCount, &p.MaxOutputTokens, &p.TimeoutSeconds, &p.MaxResults, &p.RunningStatus, &p.ClaimExpiresAt, &p.ManualTriggerAt, &p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

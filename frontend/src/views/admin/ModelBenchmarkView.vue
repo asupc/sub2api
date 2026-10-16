@@ -10,6 +10,7 @@
           <span v-if="suite" class="rounded-lg border border-primary-200 bg-primary-50 px-2.5 py-1 text-xs font-semibold text-primary-700 dark:border-primary-800 dark:bg-primary-900/30 dark:text-primary-300">
             {{ suite.id }} · D{{ suite.min_difficulty }}-D{{ suite.max_difficulty }} · {{ suite.item_count }} {{ t('admin.modelBenchmark.items') }}
           </span>
+          <RouterLink to="/admin/benchmark-plans" class="btn btn-secondary btn-sm">{{ t('admin.modelBenchmark.stats.managePlans') }}</RouterLink>
           <button type="button" class="btn btn-secondary btn-sm" @click="loadAll">{{ t('admin.modelBenchmark.refresh') }}</button>
         </div>
       </div>
@@ -81,55 +82,7 @@
         <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-500 dark:text-dark-400"><span v-for="series in chartSeries" :key="`legend-${series.model}`" class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-full" :style="{ background: series.color }"></span>{{ series.model }}</span></div>
       </div>
 
-      <div class="grid gap-4 xl:grid-cols-[minmax(360px,.42fr)_minmax(0,.58fr)]">
-        <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-xs dark:border-dark-700 dark:bg-dark-900">
-          <h2 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.modelBenchmark.plans.create') }}</h2>
-          <form class="mt-4 space-y-3" @submit.prevent="handleCreate">
-            <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.name') }}</label><input v-model.trim="form.name" required class="input input-sm w-full" :placeholder="t('admin.modelBenchmark.plans.namePlaceholder')" /></div>
-            <div class="grid gap-3 sm:grid-cols-2">
-              <div>
-                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.plans.modelSearch') }}</label>
-                <input v-model.trim="manifestSearch" class="input input-sm w-full" :placeholder="t('admin.modelBenchmark.plans.modelSearchPlaceholder')" />
-              </div>
-              <div>
-                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.plans.platformFilter') }}</label>
-                <select v-model="manifestPlatform" class="input input-sm w-full">
-                  <option value="">{{ t('admin.modelBenchmark.plans.allPlatforms') }}</option>
-                  <option v-for="platform in manifestPlatformOptions" :key="platform" :value="platform">{{ platform }}</option>
-                </select>
-              </div>
-              <div>
-                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.model') }}</label>
-                <select v-model="form.model_id" required class="input input-sm w-full" @change="form.account_id = selectedModelAccounts[0]?.id ?? 0">
-                  <option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.display_name ? `${model.id} (${model.display_name})` : model.id }}</option>
-                </select>
-                <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ selectedModelPlatforms }}</p>
-              </div>
-              <div>
-                <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.account') }}</label>
-                <select v-model.number="form.account_id" required class="input input-sm w-full" :disabled="!selectedModelSupported">
-                  <option v-if="!selectedModelSupported" :value="0">{{ t('admin.modelBenchmark.plans.unsupportedModel') }}</option>
-                  <option v-for="account in selectedModelAccounts" :key="account.id" :value="account.id">#{{ account.id }} {{ account.name }} · {{ account.platform }}</option>
-                </select>
-              </div>
-              <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.cron') }}</label><input v-model.trim="form.cron_expression" required class="input input-sm w-full font-mono" placeholder="0 4 * * 1" /></div>
-              <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.samples') }}</label><input v-model.number="form.sample_count" type="number" min="1" max="3" class="input input-sm w-full" /></div>
-              <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.maxTokens') }}</label><input v-model.number="form.max_output_tokens" type="number" min="128" max="4096" class="input input-sm w-full" /></div>
-              <div><label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.timeout') }}</label><input v-model.number="form.timeout_seconds" type="number" min="10" max="600" class="input input-sm w-full" /></div>
-            </div>
-            <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-dark-200"><input v-model="form.enabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600" />{{ t('admin.modelBenchmark.fields.enabled') }}</label>
-            <p class="rounded-lg bg-amber-50 p-2.5 text-[11px] text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">{{ t('admin.modelBenchmark.plans.costWarning', { count: suite?.item_count ?? 48, samples: form.sample_count || 1 }) }}</p>
-            <button type="submit" class="btn btn-primary btn-sm w-full" :disabled="creating || !selectedModelSupported">{{ creating ? t('common.saving') : t('admin.modelBenchmark.plans.create') }}</button>
-          </form>
-        </div>
-        <div class="rounded-xl border border-gray-200 bg-white shadow-xs dark:border-dark-700 dark:bg-dark-900">
-          <div class="border-b border-gray-100 px-4 py-3 dark:border-dark-800"><h2 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.modelBenchmark.plans.title') }}</h2></div>
-          <div class="overflow-x-auto"><table class="min-w-full text-sm"><thead><tr class="border-b border-gray-100 text-left text-xs text-gray-500 dark:border-dark-800 dark:text-dark-400"><th class="px-4 py-3">{{ t('admin.modelBenchmark.fields.name') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.model') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.status') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.nextRun') }}</th><th class="px-4 py-3 text-right">{{ t('admin.modelBenchmark.plans.actions') }}</th></tr></thead><tbody>
-            <tr v-for="plan in plans" :key="plan.id" class="border-b border-gray-50 last:border-0 dark:border-dark-800/70"><td class="max-w-[190px] truncate px-4 py-3 font-medium text-gray-900 dark:text-white">{{ plan.name }}</td><td class="max-w-[170px] truncate px-3 py-3 text-gray-600 dark:text-dark-300">{{ plan.model_id }} / #{{ plan.account_id }}</td><td class="px-3 py-3"><span :class="plan.enabled ? 'badge badge-success' : 'badge badge-secondary'">{{ plan.enabled ? t('admin.modelBenchmark.status.enabled') : t('admin.modelBenchmark.status.disabled') }}</span></td><td class="px-3 py-3 text-xs text-gray-500 dark:text-dark-400">{{ formatTime(plan.next_run_at) }}</td><td class="px-4 py-3 text-right"><div class="flex justify-end gap-1.5"><button type="button" class="btn btn-secondary btn-xs" :disabled="plan.running_status === 'running'" @click="handleQueue(plan)">{{ t('admin.modelBenchmark.plans.runNow') }}</button><button type="button" class="btn btn-secondary btn-xs" @click="togglePlan(plan)">{{ plan.enabled ? t('admin.modelBenchmark.plans.disable') : t('admin.modelBenchmark.plans.enable') }}</button><button type="button" class="btn btn-danger btn-xs" @click="handleDelete(plan)">{{ t('common.delete') }}</button></div></td></tr>
-            <tr v-if="plans.length === 0"><td colspan="5" class="px-4 py-10 text-center text-sm text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.empty') }}</td></tr>
-          </tbody></table></div>
-        </div>
-      </div>      <div class="rounded-xl border border-gray-200 bg-white shadow-xs dark:border-dark-700 dark:bg-dark-900">
+      <div class="rounded-xl border border-gray-200 bg-white shadow-xs dark:border-dark-700 dark:bg-dark-900">
         <div class="flex items-center justify-between border-b border-gray-100 px-4 py-3 dark:border-dark-800"><h2 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.modelBenchmark.runs.title') }}</h2><button type="button" class="btn btn-secondary btn-xs" @click="loadRuns">{{ t('admin.modelBenchmark.refresh') }}</button></div>
         <div class="overflow-x-auto"><table class="min-w-full text-sm"><thead><tr class="border-b border-gray-100 text-left text-xs text-gray-500 dark:border-dark-800 dark:text-dark-400"><th class="px-4 py-3">Run</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.model') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.status') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.intelligence') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.outputTokens') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.latency') }}</th><th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.usage') }}</th><th class="px-4 py-3">{{ t('admin.modelBenchmark.fields.created') }}</th></tr></thead><tbody>
           <tr v-for="run in runs" :key="run.id" class="cursor-pointer border-b border-gray-50 transition hover:bg-gray-50/70 last:border-0 dark:border-dark-800/70 dark:hover:bg-dark-800/40" @click="openRun(run.id)"><td class="px-4 py-3 font-mono">#{{ run.id }}</td><td class="max-w-[190px] truncate px-3 py-3">{{ run.model_id }}</td><td class="px-3 py-3"><span :class="statusClass(run.status)">{{ t(`admin.modelBenchmark.runStatus.${run.status}`) }}</span></td><td class="px-3 py-3 font-bold tabular-nums">{{ formatScore(run.intelligence_score) }}</td><td class="px-3 py-3 tabular-nums">{{ formatTokens(run.output_tokens) }}</td><td class="px-3 py-3 tabular-nums">{{ formatLatency(run.avg_latency_ms) }}</td><td class="px-3 py-3"><span :class="run.usage_source === 'upstream' ? 'badge badge-success' : 'badge badge-warning'">{{ run.usage_source }}</span></td><td class="px-4 py-3 text-xs text-gray-500 dark:text-dark-400">{{ formatTime(run.created_at) }}</td></tr>
@@ -146,23 +99,16 @@
     </div>
   </AppLayout>
 </template><script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import adminAPI from '@/api/admin'
-import type { ModelBenchmarkHistoryPoint, ModelBenchmarkPlan, ModelBenchmarkRanking, ModelBenchmarkRun, ModelBenchmarkRunItem, ModelBenchmarkSuite } from '@/api/admin/modelBenchmarks'
-import type { ModelManifestItem } from '@/api/admin/models'
+import type { ModelBenchmarkHistoryPoint, ModelBenchmarkRanking, ModelBenchmarkRun, ModelBenchmarkRunItem, ModelBenchmarkSuite } from '@/api/admin/modelBenchmarks'
 
 const { t } = useI18n()
-const creating = ref(false)
 const loadError = ref('')
 const actionError = ref('')
 const suites = ref<ModelBenchmarkSuite[]>([])
-const manifestModels = ref<ModelManifestItem[]>([])
-const targets = ref<ModelManifestItem[]>([])
-const manifestSearch = ref('')
-const manifestPlatform = ref('')
-const plans = ref<ModelBenchmarkPlan[]>([])
 const rankings = ref<ModelBenchmarkRanking[]>([])
 const runs = ref<ModelBenchmarkRun[]>([])
 const history = ref<ModelBenchmarkHistoryPoint[]>([])
@@ -170,33 +116,15 @@ const selectedRun = ref<ModelBenchmarkRun | null>(null)
 const runItems = ref<ModelBenchmarkRunItem[]>([])
 const historyMetric = ref<'intelligence_score' | 'efficiency_score' | 'output_tokens' | 'total_tokens' | 'avg_latency_ms' | 'estimated_cost'>('intelligence_score')
 const historyModel = ref('')
-const form = reactive({ name: '', model_id: '', account_id: 0, cron_expression: '0 4 * * 1', enabled: false, sample_count: 1, max_output_tokens: 768, timeout_seconds: 90, max_results: 50 })
 
 const suite = computed(() => suites.value[0] ?? null)
-const benchmarkTargetByID = computed(() => new Map(targets.value.map(model => [model.id, model])))
-const selectedBenchmarkTarget = computed(() => benchmarkTargetByID.value.get(form.model_id))
-const selectedModelAccounts = computed(() => selectedBenchmarkTarget.value?.accounts ?? [])
-const selectedModelSupported = computed(() => selectedModelAccounts.value.length > 0)
-const selectedModelPlatforms = computed(() => {
-  const model = manifestModels.value.find(item => item.id === form.model_id)
-  return model?.platforms?.length ? model.platforms.join(' / ') : '—'
-})
-const modelOptions = computed(() => {
-  const search = manifestSearch.value.trim().toLowerCase()
-  return manifestModels.value.filter(model => {
-    if (manifestPlatform.value && !model.platforms.includes(manifestPlatform.value)) return false
-    if (!search) return true
-    return model.id.toLowerCase().includes(search) || (model.display_name ?? '').toLowerCase().includes(search)
-  })
-})
-const manifestPlatformOptions = computed(() => Array.from(new Set(manifestModels.value.flatMap(model => model.platforms))).sort())
 const latestRun = computed(() => runs.value.find(run => run.status === 'success' || run.status === 'partial') ?? null)
 const summaryCards = computed(() => { const best = rankings.value[0]; const latest = latestRun.value; return [
   { label: t('admin.modelBenchmark.stats.latestIntelligence'), value: formatScore(latest?.intelligence_score), hint: latest ? `#${latest.id}` : '—' },
   { label: t('admin.modelBenchmark.stats.bestModel'), value: best?.model_id ?? '—', hint: formatScore(best?.intelligence_score) },
   { label: t('admin.modelBenchmark.stats.outputTokens'), value: formatTokens(latest?.output_tokens), hint: latest?.usage_source === 'upstream' ? t('admin.modelBenchmark.stats.upstreamUsage') : t('admin.modelBenchmark.stats.usageMissing') },
   { label: t('admin.modelBenchmark.stats.latency'), value: formatLatency(latest?.avg_latency_ms), hint: `P95 ${formatLatency(latest?.p95_latency_ms)}` },
-  { label: t('admin.modelBenchmark.stats.activePlans'), value: plans.value.filter(plan => plan.enabled).length, hint: t('admin.modelBenchmark.stats.serialRunner') }
+  { label: t('admin.modelBenchmark.stats.runs'), value: runs.value.length, hint: t('admin.modelBenchmark.stats.serialRunner') }
 ] })
 const categoryLabels: Record<string, string> = { math: 'admin.modelBenchmark.category.math', algorithms: 'admin.modelBenchmark.category.algorithms', logic: 'admin.modelBenchmark.category.logic', code: 'admin.modelBenchmark.category.code', planning: 'admin.modelBenchmark.category.planning', instruction: 'admin.modelBenchmark.category.instruction' }
 const categoryBars = computed(() => Object.entries(latestRun.value?.category_scores ?? {}).map(([key, value]) => ({ label: t(categoryLabels[key] ?? key), score: Number(value.toFixed(1)) })))
@@ -214,24 +142,9 @@ const runMetrics = computed(() => { const run = selectedRun.value; if (!run) ret
   { label: t('admin.modelBenchmark.fields.totalTokens'), value: formatTokens(run.total_tokens) }, { label: t('admin.modelBenchmark.fields.latency'), value: formatLatency(run.avg_latency_ms) }, { label: t('admin.modelBenchmark.fields.cost'), value: run.estimated_cost == null ? '—' : `$${run.estimated_cost.toFixed(4)}` }
 ] })
 
-async function loadAll() { loadError.value = ''; try { const [suiteData, manifestData, targetData, planData, rankingData, runData, historyData] = await Promise.all([adminAPI.modelBenchmarks.listSuites(), adminAPI.models.getModelManifest(), adminAPI.modelBenchmarks.listTargets(), adminAPI.modelBenchmarks.listPlans(), adminAPI.modelBenchmarks.listRankings(), adminAPI.modelBenchmarks.listRuns({ limit: 100 }), adminAPI.modelBenchmarks.listHistory({ limit: 500 })]); suites.value = suiteData; manifestModels.value = manifestData.models ?? []; targets.value = targetData; plans.value = planData; rankings.value = rankingData; runs.value = runData; history.value = historyData; if (!form.model_id) {
-				const preferred = modelOptions.value.find(model => benchmarkTargetByID.value.get(model.id)?.accounts.length) ?? modelOptions.value[0]
-				form.model_id = preferred?.id ?? ''
-				form.account_id = benchmarkTargetByID.value.get(form.model_id)?.accounts[0]?.id ?? 0
-			} } catch (error) { loadError.value = error instanceof Error ? error.message : t('admin.modelBenchmark.loadFailed') } }
-watch(modelOptions, options => {
-	if (options.length && !options.some(model => model.id === form.model_id)) {
-		const preferred = options.find(model => benchmarkTargetByID.value.get(model.id)?.accounts.length) ?? options[0]
-		form.model_id = preferred.id
-		form.account_id = benchmarkTargetByID.value.get(form.model_id)?.accounts[0]?.id ?? 0
-	}
-})
+async function loadAll() { loadError.value = ''; try { const [suiteData, rankingData, runData, historyData] = await Promise.all([adminAPI.modelBenchmarks.listSuites(), adminAPI.modelBenchmarks.listRankings(), adminAPI.modelBenchmarks.listRuns({ limit: 100 }), adminAPI.modelBenchmarks.listHistory({ limit: 500 })]); suites.value = suiteData; rankings.value = rankingData; runs.value = runData; history.value = historyData } catch (error) { loadError.value = error instanceof Error ? error.message : t('admin.modelBenchmark.loadFailed') } }
 
 async function loadRuns() { try { runs.value = await adminAPI.modelBenchmarks.listRuns({ limit: 100 }) } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
-async function handleCreate() { if (!form.name || !form.model_id || !form.account_id) return; creating.value = true; actionError.value = ''; try { await adminAPI.modelBenchmarks.createPlan({ ...form }); form.name = ''; form.enabled = false; await loadAll() } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } finally { creating.value = false } }
-async function togglePlan(plan: ModelBenchmarkPlan) { try { await adminAPI.modelBenchmarks.updatePlan(plan.id, { name: plan.name, model_id: plan.model_id, account_id: plan.account_id, cron_expression: plan.cron_expression, enabled: !plan.enabled, sample_count: plan.sample_count, max_output_tokens: plan.max_output_tokens, timeout_seconds: plan.timeout_seconds, max_results: plan.max_results }); await loadAll() } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
-async function handleQueue(plan: ModelBenchmarkPlan) { try { await adminAPI.modelBenchmarks.queueRun(plan.id); await loadAll() } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
-async function handleDelete(plan: ModelBenchmarkPlan) { if (!window.confirm(t('admin.modelBenchmark.plans.deleteConfirm', { name: plan.name }))) return; try { await adminAPI.modelBenchmarks.delete(plan.id); await loadAll() } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
 async function openRun(id: number) { try { const [run, items] = await Promise.all([adminAPI.modelBenchmarks.getRun(id), adminAPI.modelBenchmarks.listRunItems(id)]); selectedRun.value = run; runItems.value = items } catch (error) { actionError.value = error instanceof Error ? error.message : String(error) } }
 function closeRun() { selectedRun.value = null; runItems.value = [] }
 function formatScore(value?: number | null) { return value == null ? '—' : value.toFixed(1) }

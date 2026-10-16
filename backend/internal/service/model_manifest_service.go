@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -19,15 +20,30 @@ type ModelManifestAccountSource interface {
 	ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error)
 }
 
+// ModelManifestBenchmarkScoreSource 是模型清单展示「最近测试分数」所需的窄依赖。
+// 返回 nil 表示不接入测评分数（例如未装配该能力的单元测试）。
+type ModelManifestBenchmarkScoreSource interface {
+	LatestScores(ctx context.Context) (map[string]ModelBenchmarkLatestScore, error)
+}
+
 // ModelManifestService 模型清单与账号供给透视服务：一次 DB 全量加载后在内存中
 // 构建「模型 → 挂载账号」倒排索引，0 次上游网络请求。
 type ModelManifestService struct {
-	accounts ModelManifestAccountSource
+	accounts      ModelManifestAccountSource
+	benchmarkRepo ModelManifestBenchmarkScoreSource
 }
 
 // NewModelManifestService 创建模型清单服务实例
 func NewModelManifestService(accounts ModelManifestAccountSource) *ModelManifestService {
 	return &ModelManifestService{accounts: accounts}
+}
+
+// SetBenchmarkScoreSource 注入测评分数来源（可选，装配期调用）。
+func (s *ModelManifestService) SetBenchmarkScoreSource(source ModelManifestBenchmarkScoreSource) {
+	if s == nil {
+		return
+	}
+	s.benchmarkRepo = source
 }
 
 // ModelManifestQuery 模型清单查询参数
@@ -70,6 +86,11 @@ type ModelManifestItem struct {
 	TotalConcurrency int                        `json:"total_concurrency"`
 	HasWarning       bool                       `json:"has_warning"` // true = 0 可调度账号
 	Accounts         []ModelManifestAccountItem `json:"accounts"`
+	// 最近一次模型能力测评的能力分；nil 表示该模型尚未测评过。分数跨套件版本
+	// 取最近一次，附 suite_version 供前端标注可比性。
+	BenchmarkScore        *float64   `json:"benchmark_score"`
+	BenchmarkSuiteVersion string     `json:"benchmark_suite_version"`
+	BenchmarkScoredAt     *time.Time `json:"benchmark_scored_at"`
 }
 
 // ModelManifestResponse 模型清单响应
@@ -187,6 +208,12 @@ func (s *ModelManifestService) GetManifest(ctx context.Context, query ModelManif
 	}
 
 	allModels := collector.build()
+	if s.benchmarkRepo != nil {
+		// 测评分数是展示增强项：查询失败不应让模型清单整体不可用。
+		if scores, err := s.benchmarkRepo.LatestScores(ctx); err == nil {
+			attachModelBenchmarkScores(allModels, scores)
+		}
+	}
 
 	summary := ModelManifestSummary{
 		TotalModels:   len(allModels),
@@ -206,6 +233,22 @@ func (s *ModelManifestService) GetManifest(ctx context.Context, query ModelManif
 		Summary: summary,
 		Models:  filterModelManifestItems(allModels, query),
 	}, nil
+}
+
+// attachModelBenchmarkScores 把「每模型最近一次能力分」挂到清单条目上。
+// 未测评的模型保持 nil，由前端渲染为空。
+func attachModelBenchmarkScores(models []ModelManifestItem, scores map[string]ModelBenchmarkLatestScore) {
+	for i := range models {
+		score, ok := scores[models[i].ID]
+		if !ok {
+			continue
+		}
+		value := score.IntelligenceScore
+		scoredAt := score.ScoredAt
+		models[i].BenchmarkScore = &value
+		models[i].BenchmarkSuiteVersion = score.SuiteVersion
+		models[i].BenchmarkScoredAt = &scoredAt
+	}
 }
 
 // manifestAccountModels 解析单个账号对外提供的模型并写入倒排索引。

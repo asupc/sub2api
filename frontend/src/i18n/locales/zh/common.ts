@@ -180,6 +180,7 @@ export default {
     accounts: '账号管理',
     accountsAll: '全部账号',
     modelManifest: '模型清单',
+    benchmarkPlans: '测评计划',
     modelBenchmark: '模型能力测评',
     plugins: '插件管理',
     ops: '运维监控',

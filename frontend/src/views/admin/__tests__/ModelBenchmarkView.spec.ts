@@ -3,11 +3,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import ModelBenchmarkView from '../ModelBenchmarkView.vue'
 
-const { getModelManifest, listSuites, listTargets, listPlans, listRankings, listRuns, listHistory } = vi.hoisted(() => ({
-  getModelManifest: vi.fn(),
+const { listSuites, listRankings, listRuns, listHistory } = vi.hoisted(() => ({
   listSuites: vi.fn(),
-  listTargets: vi.fn(),
-  listPlans: vi.fn(),
   listRankings: vi.fn(),
   listRuns: vi.fn(),
   listHistory: vi.fn(),
@@ -15,15 +12,14 @@ const { getModelManifest, listSuites, listTargets, listPlans, listRankings, list
 
 vi.mock('@/api/admin', () => ({
   default: {
-    models: { getModelManifest },
-    modelBenchmarks: { listSuites, listTargets, listPlans, listRankings, listRuns, listHistory },
+    models: {},
+    modelBenchmarks: { listSuites, listRankings, listRuns, listHistory },
   },
 }))
 
 vi.mock('vue-i18n', () => ({
   useI18n: () => ({
-    t: (key: string, params?: Record<string, unknown>) =>
-      params?.count !== undefined ? `${key}:{count=${params.count}}` : key,
+    t: (key: string) => key,
   }),
 }))
 
@@ -31,52 +27,9 @@ vi.mock('@/components/layout/AppLayout.vue', () => ({
   default: { name: 'AppLayout', template: '<div><slot /></div>' },
 }))
 
-const account = (id: number, name: string, platform = 'openai') => ({
-  id,
-  name,
-  platform,
-  type: 'apikey',
-  status: 'active',
-  schedulable: true,
-  rate_limited: false,
-  concurrency: 5,
-  priority: 5,
-  groups: [],
-  target: '',
-})
-
-function buildManifest() {
-  return {
-    summary: { total_models: 2, healthy_models: 2, danger_models: 0, total_accounts: 2 },
-    models: [
-      {
-        id: 'supported-model',
-        display_name: 'Supported Model',
-        platforms: ['openai'],
-        total_accounts: 1,
-        active_accounts: 1,
-        total_concurrency: 5,
-        has_warning: false,
-        accounts: [account(1, 'supported-account')],
-      },
-      {
-        id: 'unsupported-model',
-        display_name: 'Unsupported Model',
-        platforms: ['anthropic'],
-        total_accounts: 1,
-        active_accounts: 1,
-        total_concurrency: 5,
-        has_warning: false,
-        accounts: [account(2, 'unsupported-account', 'anthropic')],
-      },
-    ],
-  }
-}
-
-function buildTargets() {
-  const manifest = buildManifest()
-  return [manifest.models[0]]
-}
+vi.mock('vue-router', () => ({
+  RouterLink: { name: 'RouterLink', template: '<a><slot /></a>' },
+}))
 
 const wrappers: ReturnType<typeof mount>[] = []
 
@@ -86,16 +39,17 @@ function mountView() {
   return wrapper
 }
 
-describe('admin ModelBenchmarkView model selection', () => {
+describe('admin ModelBenchmarkView', () => {
   beforeEach(() => {
-    getModelManifest.mockReset().mockResolvedValue(buildManifest())
     listSuites.mockReset().mockResolvedValue([{
       id: 'hard-v1', version: '1.1.0', scoring_version: '1.0.0', item_count: 48,
       family_count: 24, min_difficulty: 3, max_difficulty: 5, category_weights: {},
     }])
-    listTargets.mockReset().mockResolvedValue(buildTargets())
-    listPlans.mockReset().mockResolvedValue([])
-    listRankings.mockReset().mockResolvedValue([])
+    listRankings.mockReset().mockResolvedValue([{
+      model_id: 'glm-5.3', suite_id: 'hard-v1', suite_version: '1.1.0', scoring_version: '1.0.0',
+      run_count: 3, intelligence_score: 79.2, efficiency_score: 97.5, composite_score: 82.0,
+      output_tokens: 11282, avg_latency_ms: 6040, estimated_cost: 0.1, last_run_at: '2026-10-15T22:09:40Z',
+    }])
     listRuns.mockReset().mockResolvedValue([])
     listHistory.mockReset().mockResolvedValue([])
   })
@@ -105,28 +59,31 @@ describe('admin ModelBenchmarkView model selection', () => {
     vi.restoreAllMocks()
   })
 
-  it('uses the full model manifest as the plan model source', async () => {
+  it('renders rankings without the plan management block', async () => {
     const wrapper = mountView()
     await flushPromises()
 
-    expect(getModelManifest).toHaveBeenCalledTimes(1)
-    const modelSelect = wrapper.findAll('select')[3]
-    const optionValues = modelSelect.findAll('option').map(option => option.element.value)
-    expect(optionValues).toEqual(['supported-model', 'unsupported-model'])
-    expect((modelSelect.element as HTMLSelectElement).value).toBe('supported-model')
-    expect(wrapper.text()).toContain('supported-account')
+    expect(wrapper.text()).toContain('glm-5.3')
+    // 计划管理已拆到独立页面：本页不再出现创建表单与计划表格
+    expect(wrapper.text()).not.toContain('admin.modelBenchmark.plans.create')
+    expect(wrapper.text()).not.toContain('admin.modelBenchmark.plans.title')
+    // 提供跳转到测评计划页的入口
+    expect(wrapper.text()).toContain('admin.modelBenchmark.stats.managePlans')
   })
 
-  it('filters manifest models and clearly marks unsupported targets', async () => {
+  it('renders run records and loads them on mount', async () => {
+    listRuns.mockResolvedValue([{
+      id: 12, plan_id: 4, suite_id: 'hard-v1', suite_version: '1.1.0', scoring_version: '1.0.0',
+      model_id: 'minimax-m3', upstream_model_id: 'MiniMax-M3', account_id: 570, status: 'partial',
+      intelligence_score: 62.1, category_scores: {}, item_count: 48, answered_count: 3, correct_count: 2,
+      usage_source: 'missing', usage_field_coverage: {}, error_message: '', started_at: '2026-10-15T22:51:10Z',
+      created_at: '2026-10-15T22:51:10Z',
+    }])
     const wrapper = mountView()
     await flushPromises()
 
-    await wrapper.findAll('input')[1].setValue('Unsupported')
-    await flushPromises()
-
-    const modelSelect = wrapper.findAll('select')[3]
-    expect(modelSelect.findAll('option').map(option => option.element.value)).toEqual(['unsupported-model'])
-    expect((modelSelect.element as HTMLSelectElement).value).toBe('unsupported-model')
-    expect(wrapper.text()).toContain('admin.modelBenchmark.plans.unsupportedModel')
+    expect(listRuns).toHaveBeenCalled()
+    expect(wrapper.text()).toContain('minimax-m3')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.runStatus.partial')
   })
 })

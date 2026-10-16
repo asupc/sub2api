@@ -14,7 +14,8 @@ export default {
     },
     stats: {
       latestIntelligence: '最新能力分', bestModel: '当前最佳模型', outputTokens: '输出 Token', latency: '平均耗时',
-      activePlans: '启用计划', upstreamUsage: '上游 usage', usageMissing: 'usage 缺失', serialRunner: '全局串行执行'
+      activePlans: '启用计划', upstreamUsage: '上游 usage', usageMissing: 'usage 缺失', serialRunner: '全局串行执行',
+      runs: '执行次数', managePlans: '管理测评计划'
     },
     category: { math: '数学组合', algorithms: '算法复杂度', logic: '形式逻辑', code: '代码缺陷', planning: '规划图论', instruction: '精确指令' },
     rankings: { title: '模型排行', hint: '相同套件与评分版本 · 至少 3 次成功 run', empty: '暂无可比排名；完成至少 3 次成功测评后展示' },
@@ -22,10 +23,16 @@ export default {
     history: { title: '历史曲线', hint: '能力分、效率分、Token、耗时与成本分开呈现，避免综合分掩盖问题', allModels: '全部模型', empty: '暂无历史数据' },
     plans: {
       title: '测评计划', create: '新建测评计划', namePlaceholder: '例如：旗舰模型每周硬测评', empty: '暂无测评计划',
-      modelSearch: '模型搜索', modelSearchPlaceholder: '搜索模型 ID 或显示名...', platformFilter: '平台', allPlatforms: '全部平台',
+      modelSearchPlaceholder: '搜索模型 ID 或显示名...', modelSearchEmpty: '无匹配模型',
       unsupportedModel: '当前模型暂无可测评账号',
-      actions: '操作', runNow: '手动排队', enable: '启用', disable: '停用',
-      costWarning: '每次运行约发起 {count} × {samples} 个上游请求，请确认额度与成本。', deleteConfirm: '确定删除计划「{name}」及其历史记录吗？'
+      actions: '操作', runNow: '手动执行', enable: '启用', disable: '停用',
+      costWarning: '每次运行约发起 {count} × {samples} 个上游请求，请确认额度与成本。', deleteConfirm: '确定删除计划「{name}」及其历史记录吗？',
+      runConfirmTitle: '确认开始执行测评',
+      runConfirmMessage: '即将对「{name}」（{model}）发起约 {count} × {samples} 个上游请求。执行期间请勿关闭服务，结果可在「模型能力测评」页的最近执行中查看。',
+      runQueued: '已开始执行：{name}，可在最近执行中查看进度。',
+      runFailed: '手动执行失败：{error}',
+      queued: '已排队', pageTitle: '测评计划', pageDescription: '管理模型能力测评计划：创建、启停与手动执行一次',
+      loading: '加载中...'
     },
     runs: { title: '最近执行', empty: '暂无执行记录' },
     runDetail: { title: 'Run 详情' },
