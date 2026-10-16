@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 
 import ModelBenchmarkPlansView from '../ModelBenchmarkPlansView.vue'
 
-const { getModelManifest, listSuites, listTargets, listPlans, createPlan, updatePlan, queueRun, showSuccess, showError } = vi.hoisted(() => ({
+const { getModelManifest, listSuites, listTargets, listPlans, createPlan, updatePlan, queueRun, getSettings, updateSettings, groupGetAll, getGroupApiKeys, showSuccess, showError } = vi.hoisted(() => ({
   getModelManifest: vi.fn(),
   listSuites: vi.fn(),
   listTargets: vi.fn(),
@@ -11,6 +11,10 @@ const { getModelManifest, listSuites, listTargets, listPlans, createPlan, update
   createPlan: vi.fn(),
   updatePlan: vi.fn(),
   queueRun: vi.fn(),
+  getSettings: vi.fn(),
+  updateSettings: vi.fn(),
+  groupGetAll: vi.fn(),
+  getGroupApiKeys: vi.fn(),
   showSuccess: vi.fn(),
   showError: vi.fn(),
 }))
@@ -18,7 +22,8 @@ const { getModelManifest, listSuites, listTargets, listPlans, createPlan, update
 vi.mock('@/api/admin', () => ({
   default: {
     models: { getModelManifest },
-    modelBenchmarks: { listSuites, listTargets, listPlans, createPlan, updatePlan, queueRun },
+    modelBenchmarks: { listSuites, listTargets, listPlans, createPlan, updatePlan, queueRun, getSettings, updateSettings },
+    groups: { getAll: groupGetAll, getGroupApiKeys },
   },
 }))
 
@@ -87,7 +92,6 @@ function buildPlan(overrides: Record<string, unknown> = {}) {
     suite_version: '1.1.0',
     scoring_version: '1.0.0',
     model_id: 'supported-model',
-    account_id: 1,
     cron_expression: '0 4 * * 1',
     enabled: false,
     sample_count: 1,
@@ -119,6 +123,10 @@ describe('admin ModelBenchmarkPlansView', () => {
     listTargets.mockReset().mockResolvedValue([buildManifest().models[0]])
     listPlans.mockReset().mockResolvedValue([buildPlan()])
     queueRun.mockReset().mockResolvedValue(buildPlan())
+    getSettings.mockReset().mockResolvedValue({ api_key_id: 11 })
+    updateSettings.mockReset().mockResolvedValue({ api_key_id: 11 })
+    groupGetAll.mockReset().mockResolvedValue([{ id: 3, name: 'benchmark-group' }])
+    getGroupApiKeys.mockReset().mockResolvedValue({ items: [{ id: 11, name: 'loopback-key', status: 'active' }], total: 1, page: 1, page_size: 100, pages: 1 })
     showSuccess.mockReset()
     showError.mockReset()
   })
@@ -128,14 +136,18 @@ describe('admin ModelBenchmarkPlansView', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders the plan table with model and account columns', async () => {
+  it('renders the plan table and gateway settings card without account binding', async () => {
     const wrapper = mountView()
     await flushPromises()
 
     expect(getModelManifest).toHaveBeenCalledTimes(1)
+    expect(getSettings).toHaveBeenCalled()
     expect(wrapper.text()).toContain('weekly-hard')
     expect(wrapper.text()).toContain('supported-model')
-    expect(wrapper.text()).toContain('#1')
+    // 去账号化：不再渲染账号列
+    expect(wrapper.text()).not.toContain('admin.modelBenchmark.fields.account')
+    // 设置卡片展示已配置 Key 状态
+    expect(wrapper.text()).toContain('admin.modelBenchmark.settings.configured:{"id":11}')
     // 停用计划渲染停用态
     expect(wrapper.text()).toContain('admin.modelBenchmark.status.disabled')
   })
@@ -195,6 +207,9 @@ describe('admin ModelBenchmarkPlansView', () => {
       model_id: 'supported-model',
       comparison_key: 'shared-study-2',
     }))
+    // 去账号化：更新载荷不再携带 account_id
+    const call = updatePlan.mock.calls[0][1] as Record<string, unknown>
+    expect(call).not.toHaveProperty('account_id')
     expect(showSuccess).toHaveBeenCalled()
     document.body.innerHTML = ''
   })

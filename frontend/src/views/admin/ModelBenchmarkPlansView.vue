@@ -17,6 +17,39 @@
       </div>
       <div v-if="loadError" class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">{{ loadError }}</div>
 
+      <!-- 测评设置：回环网关认证身份（公共网关统一调度，计划不绑定账号） -->
+      <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-xs dark:border-dark-700 dark:bg-dark-900">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="min-w-0">
+            <h2 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.modelBenchmark.settings.title') }}</h2>
+            <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.settings.help') }}</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span v-if="settingsKeyId" class="badge badge-success">{{ t('admin.modelBenchmark.settings.configured', { id: settingsKeyId }) }}</span>
+            <span v-else class="badge badge-secondary">{{ t('admin.modelBenchmark.settings.missing') }}</span>
+            <Select
+              v-model="settingsGroupId"
+              size="sm"
+              class="w-44"
+              :options="groupOptions"
+              :placeholder="t('admin.modelBenchmark.settings.groupPlaceholder')"
+              @change="onSettingsGroupChange"
+            />
+            <Select
+              v-model="settingsFormKeyId"
+              size="sm"
+              class="w-52"
+              :options="apiKeyOptions"
+              :disabled="!settingsGroupId"
+              :placeholder="settingsGroupId ? t('admin.modelBenchmark.settings.keyPlaceholder') : t('admin.modelBenchmark.settings.groupPlaceholder')"
+            />
+            <button type="button" class="btn btn-primary btn-sm" :disabled="savingSettings || !settingsGroupId || !settingsFormKeyId" @click="saveSettings">
+              {{ savingSettings ? t('common.saving') : t('common.save') }}
+            </button>
+          </div>
+        </div>
+      </div>
+
       <div class="min-w-0 rounded-xl border border-gray-200 bg-white shadow-xs dark:border-dark-700 dark:bg-dark-900">
         <div class="border-b border-gray-100 px-4 py-3 dark:border-dark-800 flex items-center justify-between">
           <h2 class="text-sm font-bold text-gray-900 dark:text-white">{{ t('admin.modelBenchmark.plans.title') }}</h2>
@@ -28,7 +61,6 @@
               <tr class="border-b border-gray-100 text-left text-xs text-gray-500 dark:border-dark-800 dark:text-dark-400">
                 <th class="px-4 py-3">{{ t('admin.modelBenchmark.fields.name') }}</th>
                 <th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.model') }}</th>
-                <th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.account') }}</th>
                 <th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.cron') }}</th>
                 <th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.status') }}</th>
                 <th class="px-3 py-3">{{ t('admin.modelBenchmark.fields.nextRun') }}</th>
@@ -40,7 +72,6 @@
               <tr v-for="plan in plans" :key="plan.id" class="border-b border-gray-50 last:border-0 dark:border-dark-800/70 hover:bg-gray-50/50 dark:hover:bg-dark-800/40 transition">
                 <td class="max-w-[180px] px-4 py-3 font-medium text-gray-900 dark:text-white"><div class="truncate">{{ plan.name }}</div><div class="mt-1 text-[11px] font-normal text-gray-500">{{ plan.comparison_key || 'baseline-v2' }} · {{ plan.max_output_tokens }} tokens</div></td>
                 <td class="max-w-[160px] truncate px-3 py-3 text-gray-600 dark:text-dark-300 font-mono text-xs">{{ plan.model_id }}</td>
-                <td class="px-3 py-3 text-gray-600 dark:text-dark-300">#{{ plan.account_id }}</td>
                 <td class="px-3 py-3 text-xs font-mono text-gray-600 dark:text-dark-300">{{ plan.cron_expression }}</td>
                 <td class="px-3 py-3">
                   <span v-if="plan.running_status === 'running' || plan.manual_trigger_at" class="badge badge-info">{{ t('admin.modelBenchmark.plans.queued') }}</span>
@@ -57,7 +88,7 @@
                   </div>
                 </td>
               </tr>
-              <tr v-if="plans.length === 0"><td colspan="8" class="px-4 py-10 text-center text-sm text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.empty') }}</td></tr>
+              <tr v-if="plans.length === 0"><td colspan="7" class="px-4 py-10 text-center text-sm text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.empty') }}</td></tr>
             </tbody>
           </table>
         </div>
@@ -75,18 +106,18 @@
         {{ modalError }}
       </div>
       <form class="space-y-4" @submit.prevent="handleSavePlan">
-        <div>
-          <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
-            {{ t('admin.modelBenchmark.fields.name') }} <span class="text-rose-500">*</span>
-          </label>
-          <input
-            v-model.trim="planForm.name"
-            required
-            class="input input-sm w-full"
-            :placeholder="t('admin.modelBenchmark.plans.namePlaceholder')"
-          />
-        </div>
         <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
+              {{ t('admin.modelBenchmark.fields.name') }} <span class="text-rose-500">*</span>
+            </label>
+            <input
+              v-model.trim="planForm.name"
+              required
+              class="input input-sm w-full"
+              :placeholder="t('admin.modelBenchmark.plans.namePlaceholder')"
+            />
+          </div>
           <div>
             <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
               {{ t('admin.modelBenchmark.fields.model') }} <span class="text-rose-500">*</span>
@@ -98,23 +129,8 @@
               :options="modelSelectOptions"
               :search-placeholder="t('admin.modelBenchmark.plans.modelSearchPlaceholder')"
               :empty-text="t('admin.modelBenchmark.plans.modelSearchEmpty')"
-              @change="onModelChange"
             />
-            <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ selectedModelPlatforms }}</p>
-          </div>
-          <div>
-            <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
-              {{ t('admin.modelBenchmark.fields.account') }} <span class="text-rose-500">*</span>
-            </label>
-            <Select
-              v-model="planForm.account_id"
-              size="sm"
-              class="w-full"
-              :options="accountSelectOptions"
-              :disabled="!selectedModelSupported"
-              :placeholder="selectedModelSupported ? t('common.selectOption') : t('admin.modelBenchmark.plans.unsupportedModel')"
-              :empty-text="t('admin.modelBenchmark.plans.unsupportedModel')"
-            />
+            <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ selectedModelSupported ? selectedModelPlatforms : t('admin.modelBenchmark.plans.unsupportedModel') }}</p>
           </div>
           <div>
             <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
@@ -163,11 +179,11 @@
               class="input input-sm w-full"
             />
           </div>
-        </div>
-        <div class="space-y-1.5">
-          <label for="benchmark-comparison-key" class="block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.comparisonKey') }}</label>
-          <input id="benchmark-comparison-key" v-model.trim="planForm.comparison_key" required maxlength="64" pattern="[A-Za-z0-9._-]+" class="input input-sm w-full" />
-          <p class="text-xs text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.comparisonHelp') }}</p>
+          <div>
+            <label for="benchmark-comparison-key" class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">{{ t('admin.modelBenchmark.fields.comparisonKey') }}</label>
+            <input id="benchmark-comparison-key" v-model.trim="planForm.comparison_key" required maxlength="64" pattern="[A-Za-z0-9._-]+" class="input input-sm w-full" />
+            <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.comparisonHelp') }}</p>
+          </div>
         </div>
         <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-dark-200">
           <input
@@ -221,6 +237,7 @@ import Select from '@/components/common/Select.vue'
 import Icon from '@/components/icons/Icon.vue'
 import adminAPI from '@/api/admin'
 import { useAppStore } from '@/stores/app'
+import { extractApiErrorMessage } from '@/utils/apiError'
 import type { ModelBenchmarkPlan, ModelBenchmarkSuite } from '@/api/admin/modelBenchmarks'
 import type { ModelManifestItem } from '@/api/admin/models'
 
@@ -243,7 +260,6 @@ const queueingId = ref<number | null>(null)
 const defaultForm = () => ({
   name: '',
   model_id: '',
-  account_id: 0,
   cron_expression: '0 4 * * 1',
   enabled: false,
   sample_count: 1,
@@ -257,9 +273,7 @@ const planForm = reactive(defaultForm())
 
 const suite = computed(() => suites.value[0] ?? null)
 const benchmarkTargetByID = computed(() => new Map(targets.value.map(model => [model.id, model])))
-const selectedBenchmarkTarget = computed(() => benchmarkTargetByID.value.get(planForm.model_id))
-const selectedModelAccounts = computed(() => selectedBenchmarkTarget.value?.accounts ?? [])
-const selectedModelSupported = computed(() => selectedModelAccounts.value.length > 0)
+const selectedModelSupported = computed(() => benchmarkTargetByID.value.has(planForm.model_id))
 const selectedModelPlatforms = computed(() => {
   const model = manifestModels.value.find(item => item.id === planForm.model_id)
   return model?.platforms?.length ? model.platforms.join(' / ') : '—'
@@ -271,19 +285,44 @@ const modelSelectOptions = computed(() => manifestModels.value.map(model => ({
   label: model.display_name ? `${model.id} (${model.display_name})` : model.id
 })))
 
-const accountSelectOptions = computed(() => {
-  const options = selectedModelAccounts.value.map(account => ({
-    value: account.id,
-    label: `#${account.id} ${account.name} · ${account.platform}`
-  }))
-  if (planForm.account_id && !options.some(o => o.value === planForm.account_id)) {
-    options.unshift({
-      value: planForm.account_id,
-      label: `#${planForm.account_id}`
-    })
+// ---- 测评设置：回环网关认证 Key ----
+const settingsKeyId = ref(0)
+const settingsGroupId = ref<number | ''>('')
+const settingsFormKeyId = ref<number | ''>('')
+const savingSettings = ref(false)
+const groups = ref<{ id: number; name: string }[]>([])
+const groupApiKeys = ref<{ id: number; name: string }[]>([])
+
+const groupOptions = computed(() => groups.value.map(group => ({ value: group.id, label: group.name })))
+const apiKeyOptions = computed(() => groupApiKeys.value.map(key => ({ value: key.id, label: `#${key.id} ${key.name}` })))
+
+async function onSettingsGroupChange() {
+  settingsFormKeyId.value = ''
+  groupApiKeys.value = []
+  const groupId = settingsGroupId.value
+  if (!groupId) return
+  try {
+    const data = await adminAPI.groups.getGroupApiKeys(Number(groupId), 1, 100)
+    groupApiKeys.value = (data.items ?? []).filter((key: { status?: string }) => key.status === 'active')
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error))
   }
-  return options
-})
+}
+
+async function saveSettings() {
+  const keyId = settingsFormKeyId.value
+  if (!keyId) return
+  savingSettings.value = true
+  try {
+    const settings = await adminAPI.modelBenchmarks.updateSettings({ api_key_id: Number(keyId) })
+    settingsKeyId.value = settings.api_key_id ?? 0
+    appStore.showSuccess(t('common.saved'))
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error))
+  } finally {
+    savingSettings.value = false
+  }
+}
 
 const queueConfirmMessage = computed(() => {
   const plan = queueTarget.value
@@ -299,30 +338,29 @@ const queueConfirmMessage = computed(() => {
 async function loadAll() {
   loadError.value = ''
   try {
-    const [suiteData, manifestData, targetData, planData] = await Promise.all([
+    const [suiteData, manifestData, targetData, planData, settingsData, groupData] = await Promise.all([
       adminAPI.modelBenchmarks.listSuites(),
       adminAPI.models.getModelManifest(),
       adminAPI.modelBenchmarks.listTargets(),
-      adminAPI.modelBenchmarks.listPlans()
+      adminAPI.modelBenchmarks.listPlans(),
+      adminAPI.modelBenchmarks.getSettings().catch(() => ({ api_key_id: 0 })),
+      adminAPI.groups.getAll().catch(() => [])
     ])
     suites.value = suiteData
     manifestModels.value = manifestData.models ?? []
     targets.value = targetData
     plans.value = planData
+    settingsKeyId.value = settingsData.api_key_id ?? 0
+    groups.value = (groupData ?? []).map(group => ({ id: group.id, name: group.name }))
   } catch (error) {
-    loadError.value = error instanceof Error ? error.message : t('admin.modelBenchmark.loadFailed')
+    loadError.value = extractApiErrorMessage(error, t('admin.modelBenchmark.loadFailed'))
   }
 }
 
 function applyPreferredModel() {
-  // 优先选中当前确有可测评账号的模型，避免默认落到空账号的模型上。
-  const preferred = manifestModels.value.find(model => benchmarkTargetByID.value.get(model.id)?.accounts.length) ?? manifestModels.value[0]
+  // 优先选中当前可测评（有可调度账号的文本模型）的模型，避免默认落到不可测评模型上。
+  const preferred = manifestModels.value.find(model => benchmarkTargetByID.value.has(model.id)) ?? manifestModels.value[0]
   planForm.model_id = preferred?.id ?? ''
-  planForm.account_id = benchmarkTargetByID.value.get(planForm.model_id)?.accounts[0]?.id ?? 0
-}
-
-function onModelChange() {
-  planForm.account_id = selectedModelAccounts.value[0]?.id ?? 0
 }
 
 watch(() => manifestModels.value.length, () => {
@@ -344,7 +382,6 @@ function openEditModal(plan: ModelBenchmarkPlan) {
   modalError.value = ''
   planForm.name = plan.name
   planForm.model_id = plan.model_id
-  planForm.account_id = plan.account_id
   planForm.cron_expression = plan.cron_expression
   planForm.enabled = plan.enabled
   planForm.sample_count = plan.sample_count
@@ -361,7 +398,7 @@ function closePlanModal() {
 }
 
 async function handleSavePlan() {
-  if (!planForm.name || !planForm.model_id || !planForm.account_id) return
+  if (!planForm.name || !planForm.model_id) return
   saving.value = true
   modalError.value = ''
   try {
@@ -375,7 +412,8 @@ async function handleSavePlan() {
     showPlanModal.value = false
     await loadAll()
   } catch (error) {
-    modalError.value = error instanceof Error ? error.message : String(error)
+    // API 拦截器 reject 的是普通对象（非 Error 实例），须用统一工具提取 message，否则显示 [object Object]
+    modalError.value = extractApiErrorMessage(error)
   } finally {
     saving.value = false
   }
@@ -383,10 +421,10 @@ async function handleSavePlan() {
 
 async function togglePlan(plan: ModelBenchmarkPlan) {
   try {
-    await adminAPI.modelBenchmarks.updatePlan(plan.id, { comparison_key: plan.comparison_key, name: plan.name, model_id: plan.model_id, account_id: plan.account_id, cron_expression: plan.cron_expression, enabled: !plan.enabled, sample_count: plan.sample_count, max_output_tokens: plan.max_output_tokens, timeout_seconds: plan.timeout_seconds, max_results: plan.max_results })
+    await adminAPI.modelBenchmarks.updatePlan(plan.id, { comparison_key: plan.comparison_key, name: plan.name, model_id: plan.model_id, cron_expression: plan.cron_expression, enabled: !plan.enabled, sample_count: plan.sample_count, max_output_tokens: plan.max_output_tokens, timeout_seconds: plan.timeout_seconds, max_results: plan.max_results })
     await loadAll()
   } catch (error) {
-    appStore.showError(error instanceof Error ? error.message : String(error))
+    appStore.showError(extractApiErrorMessage(error))
   }
 }
 
@@ -404,7 +442,7 @@ async function confirmQueue() {
     queueTarget.value = null
     await loadAll()
   } catch (error) {
-    appStore.showError(t('admin.modelBenchmark.plans.runFailed', { error: error instanceof Error ? error.message : String(error) }))
+    appStore.showError(t('admin.modelBenchmark.plans.runFailed', { error: extractApiErrorMessage(error) }))
   } finally {
     queueingId.value = null
   }
@@ -422,7 +460,7 @@ async function confirmDelete() {
     deleteTarget.value = null
     await loadAll()
   } catch (error) {
-    appStore.showError(error instanceof Error ? error.message : String(error))
+    appStore.showError(extractApiErrorMessage(error))
   }
 }
 

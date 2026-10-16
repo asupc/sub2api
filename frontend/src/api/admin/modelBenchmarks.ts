@@ -25,7 +25,6 @@ export interface ModelBenchmarkPlan {
   suite_version: string
   scoring_version: string
   model_id: string
-  account_id: number
   cron_expression: string
   enabled: boolean
   sample_count: number
@@ -47,7 +46,6 @@ export interface ModelBenchmarkPlanRequest {
   name: string
   suite_id?: string
   model_id: string
-  account_id: number
   cron_expression: string
   enabled?: boolean
   sample_count?: number
@@ -79,7 +77,6 @@ export interface ModelBenchmarkRun {
   scoring_version: string
   model_id: string
   upstream_model_id: string
-  account_id: number
   status: 'running' | 'success' | 'partial' | 'failed' | 'canceled'
   intelligence_score?: number | null
   efficiency_score?: number | null
@@ -140,7 +137,6 @@ export interface ModelBenchmarkHistoryPoint {
   sample_count: number
   run_id: number
   model_id: string
-  account_id: number
   created_at: string
   status: string
   intelligence_score?: number | null
@@ -158,7 +154,6 @@ export interface ModelBenchmarkRanking {
   max_output_tokens: number
   timeout_seconds: number
   sample_count: number
-  score_stddev?: number | null
   model_id: string
   suite_id: string
   suite_version: string
@@ -167,10 +162,34 @@ export interface ModelBenchmarkRanking {
   intelligence_score?: number | null
   efficiency_score?: number | null
   composite_score?: number | null
+  category_scores?: Record<string, number>
   output_tokens?: number | null
   avg_latency_ms?: number | null
   estimated_cost?: number | null
   last_run_at: string
+}
+
+export interface ModelBenchmarkModelOverview {
+  model_id: string
+  ranking?: ModelBenchmarkRanking
+  latest_run?: ModelBenchmarkRun
+  plans: ModelBenchmarkPlan[]
+  recent_runs: ModelBenchmarkRun[]
+  history: ModelBenchmarkHistoryPoint[]
+}
+
+/** 存在可排名执行的题库版本组合，供排行页切换历史题库 */
+export interface ModelBenchmarkRankingSuite {
+  suite_id: string
+  suite_version: string
+  scoring_version: string
+  run_count: number
+  last_run_at: string
+}
+
+/** 测评执行配置：回环网关请求使用的 API Key（0 = 未配置） */
+export interface ModelBenchmarkSettings {
+  api_key_id: number
 }
 
 export async function listSuites(): Promise<ModelBenchmarkSuite[]> {
@@ -228,9 +247,30 @@ export async function listHistory(params?: Record<string, string | number>): Pro
   return data ?? []
 }
 
-export async function listRankings(limit = 50, comparisonKey = 'baseline-v2', budget: Record<string, number> = {}): Promise<ModelBenchmarkRanking[]> {
-  const { data } = await apiClient.get<ModelBenchmarkRanking[]>('/admin/model-benchmarks/rankings', { params: { limit, comparison_key: comparisonKey, ...budget } })
+export async function getModelOverview(modelId: string): Promise<ModelBenchmarkModelOverview> {
+  const { data } = await apiClient.get<ModelBenchmarkModelOverview>(`/admin/model-benchmarks/models/${encodeURIComponent(modelId)}/overview`)
+  return data
+}
+
+/** 排名按题库三元组过滤（空对象 = 最新内置题库），不受批次/预算筛选影响 */
+export async function listRankings(limit = 50, suite: Record<string, string> = {}): Promise<ModelBenchmarkRanking[]> {
+  const { data } = await apiClient.get<ModelBenchmarkRanking[]>('/admin/model-benchmarks/rankings', { params: { limit, ...suite } })
   return data ?? []
+}
+
+export async function listRankingSuites(): Promise<ModelBenchmarkRankingSuite[]> {
+  const { data } = await apiClient.get<ModelBenchmarkRankingSuite[]>('/admin/model-benchmarks/rankings/suites')
+  return data ?? []
+}
+
+export async function getSettings(): Promise<ModelBenchmarkSettings> {
+  const { data } = await apiClient.get<ModelBenchmarkSettings>('/admin/model-benchmarks/settings')
+  return data
+}
+
+export async function updateSettings(req: ModelBenchmarkSettings): Promise<ModelBenchmarkSettings> {
+  const { data } = await apiClient.put<ModelBenchmarkSettings>('/admin/model-benchmarks/settings', req)
+  return data
 }
 
 export const modelBenchmarksAPI = {
@@ -245,7 +285,11 @@ export const modelBenchmarksAPI = {
   getRun,
   listRunItems,
   listHistory,
-  listRankings
+  getModelOverview,
+  listRankings,
+  listRankingSuites,
+  getSettings,
+  updateSettings
 }
 
 export default modelBenchmarksAPI
