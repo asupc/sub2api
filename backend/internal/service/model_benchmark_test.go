@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strconv"
 	"strings"
@@ -13,7 +14,6 @@ import (
 	"unicode"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,18 +87,113 @@ func (s modelBenchmarkManifestAccountSource) ListAllWithFilters(context.Context,
 	return s.accounts, nil
 }
 
+// 回环网关模式下目标矩阵是模型级的：任何平台的账号都构成可测评目标，
+// 只排除无可调度账号的模型与图像/视频生成模型。
 func TestModelBenchmarkListTargetsFollowsModelManifest(t *testing.T) {
 	accounts := []Account{
-		{ID: 1, Name: "supported", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: "active", Schedulable: true, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-a": "model-a"}}},
-		{ID: 2, Name: "unsupported", Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Status: "active", Schedulable: true, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-b": "model-b"}}},
+		{ID: 1, Name: "openai-key", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: "active", Schedulable: true, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-a": "model-a"}}},
+		{ID: 2, Name: "antigravity-oauth", Platform: PlatformAntigravity, Type: AccountTypeOAuth, Status: "active", Schedulable: true, Credentials: map[string]any{"access_token": "t", "model_mapping": map[string]any{"claude-opus-4-8": "claude-opus-4-8", "gemini-2.5-flash-image": "gemini-2.5-flash-image"}}},
+		{ID: 3, Name: "expired", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: "error", Schedulable: false, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-c": "model-c"}}},
 	}
 	source := modelBenchmarkManifestAccountSource{accounts: accounts}
-	service := NewModelBenchmarkService(nil, source, NewModelManifestService(source), nil)
+	service := NewModelBenchmarkService(nil, nil, nil, NewModelManifestService(source), nil)
 	targets, err := service.ListTargets(context.Background())
 	require.NoError(t, err)
-	require.Len(t, targets, 1)
-	require.Equal(t, "model-a", targets[0].ID)
-	require.Equal(t, []int64{1}, []int64{targets[0].Accounts[0].ID})
+	ids := make([]string, 0, len(targets))
+	for _, target := range targets {
+		ids = append(ids, target.ID)
+	}
+	require.ElementsMatch(t, []string{"model-a", "claude-opus-4-8"}, ids)
+}
+
+func TestModelBenchmarkSupportedModelMatrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		modelID     string
+		hasAccounts bool
+		want        bool
+	}{
+		{name: "text model with accounts", modelID: "claude-opus-4-8", hasAccounts: true, want: true},
+		{name: "text model without accounts", modelID: "claude-opus-4-8", hasAccounts: false, want: false},
+		{name: "empty model id", modelID: "  ", hasAccounts: true, want: false},
+		{name: "openai image model", modelID: "gpt-image-2", hasAccounts: true, want: false},
+		{name: "gemini image model", modelID: "gemini-2.5-flash-image", hasAccounts: true, want: false},
+		{name: "gemini image preview model", modelID: "gemini-3-pro-image-preview", hasAccounts: true, want: false},
+		{name: "grok image model", modelID: "grok-imagine-image-quality", hasAccounts: true, want: false},
+		{name: "grok video model", modelID: "grok-imagine-video-quality", hasAccounts: true, want: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.want, isModelBenchmarkSupportedModel(testCase.modelID, testCase.hasAccounts))
+		})
+	}
+}
+
+type modelBenchmarkAPIKeyStoreStub struct {
+	keys    map[int64]*APIKey
+	missing bool
+}
+
+func (s modelBenchmarkAPIKeyStoreStub) GetByID(_ context.Context, id int64) (*APIKey, error) {
+	if key, ok := s.keys[id]; ok {
+		return key, nil
+	}
+	return nil, fmt.Errorf("api key %d not found", id)
+}
+
+func (s modelBenchmarkAPIKeyStoreStub) GetKeyAndOwnerID(_ context.Context, id int64) (string, int64, error) {
+	key, ok := s.keys[id]
+	if !ok {
+		return "", 0, fmt.Errorf("api key %d not found", id)
+	}
+	return key.Key, key.UserID, nil
+}
+
+// modelBenchmarkSettingRepo 在只读 settingRepoStub 上支持 Set 回写（设置保存测试需要）。
+type modelBenchmarkSettingRepo struct {
+	settingRepoStub
+}
+
+func (s *modelBenchmarkSettingRepo) Set(_ context.Context, key, value string) error {
+	s.values[key] = value
+	return nil
+}
+
+func TestModelBenchmarkSettingsValidation(t *testing.T) {
+	groupID := int64(7)
+	store := modelBenchmarkAPIKeyStoreStub{keys: map[int64]*APIKey{
+		1: {ID: 1, Key: "sk-ok", UserID: 2, GroupID: &groupID, Status: StatusActive},
+		2: {ID: 2, Key: "sk-disabled", UserID: 2, GroupID: &groupID, Status: "disabled"},
+		3: {ID: 3, Key: "sk-nogroup", UserID: 2, GroupID: nil, Status: StatusActive},
+	}}
+	settings := NewSettingService(&modelBenchmarkSettingRepo{settingRepoStub: settingRepoStub{values: map[string]string{}}}, nil)
+	service := NewModelBenchmarkService(nil, store, settings, nil, nil)
+
+	// 默认未配置
+	got, err := service.GetBenchmarkSettings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(0), got.APIKeyID)
+
+	// 非法 Key 被拒绝
+	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 99})
+	require.Error(t, err)
+	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 2})
+	require.Error(t, err)
+	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 3})
+	require.Error(t, err)
+
+	// 合法 Key 保存并可回读
+	got, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 1})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.APIKeyID)
+	got, err = service.GetBenchmarkSettings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), got.APIKeyID)
+
+	// KeyID=0 允许清除
+	got, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 0})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), got.APIKeyID)
 }
 
 func TestModelBenchmarkScoreAnswerCheckers(t *testing.T) {
@@ -137,30 +232,57 @@ func TestModelBenchmarkAggregateExecutionFailureDoesNotBecomeZeroIntelligence(t 
 	require.Nil(t, run.CompositeScore)
 }
 
-type modelBenchmarkAccountSource struct{ account *Account }
-
-func (s modelBenchmarkAccountSource) GetByID(context.Context, int64) (*Account, error) {
-	return s.account, nil
+// modelBenchmarkLoopbackGateway 用 httptest 模拟回环网关：校验收到的载荷并把
+// 预置 SSE 流回给 executor。
+func modelBenchmarkLoopbackGateway(t *testing.T, sse string, inspect func(body []byte)) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		require.Equal(t, "Bearer sk-loop", r.Header.Get("Authorization"))
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		if inspect != nil {
+			inspect(body)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
 
-type modelBenchmarkHTTPUpstream struct{ request *http.Request }
-
-func (u *modelBenchmarkHTTPUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
-	return u.DoWithTLS(req, "", 0, 0, nil)
+func modelBenchmarkLoopbackConfig(t *testing.T, server *httptest.Server) *config.Config {
+	t.Helper()
+	port, err := strconv.Atoi(strings.TrimPrefix(server.URL, "http://127.0.0.1:"))
+	require.NoError(t, err)
+	return &config.Config{Server: config.ServerConfig{Port: port}}
 }
 
-func (u *modelBenchmarkHTTPUpstream) DoWithTLS(req *http.Request, _ string, _ int64, _ int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	u.request = req
-	body := `{"choices":[{"message":{"content":"{\"answer\":7}"}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,"completion_tokens_details":{"reasoning_tokens":3}}}`
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+func modelBenchmarkLoopbackExecutor(t *testing.T, cfg *config.Config) *ModelBenchmarkExecutor {
+	t.Helper()
+	groupID := int64(1)
+	store := modelBenchmarkAPIKeyStoreStub{keys: map[int64]*APIKey{
+		11: {ID: 11, Key: "sk-loop", UserID: 2, GroupID: &groupID, Status: StatusActive},
+	}}
+	settings := NewSettingService(&settingRepoStub{values: map[string]string{
+		SettingKeyModelBenchmarkSettings: `{"api_key_id":11}`,
+	}}, nil)
+	return NewModelBenchmarkExecutor(store, settings, nil, cfg)
 }
 
-func TestModelBenchmarkExecutorCapturesUsage(t *testing.T) {
-	account := &Account{ID: 5, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 1, Credentials: map[string]any{"api_key": "sk-test"}}
-	upstream := &modelBenchmarkHTTPUpstream{}
-	executor := NewModelBenchmarkExecutor(modelBenchmarkAccountSource{account}, upstream, nil, nil, nil, &config.Config{})
+func TestModelBenchmarkExecutorLoopbackCapturesUsage(t *testing.T) {
+	sse := "data: {\"model\":\"gpt-test\",\"choices\":[{\"delta\":{\"content\":\"{\\\"answer\\\":\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"7}\"}}]}\n\n" +
+		"data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7,\"total_tokens\":18,\"completion_tokens_details\":{\"reasoning_tokens\":3}}}\n\n" +
+		"data: [DONE]\n\n"
+	var received map[string]any
+	server := modelBenchmarkLoopbackGateway(t, sse, func(body []byte) {
+		require.NoError(t, json.Unmarshal(body, &received))
+	})
+	executor := modelBenchmarkLoopbackExecutor(t, modelBenchmarkLoopbackConfig(t, server))
 	item := ModelBenchmarkItem{ID: "mod", Category: "math", Difficulty: 4, Checker: "integer", Prompt: "return 7", Expected: int64(7), PromptHash: "hash", ExpectedOutputTokens: 20, ExpectedLatencyMS: 1000}
-	plan := &ModelBenchmarkPlan{AccountID: 5, ModelID: "gpt-test", MaxOutputTokens: 128}
+	plan := &ModelBenchmarkPlan{ModelID: "gpt-test", MaxOutputTokens: 128}
 	result := executor.Execute(context.Background(), plan, item)
 	require.Equal(t, "correct", result.Status)
 	require.Equal(t, int64(11), *result.InputTokens)
@@ -169,8 +291,49 @@ func TestModelBenchmarkExecutorCapturesUsage(t *testing.T) {
 	require.Equal(t, int64(3), *result.ReasoningTokens)
 	require.Equal(t, "upstream", result.UsageSource)
 	require.True(t, result.UsageFieldCoverage["reasoning"])
-	require.Equal(t, "https://api.openai.com/v1/chat/completions", upstream.request.URL.String())
-	require.Equal(t, "Bearer sk-test", upstream.request.Header.Get("Authorization"))
+	require.NotNil(t, result.LatencyMS)
+	// 回环载荷语义：真实题目、temperature=0、显式输出预算与 usage 声明
+	require.Equal(t, "gpt-test", received["model"])
+	require.Equal(t, float64(0), received["temperature"])
+	require.Equal(t, float64(128), received["max_tokens"])
+	require.Equal(t, true, received["stream"])
+	require.Equal(t, map[string]any{"include_usage": true}, received["stream_options"])
+	messages := received["messages"].([]any)
+	require.Len(t, messages, 1)
+	require.Equal(t, "return 7", messages[0].(map[string]any)["content"])
+}
+
+func TestModelBenchmarkExecutorRequiresConfiguredAPIKey(t *testing.T) {
+	server := modelBenchmarkLoopbackGateway(t, "data: [DONE]\n\n", nil)
+	cfg := modelBenchmarkLoopbackConfig(t, server)
+	store := modelBenchmarkAPIKeyStoreStub{keys: map[int64]*APIKey{}}
+	executor := NewModelBenchmarkExecutor(store, NewSettingService(&settingRepoStub{values: map[string]string{}}, nil), nil, cfg)
+	item := ModelBenchmarkItem{ID: "mod", Category: "math", Difficulty: 4, Checker: "integer", Prompt: "return 7", Expected: int64(7), PromptHash: "hash", ExpectedOutputTokens: 20, ExpectedLatencyMS: 1000}
+	result := executor.Execute(context.Background(), &ModelBenchmarkPlan{ModelID: "gpt-test", MaxOutputTokens: 128}, item)
+	require.Equal(t, "execution_failed", result.Status)
+	require.Contains(t, result.ErrorMessage, "not configured")
+}
+
+func TestModelBenchmarkExecutorReportsGatewayError(t *testing.T) {
+	executor := NewModelBenchmarkExecutor(nil, nil, nil, &config.Config{Server: config.ServerConfig{Port: 1}})
+	item := ModelBenchmarkItem{ID: "mod", Category: "math", Difficulty: 4, Checker: "integer", Prompt: "return 7", Expected: int64(7), PromptHash: "hash", ExpectedOutputTokens: 20, ExpectedLatencyMS: 1000}
+	result := executor.Execute(context.Background(), &ModelBenchmarkPlan{ModelID: "gpt-test", MaxOutputTokens: 128}, item)
+	require.Equal(t, "execution_failed", result.Status)
+	require.NotEmpty(t, result.ErrorMessage)
+}
+
+func TestModelBenchmarkExecutorMarksBudgetExhausted(t *testing.T) {
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"answer\\\":1}\"},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":128,\"total_tokens\":133}}\n\n" +
+		"data: [DONE]\n\n"
+	server := modelBenchmarkLoopbackGateway(t, sse, nil)
+	executor := modelBenchmarkLoopbackExecutor(t, modelBenchmarkLoopbackConfig(t, server))
+	item := ModelBenchmarkItem{ID: "mod", Category: "math", Difficulty: 4, Checker: "integer", Prompt: "return 7", Expected: int64(7), PromptHash: "hash", ExpectedOutputTokens: 20, ExpectedLatencyMS: 1000}
+	result := executor.Execute(context.Background(), &ModelBenchmarkPlan{ModelID: "gpt-test", MaxOutputTokens: 128}, item)
+	require.Equal(t, "execution_failed", result.Status)
+	require.Equal(t, "budget_exhausted", result.FailureReason)
+	require.Equal(t, "{\"answer\":1}", result.ResponseText)
+	require.Equal(t, int64(128), *result.OutputTokens)
 }
 
 func TestGeneratedBenchmarkExpectedAnswersPassOwnCheckers(t *testing.T) {
@@ -196,89 +359,6 @@ func TestGeneratedBenchmarkFamiliesVaryAcrossRuns(t *testing.T) {
 	for itemID, hashes := range hashesByItem {
 		require.Greater(t, len(hashes), 1, "item %s should vary across runs", itemID)
 	}
-}
-
-func TestModelBenchmarkRegistrySupportsIntegratedPlatformsAndOpenAIOAuth(t *testing.T) {
-	cases := []struct {
-		name    string
-		account *Account
-		want    bool
-	}{
-		{
-			name: "workbuddy oauth with access token",
-			account: &Account{ID: 1, Platform: PlatformWorkbuddy, Type: AccountTypeOAuth, Credentials: map[string]any{
-				"access_token": "wb-token", "model_mapping": map[string]any{"deepseek-v4.1-flash": "deepseek-v4.1-flash"},
-			}},
-			want: true,
-		},
-		{
-			name:    "workbuddy oauth without token",
-			account: &Account{ID: 2, Platform: PlatformWorkbuddy, Type: AccountTypeOAuth, Credentials: map[string]any{}},
-			want:    false,
-		},
-		{
-			name: "qoder oauth with access token",
-			account: &Account{ID: 3, Platform: PlatformQoder, Type: AccountTypeOAuth, Credentials: map[string]any{
-				"access_token": "qoder-token", "model_mapping": map[string]any{"Qwen3.8-Flash": "Qwen3.8-Flash"},
-			}},
-			want: true,
-		},
-		{
-			name: "trae oauth uses jwt credential",
-			account: &Account{ID: 4, Platform: PlatformTrae, Type: AccountTypeOAuth, Credentials: map[string]any{
-				"jwt": "trae-jwt", "model_mapping": map[string]any{"minimax-m3": "minimax-m3"},
-			}},
-			want: true,
-		},
-		{
-			name: "openai oauth with access token",
-			account: &Account{ID: 5, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{
-				"access_token": "oa-token", "model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"},
-			}},
-			want: true,
-		},
-		{
-			name:    "openai oauth without access token",
-			account: &Account{ID: 6, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Credentials: map[string]any{}},
-			want:    false,
-		},
-		{
-			name: "openai apikey stays supported",
-			account: &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{
-				"api_key": "sk-test", "model_mapping": map[string]any{"gpt-5.6-sol": "gpt-5.6-sol"},
-			}},
-			want: true,
-		},
-		{
-			name: "anthropic apikey remains unsupported",
-			account: &Account{ID: 8, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Credentials: map[string]any{
-				"api_key": "sk-ant", "model_mapping": map[string]any{"claude-sonnet-5": "claude-sonnet-5"},
-			}},
-			want: false,
-		},
-		{
-			name: "image model target rejected",
-			account: &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{
-				"api_key": "sk-test", "model_mapping": map[string]any{"gpt-image-2": "gpt-image-2"},
-			}},
-			want: false,
-		},
-	}
-	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			modelID := testCase.account.GetMappedModel(firstModelMappingKey(testCase.account))
-			require.Equal(t, testCase.want, IsSupportedModelBenchmarkTarget(testCase.account, modelID))
-		})
-	}
-}
-
-// firstModelMappingKey 取账号映射里的首个对外模型名；无映射时回落到通用模型名，
-// 以保证「图片模型」等用例仍能命中排除分支。
-func firstModelMappingKey(account *Account) string {
-	for key := range account.GetModelMapping() {
-		return key
-	}
-	return "gpt-5.6-sol"
 }
 
 func modelBenchmarkPtrInt64(value int64) *int64 { return &value }

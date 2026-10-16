@@ -41,3 +41,15 @@ func TestModelBenchmarkComparisonMigrationIsNonDestructive(t *testing.T) {
 	require.Contains(t, text, "NUMERIC(16,10)")
 	require.NotContains(t, strings.ToLower(text), "drop table")
 }
+
+// 246 去账号化：plans/runs 的 account_id 列与 plans 账号索引一并移除；
+// 只允许 DROP COLUMN/DROP INDEX，禁止 DROP TABLE。
+func TestModelBenchmarkGatewayModeMigrationIsIdempotent(t *testing.T) {
+	content, err := FS.ReadFile("246_so_model_benchmark_gateway_mode.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	require.Contains(t, sql, "ALTER TABLE model_benchmark_plans DROP COLUMN IF EXISTS account_id")
+	require.Contains(t, sql, "DROP INDEX IF EXISTS idx_model_benchmark_plans_account")
+	require.Contains(t, sql, "ALTER TABLE model_benchmark_runs DROP COLUMN IF EXISTS account_id")
+	require.False(t, strings.Contains(strings.ToLower(sql), "drop table"), "benchmark migration must be forward-only and non-destructive")
+}

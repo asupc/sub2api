@@ -27,7 +27,6 @@ type modelBenchmarkPlanRequest struct {
 	Name            string `json:"name" binding:"required"`
 	SuiteID         string `json:"suite_id"`
 	ModelID         string `json:"model_id" binding:"required"`
-	AccountID       int64  `json:"account_id" binding:"required"`
 	CronExpression  string `json:"cron_expression" binding:"required"`
 	Enabled         *bool  `json:"enabled"`
 	SampleCount     int    `json:"sample_count"`
@@ -37,7 +36,7 @@ type modelBenchmarkPlanRequest struct {
 }
 
 func (r modelBenchmarkPlanRequest) toPlan() *service.ModelBenchmarkPlan {
-	plan := &service.ModelBenchmarkPlan{ComparisonKey: r.ComparisonKey, Name: r.Name, SuiteID: r.SuiteID, ModelID: r.ModelID, AccountID: r.AccountID, CronExpression: r.CronExpression, SampleCount: r.SampleCount, MaxOutputTokens: r.MaxOutputTokens, TimeoutSeconds: r.TimeoutSeconds, MaxResults: r.MaxResults}
+	plan := &service.ModelBenchmarkPlan{ComparisonKey: r.ComparisonKey, Name: r.Name, SuiteID: r.SuiteID, ModelID: r.ModelID, CronExpression: r.CronExpression, SampleCount: r.SampleCount, MaxOutputTokens: r.MaxOutputTokens, TimeoutSeconds: r.TimeoutSeconds, MaxResults: r.MaxResults}
 	if r.Enabled != nil {
 		plan.Enabled = *r.Enabled
 	}
@@ -57,6 +56,31 @@ func (h *ModelBenchmarkHandler) ListTargets(c *gin.Context) {
 		return
 	}
 	response.Success(c, targets)
+}
+
+// GetSettings GET /admin/model-benchmarks/settings
+func (h *ModelBenchmarkHandler) GetSettings(c *gin.Context) {
+	settings, err := h.service.GetBenchmarkSettings(c.Request.Context())
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	response.Success(c, settings)
+}
+
+// UpdateSettings PUT /admin/model-benchmarks/settings
+func (h *ModelBenchmarkHandler) UpdateSettings(c *gin.Context) {
+	var req service.ModelBenchmarkSettings
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	settings, err := h.service.UpdateBenchmarkSettings(c.Request.Context(), &req)
+	if err != nil {
+		writeModelBenchmarkError(c, err)
+		return
+	}
+	response.Success(c, settings)
 }
 
 // CreatePlan POST /admin/model-benchmarks/plans
@@ -189,9 +213,6 @@ func (h *ModelBenchmarkHandler) ListRunItems(c *gin.Context) {
 // ListHistory GET /admin/model-benchmarks/history
 func (h *ModelBenchmarkHandler) ListHistory(c *gin.Context) {
 	filters := service.ModelBenchmarkHistoryFilters{MaxOutputTokens: modelBenchmarkQueryInt(c, "max_output_tokens"), TimeoutSeconds: modelBenchmarkQueryInt(c, "timeout_seconds"), SampleCount: modelBenchmarkQueryInt(c, "sample_count"), ComparisonKey: c.Query("comparison_key"), SuiteID: c.Query("suite_id"), SuiteVersion: c.Query("suite_version"), ScoringVersion: c.Query("scoring_version"), ModelID: c.Query("model_id"), Limit: parseModelBenchmarkLimit(c.Query("limit"), 500)}
-	if id, err := strconv.ParseInt(c.Query("account_id"), 10, 64); err == nil && id > 0 {
-		filters.AccountID = &id
-	}
 	if raw := c.Query("from"); raw != "" {
 		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
 			filters.From = parsed
@@ -211,13 +232,40 @@ func (h *ModelBenchmarkHandler) ListHistory(c *gin.Context) {
 }
 
 // ListRankings GET /admin/model-benchmarks/rankings
+// 按题库三元组过滤（缺省为编译期最新题库）；每模型取最新一次成功/部分成功 run，无批次/预算门槛。
 func (h *ModelBenchmarkHandler) ListRankings(c *gin.Context) {
-	rankings, err := h.service.ListComparisonRankings(c.Request.Context(), parseModelBenchmarkLimit(c.Query("limit"), 50), service.ModelBenchmarkHistoryFilters{ComparisonKey: c.Query("comparison_key"), MaxOutputTokens: modelBenchmarkQueryInt(c, "max_output_tokens"), TimeoutSeconds: modelBenchmarkQueryInt(c, "timeout_seconds"), SampleCount: modelBenchmarkQueryInt(c, "sample_count")})
+	filters := service.ModelBenchmarkRankingFilters{SuiteID: c.Query("suite_id"), SuiteVersion: c.Query("suite_version"), ScoringVersion: c.Query("scoring_version")}
+	rankings, err := h.service.ListRankings(c.Request.Context(), filters, parseModelBenchmarkLimit(c.Query("limit"), 50))
 	if err != nil {
 		response.InternalError(c, err.Error())
 		return
 	}
 	response.Success(c, rankings)
+}
+
+// ListRankingSuites GET /admin/model-benchmarks/rankings/suites
+func (h *ModelBenchmarkHandler) ListRankingSuites(c *gin.Context) {
+	suites, err := h.service.ListRankingSuites(c.Request.Context())
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	response.Success(c, suites)
+}
+
+// GetModelOverview GET /admin/model-benchmarks/models/:model_id/overview
+func (h *ModelBenchmarkHandler) GetModelOverview(c *gin.Context) {
+	modelID := c.Param("model_id")
+	if modelID == "" {
+		response.BadRequest(c, "model_id is required")
+		return
+	}
+	overview, err := h.service.GetModelOverview(c.Request.Context(), modelID)
+	if err != nil {
+		response.InternalError(c, err.Error())
+		return
+	}
+	response.Success(c, overview)
 }
 
 func parseModelBenchmarkID(c *gin.Context) (int64, error) {

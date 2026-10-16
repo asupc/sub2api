@@ -5,36 +5,26 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
-type benchmarkBudgetUpstream struct{ body string }
-
-func (u benchmarkBudgetUpstream) Do(*http.Request, string, int64, int) (*http.Response, error) {
-	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(u.body)), Header: make(http.Header)}, nil
-}
-func (u benchmarkBudgetUpstream) DoWithTLS(req *http.Request, p string, a int64, n int, _ *tlsfingerprint.Profile) (*http.Response, error) {
-	return u.Do(req, p, a, n)
-}
-
+// 回环网关模式下截断/过滤归类：不完整 finish_reason 必须保留证据并归类失败原因。
 func TestModelBenchmarkExecutionClassifiesTruncation(t *testing.T) {
 	for _, content := range []string{"", `{"answer":7}`} {
 		for _, reason := range []string{"length", "max_tokens", "content_filter"} {
 			t.Run(reason+content, func(t *testing.T) {
-				raw, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}, "finish_reason": reason}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13}})
-				account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "fixture-only"}}
-				executor := NewModelBenchmarkExecutor(modelBenchmarkAccountSource{account}, benchmarkBudgetUpstream{string(raw)}, nil, nil, nil, &config.Config{})
-				result := executor.Execute(context.Background(), &ModelBenchmarkPlan{AccountID: 1, ModelID: "fixture", MaxOutputTokens: 2048}, ModelBenchmarkItem{ID: "fixture", Category: "math", Difficulty: 4, Checker: "integer", Expected: 7})
+				chunk, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": content}, "finish_reason": reason}}, "usage": map[string]any{"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13}})
+				sse := "data: " + string(chunk) + "\n\ndata: [DONE]\n\n"
+				server := modelBenchmarkLoopbackGateway(t, sse, nil)
+				executor := modelBenchmarkLoopbackExecutor(t, modelBenchmarkLoopbackConfig(t, server))
+				result := executor.Execute(context.Background(), &ModelBenchmarkPlan{ModelID: "fixture", MaxOutputTokens: 2048}, ModelBenchmarkItem{ID: "fixture", Category: "math", Difficulty: 4, Checker: "integer", Expected: 7})
 				require.Equal(t, "execution_failed", result.Status)
 				require.Equal(t, modelBenchmarkIncompleteReason(reason), result.FailureReason)
 				require.Equal(t, content, result.ResponseText)

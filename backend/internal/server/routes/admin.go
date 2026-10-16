@@ -818,6 +818,8 @@ func registerModelBenchmarkRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	{
 		benchmark.GET("/suites", h.Admin.ModelBenchmark.ListSuites)
 		benchmark.GET("/targets", h.Admin.ModelBenchmark.ListTargets)
+		benchmark.GET("/settings", h.Admin.ModelBenchmark.GetSettings)
+		benchmark.PUT("/settings", h.Admin.ModelBenchmark.UpdateSettings)
 		benchmark.GET("/plans", h.Admin.ModelBenchmark.ListPlans)
 		benchmark.POST("/plans", h.Admin.ModelBenchmark.CreatePlan)
 		benchmark.GET("/plans/:id", h.Admin.ModelBenchmark.GetPlan)
@@ -829,6 +831,8 @@ func registerModelBenchmarkRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		benchmark.GET("/runs/:id/items", h.Admin.ModelBenchmark.ListRunItems)
 		benchmark.GET("/history", h.Admin.ModelBenchmark.ListHistory)
 		benchmark.GET("/rankings", h.Admin.ModelBenchmark.ListRankings)
+		benchmark.GET("/rankings/suites", h.Admin.ModelBenchmark.ListRankingSuites)
+		benchmark.GET("/models/:model_id/overview", h.Admin.ModelBenchmark.GetModelOverview)
 	}
 }
 

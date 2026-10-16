@@ -29,11 +29,11 @@ func (r *modelBenchmarkPlanRepoStub) UpdatePlan(_ context.Context, plan *ModelBe
 
 func TestModelBenchmarkQueueRunAllowsDisabledPlanWithoutEnablingIt(t *testing.T) {
 	plan := &ModelBenchmarkPlan{
-		ID: 7, Name: "manual-once", ModelID: "glm-5.3", AccountID: 565,
+		ID: 7, Name: "manual-once", ModelID: "glm-5.3",
 		CronExpression: "0 4 * * 1", Enabled: false, RunningStatus: "idle",
 	}
 	repo := &modelBenchmarkPlanRepoStub{plan: plan}
-	service := NewModelBenchmarkService(repo, nil, nil, nil)
+	service := NewModelBenchmarkService(repo, nil, nil, nil, nil)
 
 	updated, err := service.QueueRun(context.Background(), plan.ID)
 	require.NoError(t, err, "停用计划必须允许手动执行一次")
@@ -45,11 +45,11 @@ func TestModelBenchmarkQueueRunAllowsDisabledPlanWithoutEnablingIt(t *testing.T)
 
 func TestModelBenchmarkQueueRunKeepsEnabledPlanSemantics(t *testing.T) {
 	plan := &ModelBenchmarkPlan{
-		ID: 8, Name: "weekly", ModelID: "glm-5.3", AccountID: 565,
+		ID: 8, Name: "weekly", ModelID: "glm-5.3",
 		CronExpression: "0 4 * * 1", Enabled: true, RunningStatus: "idle",
 	}
 	repo := &modelBenchmarkPlanRepoStub{plan: plan}
-	service := NewModelBenchmarkService(repo, nil, nil, nil)
+	service := NewModelBenchmarkService(repo, nil, nil, nil, nil)
 
 	before := time.Now()
 	updated, err := service.QueueRun(context.Background(), plan.ID)

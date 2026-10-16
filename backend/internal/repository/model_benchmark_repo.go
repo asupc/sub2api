@@ -20,10 +20,10 @@ func NewModelBenchmarkRepository(db *sql.DB) service.ModelBenchmarkRepository {
 func (r *modelBenchmarkRepository) CreatePlan(ctx context.Context, plan *service.ModelBenchmarkPlan) (*service.ModelBenchmarkPlan, error) {
 	row := r.db.QueryRowContext(ctx, `
 		INSERT INTO model_benchmark_plans
-			(name, suite_id, suite_version, scoring_version, model_id, account_id, cron_expression, enabled, sample_count, max_output_tokens, timeout_seconds, max_results, next_run_at, comparison_key)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at,comparison_key
-	`, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.AccountID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt, plan.ComparisonKey)
+			(name, suite_id, suite_version, scoring_version, model_id, cron_expression, enabled, sample_count, max_output_tokens, timeout_seconds, max_results, next_run_at, comparison_key)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at,comparison_key
+	`, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt, plan.ComparisonKey)
 	return scanModelBenchmarkPlan(row)
 }
 
@@ -51,10 +51,10 @@ func (r *modelBenchmarkRepository) ListPlans(ctx context.Context) ([]*service.Mo
 
 func (r *modelBenchmarkRepository) UpdatePlan(ctx context.Context, plan *service.ModelBenchmarkPlan) (*service.ModelBenchmarkPlan, error) {
 	row := r.db.QueryRowContext(ctx, `
-		UPDATE model_benchmark_plans SET name=$2,suite_id=$3,suite_version=$4,scoring_version=$5,model_id=$6,account_id=$7,cron_expression=$8,enabled=$9,sample_count=$10,max_output_tokens=$11,timeout_seconds=$12,max_results=$13,next_run_at=$14,manual_trigger_at=$15,comparison_key=$16,updated_at=NOW()
+		UPDATE model_benchmark_plans SET name=$2,suite_id=$3,suite_version=$4,scoring_version=$5,model_id=$6,cron_expression=$7,enabled=$8,sample_count=$9,max_output_tokens=$10,timeout_seconds=$11,max_results=$12,next_run_at=$13,manual_trigger_at=$14,comparison_key=$15,updated_at=NOW()
 		WHERE id=$1 AND running_status='idle'
-		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at,comparison_key
-	`, plan.ID, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.AccountID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt, plan.ManualTriggerAt, plan.ComparisonKey)
+		RETURNING id,name,suite_id,suite_version,scoring_version,model_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at,comparison_key
+	`, plan.ID, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt, plan.ManualTriggerAt, plan.ComparisonKey)
 	return scanModelBenchmarkPlan(row)
 }
 
@@ -125,10 +125,10 @@ func (r *modelBenchmarkRepository) ReleaseExpiredClaims(ctx context.Context, now
 
 func (r *modelBenchmarkRepository) CreateRun(ctx context.Context, run *service.ModelBenchmarkRun) (*service.ModelBenchmarkRun, error) {
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO model_benchmark_runs (plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,account_id,status,started_at,comparison_key,max_output_tokens,timeout_seconds,sample_count,item_count)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,'running',$8,$9,$10,$11,$12,$13)
-		RETURNING id,plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,account_id,status,intelligence_score,efficiency_score,composite_score,category_scores,item_count,answered_count,correct_count,input_tokens,output_tokens,total_tokens,estimated_cost,avg_latency_ms,p95_latency_ms,usage_source,usage_field_coverage,error_message,started_at,finished_at,created_at,comparison_key,max_output_tokens,timeout_seconds,sample_count,quality
-	`, run.PlanID, run.SuiteID, run.SuiteVersion, run.ScoringVersion, run.ModelID, run.UpstreamModelID, run.AccountID, run.StartedAt, run.ComparisonKey, run.MaxOutputTokens, run.TimeoutSeconds, run.SampleCount, run.ItemCount)
+		INSERT INTO model_benchmark_runs (plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,status,started_at,comparison_key,max_output_tokens,timeout_seconds,sample_count,item_count)
+		VALUES ($1,$2,$3,$4,$5,$6,'running',$7,$8,$9,$10,$11,$12)
+		RETURNING id,plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,status,intelligence_score,efficiency_score,composite_score,category_scores,item_count,answered_count,correct_count,input_tokens,output_tokens,total_tokens,estimated_cost,avg_latency_ms,p95_latency_ms,usage_source,usage_field_coverage,error_message,started_at,finished_at,created_at,comparison_key,max_output_tokens,timeout_seconds,sample_count,quality
+	`, run.PlanID, run.SuiteID, run.SuiteVersion, run.ScoringVersion, run.ModelID, run.UpstreamModelID, run.StartedAt, run.ComparisonKey, run.MaxOutputTokens, run.TimeoutSeconds, run.SampleCount, run.ItemCount)
 	return scanModelBenchmarkRun(row)
 }
 
@@ -249,10 +249,6 @@ func (r *modelBenchmarkRepository) ListHistory(ctx context.Context, filters serv
 		args = append(args, filters.ModelID)
 		where += fmt.Sprintf(` AND model_id=$%d`, len(args))
 	}
-	if filters.AccountID != nil {
-		args = append(args, *filters.AccountID)
-		where += fmt.Sprintf(` AND account_id=$%d`, len(args))
-	}
 	if !filters.From.IsZero() {
 		args = append(args, filters.From)
 		where += fmt.Sprintf(` AND created_at >= $%d`, len(args))
@@ -265,7 +261,7 @@ func (r *modelBenchmarkRepository) ListHistory(ctx context.Context, filters serv
 		filters.Limit = 500
 	}
 	args = append(args, filters.Limit)
-	rows, err := r.db.QueryContext(ctx, `SELECT id,model_id,account_id,created_at,status,intelligence_score,efficiency_score,composite_score,output_tokens,total_tokens,avg_latency_ms,p95_latency_ms,estimated_cost,comparison_key,max_output_tokens,timeout_seconds,sample_count FROM model_benchmark_runs`+where+fmt.Sprintf(` ORDER BY created_at ASC LIMIT $%d`, len(args)), args...)
+	rows, err := r.db.QueryContext(ctx, `SELECT id,model_id,created_at,status,intelligence_score,efficiency_score,composite_score,output_tokens,total_tokens,avg_latency_ms,p95_latency_ms,estimated_cost,comparison_key,max_output_tokens,timeout_seconds,sample_count FROM model_benchmark_runs`+where+fmt.Sprintf(` ORDER BY created_at ASC LIMIT $%d`, len(args)), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +269,7 @@ func (r *modelBenchmarkRepository) ListHistory(ctx context.Context, filters serv
 	var out []*service.ModelBenchmarkHistoryPoint
 	for rows.Next() {
 		p := &service.ModelBenchmarkHistoryPoint{}
-		if err := rows.Scan(&p.RunID, &p.ModelID, &p.AccountID, &p.CreatedAt, &p.Status, &p.IntelligenceScore, &p.EfficiencyScore, &p.CompositeScore, &p.OutputTokens, &p.TotalTokens, &p.AvgLatencyMS, &p.P95LatencyMS, &p.EstimatedCost, &p.ComparisonKey, &p.MaxOutputTokens, &p.TimeoutSeconds, &p.SampleCount); err != nil {
+		if err := rows.Scan(&p.RunID, &p.ModelID, &p.CreatedAt, &p.Status, &p.IntelligenceScore, &p.EfficiencyScore, &p.CompositeScore, &p.OutputTokens, &p.TotalTokens, &p.AvgLatencyMS, &p.P95LatencyMS, &p.EstimatedCost, &p.ComparisonKey, &p.MaxOutputTokens, &p.TimeoutSeconds, &p.SampleCount); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -281,27 +277,34 @@ func (r *modelBenchmarkRepository) ListHistory(ctx context.Context, filters serv
 	return out, rows.Err()
 }
 
-func (r *modelBenchmarkRepository) ListRankings(ctx context.Context, suiteID, suiteVersion, scoringVersion, comparisonKey string, limit int, budgets ...int) ([]*service.ModelBenchmarkRanking, error) {
+// ListRankings 返回指定题库下每模型最新一次成功/部分成功 run 的排名：
+// 不设 ranking_eligible/最少次数/批次/预算门槛，分数与形态字段均取自该最新 run。
+func (r *modelBenchmarkRepository) ListRankings(ctx context.Context, suiteID, suiteVersion, scoringVersion string, limit int) ([]*service.ModelBenchmarkRanking, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	tokens, timeout, samples := 2048, 90, 1
-	if len(budgets) == 3 {
-		tokens, timeout, samples = budgets[0], budgets[1], budgets[2]
-	}
 	rows, err := r.db.QueryContext(ctx, `
-        SELECT model_id,suite_id,suite_version,scoring_version,COUNT(*),
-            AVG(intelligence_score),AVG(efficiency_score),AVG(composite_score),
-            ROUND(AVG(output_tokens))::bigint,ROUND(AVG(avg_latency_ms))::bigint,AVG(estimated_cost),MAX(created_at),
-            comparison_key,max_output_tokens,timeout_seconds,sample_count,STDDEV_SAMP(intelligence_score)
-        FROM model_benchmark_runs
-        WHERE suite_id=$1 AND suite_version=$2 AND scoring_version=$3 AND comparison_key=$4
-            AND max_output_tokens=$6 AND timeout_seconds=$7 AND sample_count=$8
-            AND status IN ('success','partial') AND COALESCE((quality->>'ranking_eligible')::boolean,FALSE)
-        GROUP BY model_id,suite_id,suite_version,scoring_version,comparison_key,max_output_tokens,timeout_seconds,sample_count
-        HAVING COUNT(*)>=3
-        ORDER BY AVG(intelligence_score) DESC NULLS LAST LIMIT $5
-    `, suiteID, suiteVersion, scoringVersion, comparisonKey, limit, tokens, timeout, samples)
+        SELECT model_id,suite_id,suite_version,scoring_version,run_count,
+            intelligence_score,efficiency_score,composite_score,output_tokens,
+            avg_latency_ms,estimated_cost,last_run_at,
+            comparison_key,max_output_tokens,timeout_seconds,sample_count,
+            category_scores
+        FROM (
+            SELECT model_id,suite_id,suite_version,scoring_version,
+                intelligence_score,efficiency_score,composite_score,output_tokens,
+                avg_latency_ms,estimated_cost,created_at AS last_run_at,
+                comparison_key,max_output_tokens,timeout_seconds,sample_count,
+                category_scores,
+                COUNT(*) OVER (PARTITION BY model_id) AS run_count,
+                ROW_NUMBER() OVER (PARTITION BY model_id ORDER BY created_at DESC, id DESC) AS rn
+            FROM model_benchmark_runs
+            WHERE suite_id=$1 AND suite_version=$2 AND scoring_version=$3
+                AND status IN ('success','partial') AND intelligence_score IS NOT NULL
+        ) ranked
+        WHERE rn=1
+        ORDER BY intelligence_score DESC NULLS LAST, run_count DESC, model_id ASC
+        LIMIT $4
+    `, suiteID, suiteVersion, scoringVersion, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -309,7 +312,35 @@ func (r *modelBenchmarkRepository) ListRankings(ctx context.Context, suiteID, su
 	out := []*service.ModelBenchmarkRanking{}
 	for rows.Next() {
 		item := &service.ModelBenchmarkRanking{}
-		if err := rows.Scan(&item.ModelID, &item.SuiteID, &item.SuiteVersion, &item.ScoringVersion, &item.RunCount, &item.IntelligenceScore, &item.EfficiencyScore, &item.CompositeScore, &item.OutputTokens, &item.AvgLatencyMS, &item.EstimatedCost, &item.LastRunAt, &item.ComparisonKey, &item.MaxOutputTokens, &item.TimeoutSeconds, &item.SampleCount, &item.ScoreStddev); err != nil {
+		var rawCat []byte
+		if err := rows.Scan(&item.ModelID, &item.SuiteID, &item.SuiteVersion, &item.ScoringVersion, &item.RunCount, &item.IntelligenceScore, &item.EfficiencyScore, &item.CompositeScore, &item.OutputTokens, &item.AvgLatencyMS, &item.EstimatedCost, &item.LastRunAt, &item.ComparisonKey, &item.MaxOutputTokens, &item.TimeoutSeconds, &item.SampleCount, &rawCat); err != nil {
+			return nil, err
+		}
+		if len(rawCat) > 0 {
+			_ = json.Unmarshal(rawCat, &item.CategoryScores)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// ListRankingSuites 列出存在可排名执行的题库版本组合；入选谓词与 ListRankings 保持逐字一致。
+func (r *modelBenchmarkRepository) ListRankingSuites(ctx context.Context) ([]*service.ModelBenchmarkRankingSuite, error) {
+	rows, err := r.db.QueryContext(ctx, `
+        SELECT suite_id,suite_version,scoring_version,COUNT(*),MAX(created_at)
+        FROM model_benchmark_runs
+        WHERE status IN ('success','partial') AND intelligence_score IS NOT NULL
+        GROUP BY suite_id,suite_version,scoring_version
+        ORDER BY MAX(created_at) DESC
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*service.ModelBenchmarkRankingSuite{}
+	for rows.Next() {
+		item := &service.ModelBenchmarkRankingSuite{}
+		if err := rows.Scan(&item.SuiteID, &item.SuiteVersion, &item.ScoringVersion, &item.RunCount, &item.LastRunAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -358,15 +389,15 @@ func modelBenchmarkCoverageJSON(coverage map[string]bool) []byte {
 	return raw
 }
 
-const modelBenchmarkPlanSelect = `SELECT id,name,suite_id,suite_version,scoring_version,model_id,account_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at,comparison_key FROM model_benchmark_plans`
-const modelBenchmarkRunSelect = `SELECT id,plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,account_id,status,intelligence_score,efficiency_score,composite_score,category_scores,item_count,answered_count,correct_count,input_tokens,output_tokens,total_tokens,estimated_cost,avg_latency_ms,p95_latency_ms,usage_source,usage_field_coverage,error_message,started_at,finished_at,created_at,comparison_key,max_output_tokens,timeout_seconds,sample_count,quality FROM model_benchmark_runs`
+const modelBenchmarkPlanSelect = `SELECT id,name,suite_id,suite_version,scoring_version,model_id,cron_expression,enabled,sample_count,max_output_tokens,timeout_seconds,max_results,running_status,claim_expires_at,manual_trigger_at,last_run_at,next_run_at,created_at,updated_at,comparison_key FROM model_benchmark_plans`
+const modelBenchmarkRunSelect = `SELECT id,plan_id,suite_id,suite_version,scoring_version,model_id,upstream_model_id,status,intelligence_score,efficiency_score,composite_score,category_scores,item_count,answered_count,correct_count,input_tokens,output_tokens,total_tokens,estimated_cost,avg_latency_ms,p95_latency_ms,usage_source,usage_field_coverage,error_message,started_at,finished_at,created_at,comparison_key,max_output_tokens,timeout_seconds,sample_count,quality FROM model_benchmark_runs`
 const modelBenchmarkItemSelect = `SELECT id,run_id,item_id,family_id,category,difficulty,weight,prompt_hash,prompt_snapshot,response_text,status,score,earned_points,possible_points,checker_type,failure_reason,input_tokens,output_tokens,reasoning_tokens,cache_read_tokens,cache_write_tokens,total_tokens,estimated_cost,usage_source,usage_field_coverage,pricing_source,latency_ms,first_token_ms,error_message,created_at FROM model_benchmark_run_items`
 
 type modelBenchmarkScanner interface{ Scan(dest ...any) error }
 
 func scanModelBenchmarkPlan(row modelBenchmarkScanner) (*service.ModelBenchmarkPlan, error) {
 	p := &service.ModelBenchmarkPlan{}
-	err := row.Scan(&p.ID, &p.Name, &p.SuiteID, &p.SuiteVersion, &p.ScoringVersion, &p.ModelID, &p.AccountID, &p.CronExpression, &p.Enabled, &p.SampleCount, &p.MaxOutputTokens, &p.TimeoutSeconds, &p.MaxResults, &p.RunningStatus, &p.ClaimExpiresAt, &p.ManualTriggerAt, &p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt, &p.ComparisonKey)
+	err := row.Scan(&p.ID, &p.Name, &p.SuiteID, &p.SuiteVersion, &p.ScoringVersion, &p.ModelID, &p.CronExpression, &p.Enabled, &p.SampleCount, &p.MaxOutputTokens, &p.TimeoutSeconds, &p.MaxResults, &p.RunningStatus, &p.ClaimExpiresAt, &p.ManualTriggerAt, &p.LastRunAt, &p.NextRunAt, &p.CreatedAt, &p.UpdatedAt, &p.ComparisonKey)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +406,7 @@ func scanModelBenchmarkPlan(row modelBenchmarkScanner) (*service.ModelBenchmarkP
 func scanModelBenchmarkRun(row modelBenchmarkScanner) (*service.ModelBenchmarkRun, error) {
 	run := &service.ModelBenchmarkRun{CategoryScores: map[string]float64{}, UsageFieldCoverage: map[string]bool{}}
 	var category, coverage, quality []byte
-	err := row.Scan(&run.ID, &run.PlanID, &run.SuiteID, &run.SuiteVersion, &run.ScoringVersion, &run.ModelID, &run.UpstreamModelID, &run.AccountID, &run.Status, &run.IntelligenceScore, &run.EfficiencyScore, &run.CompositeScore, &category, &run.ItemCount, &run.AnsweredCount, &run.CorrectCount, &run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.EstimatedCost, &run.AvgLatencyMS, &run.P95LatencyMS, &run.UsageSource, &coverage, &run.ErrorMessage, &run.StartedAt, &run.FinishedAt, &run.CreatedAt, &run.ComparisonKey, &run.MaxOutputTokens, &run.TimeoutSeconds, &run.SampleCount, &quality)
+	err := row.Scan(&run.ID, &run.PlanID, &run.SuiteID, &run.SuiteVersion, &run.ScoringVersion, &run.ModelID, &run.UpstreamModelID, &run.Status, &run.IntelligenceScore, &run.EfficiencyScore, &run.CompositeScore, &category, &run.ItemCount, &run.AnsweredCount, &run.CorrectCount, &run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.EstimatedCost, &run.AvgLatencyMS, &run.P95LatencyMS, &run.UsageSource, &coverage, &run.ErrorMessage, &run.StartedAt, &run.FinishedAt, &run.CreatedAt, &run.ComparisonKey, &run.MaxOutputTokens, &run.TimeoutSeconds, &run.SampleCount, &quality)
 	if err != nil {
 		return nil, err
 	}

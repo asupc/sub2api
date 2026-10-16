@@ -21,7 +21,6 @@ type ModelBenchmarkPlan struct {
 	SuiteVersion    string     `json:"suite_version"`
 	ScoringVersion  string     `json:"scoring_version"`
 	ModelID         string     `json:"model_id"`
-	AccountID       int64      `json:"account_id"`
 	CronExpression  string     `json:"cron_expression"`
 	Enabled         bool       `json:"enabled"`
 	SampleCount     int        `json:"sample_count"`
@@ -53,7 +52,6 @@ type ModelBenchmarkRun struct {
 	ScoringVersion     string                `json:"scoring_version"`
 	ModelID            string                `json:"model_id"`
 	UpstreamModelID    string                `json:"upstream_model_id"`
-	AccountID          int64                 `json:"account_id"`
 	Status             string                `json:"status"`
 	IntelligenceScore  *float64              `json:"intelligence_score"`
 	EfficiencyScore    *float64              `json:"efficiency_score"`
@@ -120,7 +118,6 @@ type ModelBenchmarkHistoryPoint struct {
 	SampleCount       int       `json:"sample_count"`
 	RunID             int64     `json:"run_id"`
 	ModelID           string    `json:"model_id"`
-	AccountID         int64     `json:"account_id"`
 	CreatedAt         time.Time `json:"created_at"`
 	Status            string    `json:"status"`
 	IntelligenceScore *float64  `json:"intelligence_score"`
@@ -133,25 +130,45 @@ type ModelBenchmarkHistoryPoint struct {
 	EstimatedCost     *float64  `json:"estimated_cost"`
 }
 
-// ModelBenchmarkRanking is the latest stable ranking row.
+// ModelBenchmarkRanking 是某题库下每模型最新一次成功/部分成功 run 的排名行；
+// ComparisonKey 与预算三元组是取自该次 run 的形态快照，仅作展示标注。
 type ModelBenchmarkRanking struct {
-	ComparisonKey     string    `json:"comparison_key"`
-	MaxOutputTokens   int       `json:"max_output_tokens"`
-	TimeoutSeconds    int       `json:"timeout_seconds"`
-	SampleCount       int       `json:"sample_count"`
-	ScoreStddev       *float64  `json:"score_stddev"`
-	ModelID           string    `json:"model_id"`
-	SuiteID           string    `json:"suite_id"`
-	SuiteVersion      string    `json:"suite_version"`
-	ScoringVersion    string    `json:"scoring_version"`
-	RunCount          int       `json:"run_count"`
-	IntelligenceScore *float64  `json:"intelligence_score"`
-	EfficiencyScore   *float64  `json:"efficiency_score"`
-	CompositeScore    *float64  `json:"composite_score"`
-	OutputTokens      *int64    `json:"output_tokens"`
-	AvgLatencyMS      *int64    `json:"avg_latency_ms"`
-	EstimatedCost     *float64  `json:"estimated_cost"`
-	LastRunAt         time.Time `json:"last_run_at"`
+	ComparisonKey     string             `json:"comparison_key"`
+	MaxOutputTokens   int                `json:"max_output_tokens"`
+	TimeoutSeconds    int                `json:"timeout_seconds"`
+	SampleCount       int                `json:"sample_count"`
+	ModelID           string             `json:"model_id"`
+	SuiteID           string             `json:"suite_id"`
+	SuiteVersion      string             `json:"suite_version"`
+	ScoringVersion    string             `json:"scoring_version"`
+	RunCount          int                `json:"run_count"`
+	IntelligenceScore *float64           `json:"intelligence_score"`
+	EfficiencyScore   *float64           `json:"efficiency_score"`
+	CompositeScore    *float64           `json:"composite_score"`
+	CategoryScores    map[string]float64 `json:"category_scores"`
+	OutputTokens      *int64             `json:"output_tokens"`
+	AvgLatencyMS      *int64             `json:"avg_latency_ms"`
+	EstimatedCost     *float64           `json:"estimated_cost"`
+	LastRunAt         time.Time          `json:"last_run_at"`
+}
+
+// ModelBenchmarkModelOverview 聚合返回单模型全景数据，支持抽屉下钻
+type ModelBenchmarkModelOverview struct {
+	ModelID    string                        `json:"model_id"`
+	Ranking    *ModelBenchmarkRanking        `json:"ranking,omitempty"`
+	LatestRun  *ModelBenchmarkRun            `json:"latest_run,omitempty"`
+	Plans      []*ModelBenchmarkPlan         `json:"plans"`
+	RecentRuns []*ModelBenchmarkRun          `json:"recent_runs"`
+	History    []*ModelBenchmarkHistoryPoint `json:"history"`
+}
+
+// ModelBenchmarkRankingSuite 列出 runs 中存在可排名执行的题库版本组合，供前端切换历史题库。
+type ModelBenchmarkRankingSuite struct {
+	SuiteID        string    `json:"suite_id"`
+	SuiteVersion   string    `json:"suite_version"`
+	ScoringVersion string    `json:"scoring_version"`
+	RunCount       int       `json:"run_count"`
+	LastRunAt      time.Time `json:"last_run_at"`
 }
 
 // ModelBenchmarkLatestScore 是某模型最近一次成功/部分成功 run 的分数快照，
@@ -182,7 +199,8 @@ type ModelBenchmarkRepository interface {
 	GetRun(ctx context.Context, id int64) (*ModelBenchmarkRun, error)
 	ListItems(ctx context.Context, runID int64) ([]*ModelBenchmarkRunItem, error)
 	ListHistory(ctx context.Context, filters ModelBenchmarkHistoryFilters) ([]*ModelBenchmarkHistoryPoint, error)
-	ListRankings(ctx context.Context, suiteID, suiteVersion, scoringVersion, comparisonKey string, limit int, budgets ...int) ([]*ModelBenchmarkRanking, error)
+	ListRankings(ctx context.Context, suiteID, suiteVersion, scoringVersion string, limit int) ([]*ModelBenchmarkRanking, error)
+	ListRankingSuites(ctx context.Context) ([]*ModelBenchmarkRankingSuite, error)
 	LatestScores(ctx context.Context) (map[string]ModelBenchmarkLatestScore, error)
 	PruneRuns(ctx context.Context, planID int64, keep int) error
 }
@@ -210,10 +228,16 @@ type ModelBenchmarkHistoryFilters struct {
 	SuiteVersion    string
 	ScoringVersion  string
 	ModelID         string
-	AccountID       *int64
 	From            time.Time
 	To              time.Time
 	Limit           int
+}
+
+// ModelBenchmarkRankingFilters 只按题库三元组过滤排名；空字段由 service 兜底为编译期常量。
+type ModelBenchmarkRankingFilters struct {
+	SuiteID        string
+	SuiteVersion   string
+	ScoringVersion string
 }
 
 var (

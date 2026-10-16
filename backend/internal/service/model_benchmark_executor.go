@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,237 +12,238 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
-	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 )
 
-// ModelBenchmarkAccountSource is the narrow account dependency required by the executor.
-type ModelBenchmarkAccountSource interface {
-	GetByID(ctx context.Context, id int64) (*Account, error)
+// ModelBenchmarkAPIKeySource is the narrow API key dependency required by the executor.
+type ModelBenchmarkAPIKeySource interface {
+	GetKeyAndOwnerID(ctx context.Context, id int64) (string, int64, error)
 }
 
-// ModelBenchmarkExecutor sends one item to a supported OpenAI-compatible API-key upstream.
+// ModelBenchmarkExecutor sends one item through the public gateway loopback.
+// 测评不再绑定具体账号：每题以标准 OpenAI Chat Completions 请求打回环网关
+// （127.0.0.1:server.port），认证、分组白名单、调度选号、平台协议转换、
+// 流式 usage 标准化与计费全部走网关真实链路，天然覆盖全部平台。
 type ModelBenchmarkExecutor struct {
-	accounts     ModelBenchmarkAccountSource
-	httpUpstream HTTPUpstream
-	tlsProfiles  *TLSFingerprintProfileService
-	billing      *BillingService
-	accountTests *AccountTestService
-	cfg          *config.Config
+	apiKeys  ModelBenchmarkAPIKeySource
+	settings *SettingService
+	billing  *BillingService
+	cfg      *config.Config
+	client   *http.Client
 }
 
-// NewModelBenchmarkExecutor creates the Phase 1 executor.
-func NewModelBenchmarkExecutor(accounts ModelBenchmarkAccountSource, upstream HTTPUpstream, tlsProfiles *TLSFingerprintProfileService, billing *BillingService, accountTests *AccountTestService, cfg *config.Config) *ModelBenchmarkExecutor {
-	return &ModelBenchmarkExecutor{accounts: accounts, httpUpstream: upstream, tlsProfiles: tlsProfiles, billing: billing, accountTests: accountTests, cfg: cfg}
+// NewModelBenchmarkExecutor creates the gateway-loopback executor.
+func NewModelBenchmarkExecutor(apiKeys ModelBenchmarkAPIKeySource, settings *SettingService, billing *BillingService, cfg *config.Config) *ModelBenchmarkExecutor {
+	return &ModelBenchmarkExecutor{apiKeys: apiKeys, settings: settings, billing: billing, cfg: cfg, client: &http.Client{}}
 }
 
-// IsSupportedModelBenchmarkTarget enforces the benchmark adapter matrix.
-// 三类目标：API Key 直连（OpenAI 兼容非二开平台）、二开源码集成三平台 OAuth、
-// OpenAI OAuth/Codex（走 Responses 流式）。
-func IsSupportedModelBenchmarkTarget(account *Account, modelID string) bool {
-	if account == nil || strings.TrimSpace(modelID) == "" {
+// isModelBenchmarkSupportedModel is the model-level target matrix.
+// 回环网关模式下任何平台均可转发，仅需排除无法用文本 JSON 契约评分的
+// 图像/视频生成模型，并要求模型在清单中存在账号（网关有可调度目标）。
+func isModelBenchmarkSupportedModel(modelID string, hasAccounts bool) bool {
+	if !hasAccounts || strings.TrimSpace(modelID) == "" {
 		return false
 	}
-	mapped := account.GetMappedModel(modelID)
-	if mapped == "" || isOpenAIImageModel(mapped) || isGrokImageGenerationModel(mapped) || isGrokVideoGenerationModel(mapped) {
+	if isOpenAIImageModel(modelID) || isImageGenerationModel(modelID) || isGrokImageGenerationModel(modelID) || isGrokVideoGenerationModel(modelID) {
 		return false
 	}
-	// 二开源码集成三平台（workbuddy/qoder/trae）：OAuth 账号经各自真实转发路径测评，
-	// 出站占位 token 由 GetOpenAIProtocolAPIKey 按平台分派（trae=jwt，其余 access_token）。
-	if IsSourceIntegratedPlatform(account.Platform) {
-		return account.Type == AccountTypeOAuth && strings.TrimSpace(account.GetOpenAIProtocolAPIKey()) != ""
-	}
-	// OpenAI OAuth/Codex：走 Responses API 流式测评。
-	if account.Platform == PlatformOpenAI && account.IsOpenAIOAuthLike() {
-		// Agent Identity 账号按请求签名，不持有可校验的 access token。
-		return account.IsOpenAIAgentIdentity() || strings.TrimSpace(account.GetOpenAIAccessToken()) != ""
-	}
-	if account.Type != AccountTypeAPIKey || !account.IsOpenAICompatible() {
-		return false
-	}
-	switch account.Platform {
-	case PlatformOpenAI, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo, PlatformCommandCode, PlatformCline:
-	default:
-		return false
-	}
-	if account.GetAPIProtocol() == APIProtocolAnthropic || account.IsAnthropicProtocol() {
-		return false
-	}
-	return strings.TrimSpace(account.GetOpenAIProtocolAPIKey()) != ""
+	return true
 }
 
-// Execute sends one benchmark item and returns scoring evidence.
+// Execute sends one benchmark item to the gateway loopback and returns scoring evidence.
 func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchmarkPlan, item ModelBenchmarkItem) ModelBenchmarkRunItem {
-	account, err := e.accounts.GetByID(ctx, plan.AccountID)
-	if err != nil || !IsSupportedModelBenchmarkTarget(account, plan.ModelID) {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("unsupported benchmark target"))
-	}
-	upstreamModel := account.GetMappedModel(plan.ModelID)
-	// 二开三平台与 OpenAI OAuth/Codex 均无通用非流式端点，统一走
-	// AccountTestService 的流式捕获通道（含 usage 采集与文本聚合）。
-	if IsSourceIntegratedPlatform(account.Platform) || (account.Platform == PlatformOpenAI && account.IsOpenAIOAuthLike()) {
-		return e.executeSourceIntegrated(ctx, plan, item, upstreamModel)
-	}
-	payload := map[string]any{
-		"model":       upstreamModel,
-		"messages":    []map[string]any{{"role": "user", "content": item.Prompt}},
-		"temperature": 0,
-		"stream":      false,
-		"max_tokens":  plan.MaxOutputTokens,
-	}
-	rawPayload, _ := json.Marshal(payload)
-	baseURL := strings.TrimSpace(account.GetOpenAIFormatBaseURL())
-	if baseURL == "" {
-		baseURL = account.GetOpenAIBaseURL()
-	}
-	baseURL, err = e.validateUpstreamBaseURL(baseURL)
-	if err != nil {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("invalid base URL: %w", err))
-	}
-	endpoint := buildOpenAIChatCompletionsURL(baseURL)
-	start := time.Now()
-	responseBody, status, err := e.do(ctx, account, endpoint, rawPayload)
+	apiKey, err := e.resolveAPIKey(ctx)
 	if err != nil {
 		return modelBenchmarkExecutionFailure(item, err)
 	}
-	if status < 200 || status >= 300 {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream returned %d: %s", status, truncateModelBenchmarkText(responseBody, 512)))
+	payload := map[string]any{
+		"model": plan.ModelID,
+		"messages": []map[string]any{
+			{"role": "user", "content": item.Prompt},
+		},
+		"temperature": 0,
+		"max_tokens":  plan.MaxOutputTokens,
+		"stream":      true,
+		// 网关两条转发路径自身会合成/透传 usage，显式声明可兼容更严格的上游。
+		"stream_options": map[string]any{"include_usage": true},
 	}
-	var parsed struct {
-		Choices []struct {
-			FinishReason string `json:"finish_reason"`
-			Message      struct {
-				Content any `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage map[string]any `json:"usage"`
+	rawPayload, _ := json.Marshal(payload)
+	start := time.Now()
+	responseBody, status, err := e.postGateway(ctx, apiKey, rawPayload)
+	if err != nil {
+		return modelBenchmarkExecutionFailure(item, err)
 	}
-	if err := json.Unmarshal(responseBody, &parsed); err != nil {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("invalid upstream JSON: %w", err))
-	}
-	if len(parsed.Choices) == 0 {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream returned no choices"))
-	}
-	content := normalizeModelBenchmarkChatContent(parsed.Choices[0].Message.Content)
-	if content == "" && modelBenchmarkIncompleteReason(parsed.Choices[0].FinishReason) == "" {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream returned empty content"))
-	}
-
-	result := ModelBenchmarkScoreAnswer(item, content)
-	if reason := modelBenchmarkIncompleteReason(parsed.Choices[0].FinishReason); reason != "" {
-		result = modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream response incomplete: %s", parsed.Choices[0].FinishReason))
-		result.ResponseText = content
-		result.FailureReason = reason
-	}
-
 	latency := time.Since(start).Milliseconds()
-	result.LatencyMS = &latency
-	result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(parsed.Usage)
-	if result.InputTokens != nil && result.OutputTokens != nil && result.TotalTokens != nil {
-		result.UsageSource = "upstream"
+	if status < 200 || status >= 300 {
+		return modelBenchmarkExecutionFailure(item, fmt.Errorf("gateway returned %d: %s", status, truncateModelBenchmarkText(responseBody, 512)))
 	}
-	e.applyCost(&result, upstreamModel)
-	return result
-}
-
-func (e *ModelBenchmarkExecutor) executeSourceIntegrated(ctx context.Context, plan *ModelBenchmarkPlan, item ModelBenchmarkItem, upstreamModel string) ModelBenchmarkRunItem {
-	if e.accountTests == nil {
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("source-integrated benchmark adapter is unavailable"))
+	captured, err := parseModelBenchmarkGatewayStream(bytes.NewReader(responseBody))
+	if err != nil {
+		return modelBenchmarkExecutionFailure(item, err)
 	}
-	capturedChan := make(chan AccountTestBenchmarkResult, 1)
-	go func() {
-		capturedChan <- e.accountTests.RunBenchmarkPrompt(ctx, plan.AccountID, plan.ModelID, item.Prompt, plan.MaxOutputTokens)
-	}()
-	var captured AccountTestBenchmarkResult
-	select {
-	case captured = <-capturedChan:
-	case <-ctx.Done():
-		_ = ctx.Err()
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("source-integrated benchmark timed out: %w", ctx.Err()))
+	servedModel := captured.ServedModel
+	if servedModel == "" {
+		servedModel = plan.ModelID
 	}
 	if reason := modelBenchmarkIncompleteReason(captured.FinishReason); reason != "" {
 		result := modelBenchmarkExecutionFailure(item, fmt.Errorf("upstream response incomplete: %s", captured.FinishReason))
 		result.FailureReason = reason
-		result.ResponseText = captured.ResponseText
-		result.LatencyMS = &captured.LatencyMs
+		result.ResponseText = captured.Text
+		result.LatencyMS = &latency
 		result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(captured.Usage)
 		if result.InputTokens != nil && result.OutputTokens != nil && result.TotalTokens != nil {
 			result.UsageSource = "upstream"
 		}
-		e.applyCost(&result, upstreamModel)
+		e.applyCost(&result, servedModel)
 		return result
 	}
-	if captured.ErrorMessage != "" || captured.ResponseText == "" {
-		message := captured.ErrorMessage
-		if message == "" {
-			message = "source-integrated model returned empty content"
-		}
-		return modelBenchmarkExecutionFailure(item, fmt.Errorf("%s", message))
+	if captured.Text == "" {
+		return modelBenchmarkExecutionFailure(item, fmt.Errorf("gateway returned empty content: %s", truncateModelBenchmarkText(responseBody, 256)))
 	}
-	result := ModelBenchmarkScoreAnswer(item, captured.ResponseText)
-	latency := captured.LatencyMs
+	result := ModelBenchmarkScoreAnswer(item, captured.Text)
 	result.LatencyMS = &latency
 	result.InputTokens, result.OutputTokens, result.ReasoningTokens, result.CacheReadTokens, result.CacheWriteTokens, result.TotalTokens, result.UsageFieldCoverage = parseModelBenchmarkUsage(captured.Usage)
 	if result.InputTokens != nil && result.OutputTokens != nil && result.TotalTokens != nil {
 		result.UsageSource = "upstream"
 	}
-	e.applyCost(&result, upstreamModel)
+	e.applyCost(&result, servedModel)
 	return result
 }
 
-func (e *ModelBenchmarkExecutor) validateUpstreamBaseURL(raw string) (string, error) {
+// resolveAPIKey loads the loopback credential from benchmark settings on every
+// item so mid-run setting changes apply without restarts (two point queries).
+func (e *ModelBenchmarkExecutor) resolveAPIKey(ctx context.Context) (string, error) {
+	if e.settings == nil {
+		return "", fmt.Errorf("model benchmark settings service is unavailable")
+	}
+	settings, err := e.settings.GetModelBenchmarkSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if settings.APIKeyID == 0 {
+		return "", fmt.Errorf("model benchmark API key is not configured")
+	}
+	if e.apiKeys == nil {
+		return "", fmt.Errorf("model benchmark API key source is unavailable")
+	}
+	key, _, err := e.apiKeys.GetKeyAndOwnerID(ctx, settings.APIKeyID)
+	if err != nil {
+		return "", fmt.Errorf("resolve benchmark API key: %w", err)
+	}
+	if strings.TrimSpace(key) == "" {
+		return "", fmt.Errorf("model benchmark API key is empty")
+	}
+	return key, nil
+}
+
+// gatewayChatCompletionsURL derives the loopback endpoint from the server config.
+// 127.0.0.1 直连自身进程，绕过 nginx 反代与外部网络。
+func (e *ModelBenchmarkExecutor) gatewayChatCompletionsURL() (string, error) {
 	if e.cfg == nil {
 		return "", fmt.Errorf("config is not available")
 	}
-	if !e.cfg.Security.URLAllowlist.Enabled {
-		return urlvalidator.ValidateURLFormat(raw, e.cfg.Security.URLAllowlist.AllowInsecureHTTP)
-	}
-	return urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
-		AllowedHosts:     e.cfg.Security.URLAllowlist.UpstreamHosts,
-		RequireAllowlist: true,
-		AllowPrivate:     e.cfg.Security.URLAllowlist.AllowPrivateHosts,
-	})
+	return fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", e.cfg.Server.Port), nil
 }
 
-func (e *ModelBenchmarkExecutor) do(ctx context.Context, account *Account, endpoint string, payload []byte) ([]byte, int, error) {
-	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-		if err != nil {
-			return nil, 0, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+account.GetOpenAIProtocolAPIKey())
-		account.ApplyHeaderOverrides(req.Header)
-		proxyURL := ""
-		if account.ProxyID != nil && account.Proxy != nil {
-			proxyURL = account.Proxy.URL()
-		}
-		var profile *tlsfingerprint.Profile
-		if e.tlsProfiles != nil {
-			profile = e.tlsProfiles.ResolveTLSProfile(account)
-		}
-		resp, err := e.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, profile)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-		_ = resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode >= 500 && attempt == 0 {
-			lastErr = fmt.Errorf("upstream returned %d", resp.StatusCode)
-			continue
-		}
-		return body, resp.StatusCode, nil
+// postGateway performs one loopback request and returns the drained body.
+func (e *ModelBenchmarkExecutor) postGateway(ctx context.Context, apiKey string, payload []byte) ([]byte, int, error) {
+	endpoint, err := e.gatewayChatCompletionsURL()
+	if err != nil {
+		return nil, 0, err
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("upstream request failed")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, 0, err
 	}
-	return nil, 0, lastErr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, resp.StatusCode, err
+	}
+	return body, resp.StatusCode, nil
+}
+
+// modelBenchmarkGatewayStream is the aggregated view of one gateway SSE response.
+type modelBenchmarkGatewayStream struct {
+	Text         string
+	FinishReason string
+	Usage        map[string]any
+	ServedModel  string
+}
+
+// parseModelBenchmarkGatewayStream aggregates an OpenAI-compatible SSE stream:
+// delta text, final finish_reason, terminal usage chunk and the served model.
+func parseModelBenchmarkGatewayStream(body io.Reader) (modelBenchmarkGatewayStream, error) {
+	var out modelBenchmarkGatewayStream
+	var texts []string
+	reader := bufio.NewReader(body)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return out, fmt.Errorf("gateway stream read error: %w", err)
+		}
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		jsonStr := strings.TrimPrefix(line, "data: ")
+		if jsonStr == "[DONE]" {
+			break
+		}
+		var data struct {
+			Model   string `json:"model"`
+			Choices []struct {
+				FinishReason *string `json:"finish_reason"`
+				Delta        struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+			Usage map[string]any `json:"usage"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(jsonStr), &data) != nil {
+			continue
+		}
+		if data.Error != nil {
+			message := data.Error.Message
+			if message == "" {
+				message = "gateway stream returned an error"
+			}
+			return out, fmt.Errorf("%s", message)
+		}
+		if data.Model != "" && out.ServedModel == "" {
+			out.ServedModel = data.Model
+		}
+		if data.Usage != nil {
+			out.Usage = data.Usage
+		}
+		for _, choice := range data.Choices {
+			if choice.Delta.Content != "" {
+				texts = append(texts, choice.Delta.Content)
+			}
+			if choice.Message.Content != "" {
+				texts = append(texts, choice.Message.Content)
+			}
+			if choice.FinishReason != nil && *choice.FinishReason != "" {
+				out.FinishReason = *choice.FinishReason
+			}
+		}
+	}
+	out.Text = strings.Join(texts, "")
+	return out, nil
 }
 
 func (e *ModelBenchmarkExecutor) applyCost(item *ModelBenchmarkRunItem, model string) {

@@ -530,9 +530,8 @@ func (r *modelBenchmarkAuditRunRepo) CreateRun(_ context.Context, run *ModelBenc
 func TestModelBenchmarkRunRecordsExecutedVersion(t *testing.T) {
 	stop := errors.New("stop after capturing run metadata")
 	repo := &modelBenchmarkAuditRunRepo{stop: stop}
-	accounts := modelBenchmarkAccountSource{account: &Account{ID: 9, Platform: PlatformOpenAI}}
-	svc := NewModelBenchmarkService(repo, accounts, nil, &ModelBenchmarkExecutor{})
-	plan := &ModelBenchmarkPlan{ID: 3, AccountID: 9, ModelID: "test-model", SuiteID: "hard-v1", SuiteVersion: "1.1.0", ScoringVersion: "1.0.0"}
+	svc := NewModelBenchmarkService(repo, nil, nil, nil, &ModelBenchmarkExecutor{})
+	plan := &ModelBenchmarkPlan{ID: 3, ModelID: "test-model", SuiteID: "hard-v1", SuiteVersion: "1.1.0", ScoringVersion: "1.0.0"}
 	require.ErrorIs(t, svc.ExecutePlan(context.Background(), plan), stop)
 	require.Equal(t, ModelBenchmarkSuiteID, repo.created.SuiteID)
 	require.Equal(t, ModelBenchmarkSuiteVersion, repo.created.SuiteVersion)

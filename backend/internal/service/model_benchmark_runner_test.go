@@ -47,11 +47,11 @@ func TestModelBenchmarkRunnerExecutesAllDuePlansInParallel(t *testing.T) {
 	t.Cleanup(func() { modelBenchmarkRunnerTickDelay = originalDelay })
 
 	repo := &modelBenchmarkRunnerRepoStub{plans: []*ModelBenchmarkPlan{
-		{ID: 11, ModelID: "glm-5.3", AccountID: 565, CronExpression: "0 4 * * 1"},
-		{ID: 12, ModelID: "claude-opus-5-5", AccountID: 771, CronExpression: "0 4 * * 1"},
-		{ID: 13, ModelID: "claude-sonnet-5-5", AccountID: 883, CronExpression: "0 4 * * 1"},
+		{ID: 11, ModelID: "glm-5.3", CronExpression: "0 4 * * 1"},
+		{ID: 12, ModelID: "claude-opus-5-5", CronExpression: "0 4 * * 1"},
+		{ID: 13, ModelID: "claude-sonnet-5-5", CronExpression: "0 4 * * 1"},
 	}, completed: map[int64]int{}}
-	runner := NewModelBenchmarkRunnerService(repo, NewModelBenchmarkService(repo, nil, nil, nil), nil)
+	runner := NewModelBenchmarkRunnerService(repo, NewModelBenchmarkService(repo, nil, nil, nil, nil), nil)
 
 	runner.runScheduled()
 
@@ -67,7 +67,7 @@ func TestModelBenchmarkRunnerSkipsWhenNoDuePlans(t *testing.T) {
 	t.Cleanup(func() { modelBenchmarkRunnerTickDelay = originalDelay })
 
 	repo := &modelBenchmarkRunnerRepoStub{completed: map[int64]int{}}
-	runner := NewModelBenchmarkRunnerService(repo, NewModelBenchmarkService(repo, nil, nil, nil), nil)
+	runner := NewModelBenchmarkRunnerService(repo, NewModelBenchmarkService(repo, nil, nil, nil, nil), nil)
 
 	runner.runScheduled()
 

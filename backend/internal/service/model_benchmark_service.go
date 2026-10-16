@@ -8,17 +8,25 @@ import (
 	"time"
 )
 
+// ModelBenchmarkAPIKeyStore 是测评所需的 API Key 窄依赖：保存设置时校验完整
+// Key（含分组/用户），执行时取明文做回环认证。
+type ModelBenchmarkAPIKeyStore interface {
+	GetByID(ctx context.Context, id int64) (*APIKey, error)
+	GetKeyAndOwnerID(ctx context.Context, id int64) (string, int64, error)
+}
+
 // ModelBenchmarkService manages plans and executes model benchmark runs.
 type ModelBenchmarkService struct {
 	repo            ModelBenchmarkRepository
-	accounts        ModelBenchmarkAccountSource
+	apiKeys         ModelBenchmarkAPIKeyStore
+	settings        *SettingService
 	manifestService *ModelManifestService
 	executor        *ModelBenchmarkExecutor
 }
 
 // NewModelBenchmarkService creates the benchmark application service.
-func NewModelBenchmarkService(repo ModelBenchmarkRepository, accounts ModelBenchmarkAccountSource, manifestService *ModelManifestService, executor *ModelBenchmarkExecutor) *ModelBenchmarkService {
-	return &ModelBenchmarkService{repo: repo, accounts: accounts, manifestService: manifestService, executor: executor}
+func NewModelBenchmarkService(repo ModelBenchmarkRepository, apiKeys ModelBenchmarkAPIKeyStore, settings *SettingService, manifestService *ModelManifestService, executor *ModelBenchmarkExecutor) *ModelBenchmarkService {
+	return &ModelBenchmarkService{repo: repo, apiKeys: apiKeys, settings: settings, manifestService: manifestService, executor: executor}
 }
 
 // ListSuites returns the only built-in suite in Phase 1.
@@ -26,7 +34,9 @@ func (s *ModelBenchmarkService) ListSuites() []ModelBenchmarkSuite {
 	return []ModelBenchmarkSuite{GetModelBenchmarkSuite()}
 }
 
-// ListTargets returns the model-manifest view filtered to benchmark-supported accounts.
+// ListTargets returns the model-manifest view filtered to benchmark-supported models.
+// 网关回环模式下不再逐账号适配：模型只要有可调度账号（网关可路由）且非
+// 图像/视频生成模型即可测评。
 func (s *ModelBenchmarkService) ListTargets(ctx context.Context) ([]ModelManifestItem, error) {
 	if s.manifestService == nil {
 		return nil, fmt.Errorf("model manifest service is unavailable")
@@ -37,24 +47,51 @@ func (s *ModelBenchmarkService) ListTargets(ctx context.Context) ([]ModelManifes
 	}
 	out := make([]ModelManifestItem, 0, len(manifest.Models))
 	for _, model := range manifest.Models {
-		accounts := make([]ModelManifestAccountItem, 0, len(model.Accounts))
-		for _, account := range model.Accounts {
-			loaded, err := s.accounts.GetByID(ctx, account.ID)
-			if err == nil && loaded.Status == "active" && loaded.IsSchedulable() && IsSupportedModelBenchmarkTarget(loaded, model.ID) {
-				accounts = append(accounts, account)
-			}
-		}
-		if len(accounts) == 0 {
+		if !isModelBenchmarkSupportedModel(model.ID, model.ActiveAccounts > 0) {
 			continue
 		}
-		item := model
-		item.Accounts = accounts
-		item.TotalAccounts = len(accounts)
-		item.ActiveAccounts = len(accounts)
-		item.TotalConcurrency = 0
-		out = append(out, item)
+		out = append(out, model)
 	}
 	return out, nil
+}
+
+// GetBenchmarkSettings returns the current benchmark settings (loopback API key).
+func (s *ModelBenchmarkService) GetBenchmarkSettings(ctx context.Context) (*ModelBenchmarkSettings, error) {
+	if s.settings == nil {
+		return nil, fmt.Errorf("setting service is unavailable")
+	}
+	return s.settings.GetModelBenchmarkSettings(ctx)
+}
+
+// UpdateBenchmarkSettings validates and persists the loopback API key choice.
+// 校验：Key 存在、启用、未过期且已绑定分组（未分组 Key 会被网关的
+// RequireGroupAssignment 拦截）；KeyID=0 表示清除配置。
+func (s *ModelBenchmarkService) UpdateBenchmarkSettings(ctx context.Context, input *ModelBenchmarkSettings) (*ModelBenchmarkSettings, error) {
+	if s.settings == nil || s.apiKeys == nil {
+		return nil, fmt.Errorf("benchmark settings dependencies are unavailable")
+	}
+	if input == nil {
+		return nil, fmt.Errorf("%w: settings payload is required", ErrModelBenchmarkInvalidPlan)
+	}
+	if input.APIKeyID != 0 {
+		key, err := s.apiKeys.GetByID(ctx, input.APIKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: API key not found", ErrModelBenchmarkInvalidPlan)
+		}
+		if !key.IsActive() {
+			return nil, fmt.Errorf("%w: API key is not active", ErrModelBenchmarkInvalidPlan)
+		}
+		if key.IsExpired() {
+			return nil, fmt.Errorf("%w: API key is expired", ErrModelBenchmarkInvalidPlan)
+		}
+		if key.GroupID == nil {
+			return nil, fmt.Errorf("%w: API key has no group assignment", ErrModelBenchmarkInvalidPlan)
+		}
+	}
+	if err := s.settings.SetModelBenchmarkSettings(ctx, input); err != nil {
+		return nil, err
+	}
+	return s.settings.GetModelBenchmarkSettings(ctx)
 }
 
 // CreatePlan validates the Phase 1 target and persists a disabled-by-default plan.
@@ -74,12 +111,8 @@ func (s *ModelBenchmarkService) CreatePlan(ctx context.Context, input *ModelBenc
 	if _, err := computeNextRun(input.CronExpression, time.Now()); err != nil {
 		return nil, fmt.Errorf("%w: invalid cron expression: %w", ErrModelBenchmarkInvalidPlan, err)
 	}
-	account, err := s.accounts.GetByID(ctx, input.AccountID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: account not found", ErrModelBenchmarkInvalidPlan)
-	}
-	if !IsSupportedModelBenchmarkTarget(account, input.ModelID) {
-		return nil, ErrModelBenchmarkUnsupportedTarget
+	if err := s.validateBenchmarkModel(ctx, input.ModelID); err != nil {
+		return nil, err
 	}
 	if input.SampleCount <= 0 {
 		input.SampleCount = 1
@@ -115,9 +148,6 @@ func (s *ModelBenchmarkService) UpdatePlan(ctx context.Context, id int64, input 
 	if input.ModelID != "" {
 		existing.ModelID = strings.TrimSpace(input.ModelID)
 	}
-	if input.AccountID != 0 {
-		existing.AccountID = input.AccountID
-	}
 	if input.CronExpression != "" {
 		existing.CronExpression = strings.TrimSpace(input.CronExpression)
 	}
@@ -147,12 +177,8 @@ func (s *ModelBenchmarkService) UpdatePlan(ctx context.Context, id int64, input 
 	if err := validateModelBenchmarkPlanLimits(existing); err != nil {
 		return nil, err
 	}
-	account, err := s.accounts.GetByID(ctx, existing.AccountID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: account not found", ErrModelBenchmarkInvalidPlan)
-	}
-	if !IsSupportedModelBenchmarkTarget(account, existing.ModelID) {
-		return nil, ErrModelBenchmarkUnsupportedTarget
+	if err := s.validateBenchmarkModel(ctx, existing.ModelID); err != nil {
+		return nil, err
 	}
 	if existing.Enabled {
 		next := time.Now().Add(time.Minute)
@@ -209,6 +235,8 @@ func (s *ModelBenchmarkService) ListRunItems(ctx context.Context, runID int64) (
 }
 
 // ListHistory returns a version-isolated curve.
+// 当明确指定了 ModelID 且前端未传 ComparisonKey 时，不强制施加默认 comparison_key 与预算过滤，
+// 以便查看该模型的全量历史演进趋势。
 func (s *ModelBenchmarkService) ListHistory(ctx context.Context, filters ModelBenchmarkHistoryFilters) ([]*ModelBenchmarkHistoryPoint, error) {
 	if filters.SuiteID == "" {
 		filters.SuiteID = ModelBenchmarkSuiteID
@@ -219,10 +247,11 @@ func (s *ModelBenchmarkService) ListHistory(ctx context.Context, filters ModelBe
 	if filters.ScoringVersion == "" {
 		filters.ScoringVersion = ModelBenchmarkScoringVer
 	}
-	if filters.ComparisonKey == "" && filters.SuiteVersion == ModelBenchmarkSuiteVersion {
+	// 仅在未指定特定模型且未传 comparison_key 时才回退到默认基准条件
+	if filters.ModelID == "" && filters.ComparisonKey == "" && filters.SuiteVersion == ModelBenchmarkSuiteVersion {
 		filters.ComparisonKey = ModelBenchmarkDefaultComparisonKey
 	}
-	if filters.SuiteVersion == ModelBenchmarkSuiteVersion {
+	if filters.ModelID == "" && filters.SuiteVersion == ModelBenchmarkSuiteVersion {
 		if filters.MaxOutputTokens <= 0 {
 			filters.MaxOutputTokens = 2048
 		}
@@ -236,28 +265,95 @@ func (s *ModelBenchmarkService) ListHistory(ctx context.Context, filters ModelBe
 	return s.repo.ListHistory(ctx, filters)
 }
 
-// ListRankings returns models with at least three comparable runs.
-func (s *ModelBenchmarkService) ListRankings(ctx context.Context, limit int, comparisonKeys ...string) ([]*ModelBenchmarkRanking, error) {
-	key := ModelBenchmarkDefaultComparisonKey
-	if len(comparisonKeys) > 0 && comparisonKeys[0] != "" {
-		key = comparisonKeys[0]
+// GetModelOverview 聚合返回单模型全景数据：排名与能力分、最新Run、关联计划、最近Runs与历史趋势
+func (s *ModelBenchmarkService) GetModelOverview(ctx context.Context, modelID string) (*ModelBenchmarkModelOverview, error) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil, errors.New("model_id is required")
 	}
-	return s.ListComparisonRankings(ctx, limit, ModelBenchmarkHistoryFilters{ComparisonKey: key})
+
+	overview := &ModelBenchmarkModelOverview{
+		ModelID:    modelID,
+		Plans:      []*ModelBenchmarkPlan{},
+		RecentRuns: []*ModelBenchmarkRun{},
+		History:    []*ModelBenchmarkHistoryPoint{},
+	}
+
+	// 1. 查询该模型在最新题库下的排名
+	rankings, err := s.ListRankings(ctx, ModelBenchmarkRankingFilters{
+		SuiteID:        ModelBenchmarkSuiteID,
+		SuiteVersion:   ModelBenchmarkSuiteVersion,
+		ScoringVersion: ModelBenchmarkScoringVer,
+	}, 100)
+	if err == nil {
+		for _, r := range rankings {
+			if r.ModelID == modelID {
+				overview.Ranking = r
+				break
+			}
+		}
+	}
+
+	// 2. 查询该模型最近一次成功的 Run (以及最近 10 次 Runs)
+	recentRuns, err := s.repo.ListRuns(ctx, ModelBenchmarkRunFilters{
+		ModelID: modelID,
+		Limit:   10,
+	})
+	if err == nil {
+		overview.RecentRuns = recentRuns
+		for _, r := range recentRuns {
+			if r.Status == "success" || r.Status == "partial" {
+				overview.LatestRun = r
+				break
+			}
+		}
+		if overview.LatestRun == nil && len(recentRuns) > 0 {
+			overview.LatestRun = recentRuns[0]
+		}
+	}
+
+	// 3. 查询关联的计划
+	allPlans, err := s.repo.ListPlans(ctx)
+	if err == nil {
+		for _, p := range allPlans {
+			if p.ModelID == modelID {
+				overview.Plans = append(overview.Plans, p)
+			}
+		}
+	}
+
+	// 4. 查询该模型历史趋势点 (按时间顺序，无预算死锁限制)
+	history, err := s.ListHistory(ctx, ModelBenchmarkHistoryFilters{
+		ModelID:        modelID,
+		SuiteID:        ModelBenchmarkSuiteID,
+		SuiteVersion:   ModelBenchmarkSuiteVersion,
+		ScoringVersion: ModelBenchmarkScoringVer,
+		Limit:          100,
+	})
+	if err == nil {
+		overview.History = history
+	}
+
+	return overview, nil
 }
-func (s *ModelBenchmarkService) ListComparisonRankings(ctx context.Context, limit int, filters ModelBenchmarkHistoryFilters) ([]*ModelBenchmarkRanking, error) {
-	if filters.ComparisonKey == "" {
-		filters.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+
+// ListRankings 返回指定题库（空则编译期最新题库）下、每模型最新一次成功/部分成功 run 的排名。
+func (s *ModelBenchmarkService) ListRankings(ctx context.Context, filters ModelBenchmarkRankingFilters, limit int) ([]*ModelBenchmarkRanking, error) {
+	if filters.SuiteID == "" {
+		filters.SuiteID = ModelBenchmarkSuiteID
 	}
-	if filters.MaxOutputTokens <= 0 {
-		filters.MaxOutputTokens = 2048
+	if filters.SuiteVersion == "" {
+		filters.SuiteVersion = ModelBenchmarkSuiteVersion
 	}
-	if filters.TimeoutSeconds <= 0 {
-		filters.TimeoutSeconds = 90
+	if filters.ScoringVersion == "" {
+		filters.ScoringVersion = ModelBenchmarkScoringVer
 	}
-	if filters.SampleCount <= 0 {
-		filters.SampleCount = 1
-	}
-	return s.repo.ListRankings(ctx, ModelBenchmarkSuiteID, ModelBenchmarkSuiteVersion, ModelBenchmarkScoringVer, filters.ComparisonKey, limit, filters.MaxOutputTokens, filters.TimeoutSeconds, filters.SampleCount)
+	return s.repo.ListRankings(ctx, filters.SuiteID, filters.SuiteVersion, filters.ScoringVersion, limit)
+}
+
+// ListRankingSuites 列出存在可排名执行的历史题库版本。
+func (s *ModelBenchmarkService) ListRankingSuites(ctx context.Context) ([]*ModelBenchmarkRankingSuite, error) {
+	return s.repo.ListRankingSuites(ctx)
 }
 
 func validateModelBenchmarkPlanLimits(plan *ModelBenchmarkPlan) error {
@@ -281,24 +377,33 @@ func validateModelBenchmarkPlanLimits(plan *ModelBenchmarkPlan) error {
 	return nil
 }
 
+// validateBenchmarkModel 校验模型当前可测评（模型清单中存在且有可调度账号）。
+func (s *ModelBenchmarkService) validateBenchmarkModel(ctx context.Context, modelID string) error {
+	targets, err := s.ListTargets(ctx)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if target.ID == modelID {
+			return nil
+		}
+	}
+	return ErrModelBenchmarkUnsupportedTarget
+}
+
 // ExecutePlan runs all generated items serially and persists aggregate evidence.
 func (s *ModelBenchmarkService) ExecutePlan(ctx context.Context, plan *ModelBenchmarkPlan) error {
 	if s.executor == nil {
 		return fmt.Errorf("model benchmark executor is unavailable")
 	}
-	account, err := s.accounts.GetByID(ctx, plan.AccountID)
-	if err != nil {
-		return err
-	}
 	// Generation and scoring use the built-in implementation, including for older plans.
-	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 2 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: account.GetMappedModel(plan.ModelID), AccountID: plan.AccountID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
-	if account.Platform == PlatformOpenAI && account.IsOpenAIOAuthLike() {
-		run.MaxOutputTokens = 0
-	}
+	// 网关回环模式：不绑定账号，由网关调度选号；upstream_model_id 以网关实际
+	// 服务模型为准（请求模型名兜底），在 executor 内按题捕获计费。
+	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 2 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: plan.ModelID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
 	if run.ComparisonKey == "" {
 		run.ComparisonKey = ModelBenchmarkDefaultComparisonKey
 	}
-	run, err = s.repo.CreateRun(ctx, run)
+	run, err := s.repo.CreateRun(ctx, run)
 	if err != nil {
 		return err
 	}

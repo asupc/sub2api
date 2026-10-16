@@ -16,11 +16,11 @@ func TestModelBenchmarkRepositoryClaimDuePlansUsesAtomicLease(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	lease := 25 * time.Hour
-	columns := []string{"id", "name", "suite_id", "suite_version", "scoring_version", "model_id", "account_id", "cron_expression", "enabled", "sample_count", "max_output_tokens", "timeout_seconds", "max_results", "running_status", "claim_expires_at", "manual_trigger_at", "last_run_at", "next_run_at", "created_at", "updated_at", "comparison_key"}
+	columns := []string{"id", "name", "suite_id", "suite_version", "scoring_version", "model_id", "cron_expression", "enabled", "sample_count", "max_output_tokens", "timeout_seconds", "max_results", "running_status", "claim_expires_at", "manual_trigger_at", "last_run_at", "next_run_at", "created_at", "updated_at", "comparison_key"}
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)FROM model_benchmark_plans.*FOR UPDATE SKIP LOCKED`).
 		WithArgs(now, 1).
-		WillReturnRows(sqlmock.NewRows(columns).AddRow(int64(1), "weekly", "hard-v1", "1.0.0", "1.0.0", "gpt-test", int64(2), "0 4 * * 1", true, 1, 768, 90, 50, "idle", nil, nil, nil, now, now, now, "baseline-v2"))
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(int64(1), "weekly", "hard-v1", "1.0.0", "1.0.0", "gpt-test", "0 4 * * 1", true, 1, 768, 90, 50, "idle", nil, nil, nil, now, now, now, "baseline-v2"))
 	mock.ExpectExec(`UPDATE model_benchmark_plans SET running_status='running',claim_expires_at=\$2,manual_trigger_at=NULL`).
 		WithArgs(int64(1), now.Add(lease)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
