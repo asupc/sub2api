@@ -4,7 +4,21 @@
 > 基准：`UPSTREAM-BASE`（单行完整哈希）只在完整上游同步后前移；手动移植只记本文件、不改基准（唯一例外见 10-13 收口条目）。
 > 整理记录：2026-10-12 / 10-13 / 10-15 三次压缩，只保留功能事实、关键决策、合并冲突面与已知缺口；根因推导、测试输出、逐提交哈希与逐文件清单见 git 历史（本次压缩前 HEAD=`f5aa70c`，10-13 压缩前 HEAD=`45cf4c6`）。
 
-## 当前状态（2026-10-13 核实）
+## 平台移植源同步（PORTER-BASE 2026-10-16）
+
+- **来源**：qoder2api-hub `b850c7e..5acef5e`（1 提交）；trae-workbuddy-switch `7364861..8edb86d`（21 提交）；workbuddy 无更新。
+- **qoder（建议移植）**：导入 issue #33 图像单 part dict 修复——`flattenContentText` 现把单个 dict 形态的 content 当单元素列表处理，避免图像 dict 被 str() 字符串化；对应 commit `5acef5e`。
+- **trae（可选）**：致 issue #28 variant 收敛——在 `trae.ParseVariant` 兼容 `trae_merged` / `global_trae_merged` 别名并映射到既有 TraeCN/GlobalTraeCode（端点/OAuthLine 不变），避免 cred 库/DB 契约漂移；commit `8edb86d` 等中的 merged variant 引入。UI/账户发现层（本地客户端遍历）未迁移，架构不适用。
+- **评估未移植（记录避免重复建议）**：
+  - Trae 90a84df latencyMs/totalMs 语义拆分（观测层重构，与 sub2api 自有日志链不同）。
+  - Trae f273cd6 账号池×模型限流探测（新功能，sub2api 有自身模型管理/网关，无直接缺陷）。
+  - Trae 412de09 账号池冷却原因门控（sub2api Trae 路径未使用 buddy pool，该缺陷不适用）。
+  - Trae c8a492d/1286252 客户端一程序位收敛的 UI/本地账户发现（sub2api 无本地客户端遍历）。
+- **改动文件**：`backend/internal/pkg/qoder/baseprompt.go`、`backend/internal/pkg/trae/variant.go`、`PORTER-BASE`、`CHANGELOG-SO.md`。
+- **基准推进**：PORTER-BASE 的 qoder 行更新至 `5acef5e…`、trae 行更新至 `8edb86d…`（workbuddy 不变）。
+- **与上游合并影响**：不涉及 sub2api-upstream-sync 的 UPSTREAM-BASE。
+
+## 当前状态（2026-10-13 核实）`
 
 | 项 | 状态 |
 |---|---|

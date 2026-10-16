@@ -218,6 +218,10 @@ func flattenContentText(content any) (string, []string) {
 		return "", nil
 	case string:
 		return v, nil
+	case map[string]any:
+		// 单 part 形态（部分客户端把单个 content part 对象直接当 content 字段，
+		// 而非列表）：当单元素列表处理，绝不 str() 字符串化（对应 qoder issue #33 修复）。
+		return flattenContentText([]any{v})
 	case []any:
 		texts, images := []string{}, []string{}
 		for _, piece := range v {

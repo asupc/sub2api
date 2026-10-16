@@ -263,6 +263,12 @@ var parseAliases = map[string]Variant{
 	"trae_global": VariantTraeGlobal, "global_trae_code": VariantTraeGlobal,
 	"global_traecode": VariantTraeGlobal, "trae_code_global": VariantTraeGlobal,
 	"traecodeglobal": VariantTraeGlobal, "trae global": VariantTraeGlobal,
+	// merged 变体（issue #28 客户端收敛产物）：候选名与既有 TraeCN/GlobalTraeCode 逐字相同，
+	// 仅标识/快照目录分家，协议端点与 OAuthLine 沿用既有映射，故作为别名读回。
+	"trae_merged": VariantTraeCN, "traemerged": VariantTraeCN,
+	"trae merged": VariantTraeCN,
+	"global_trae_merged": VariantTraeGlobal, "globaltraemerged": VariantTraeGlobal,
+	"global trae merged": VariantTraeGlobal,
 }
 
 // ParseVariant 从字符串解析变体（大小写不敏感，接受源项目的常见别名）。
