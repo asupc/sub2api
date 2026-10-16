@@ -68,7 +68,7 @@ func TestModelBenchmarkComparisonPostgres(t *testing.T) {
 	require.Len(t, claimed, 1)
 	got, err = repo.GetPlan(ctx, plan.ID)
 	require.NoError(t, err)
-	require.True(t, got.ClaimExpiresAt.After(now.Add(service.ModelBenchmarkRunBudget(plan))), "lease must cover the complete 112-item, 3-sample form")
+	require.True(t, got.ClaimExpiresAt.After(now.Add(service.ModelBenchmarkRunBudget(plan))), "lease must cover the complete 56-item, 3-sample form")
 	var first *service.ModelBenchmarkRun
 	for _, group := range []struct {
 		model, key string
@@ -76,7 +76,7 @@ func TestModelBenchmarkComparisonPostgres(t *testing.T) {
 		eligible   bool
 	}{{"candidate", "audit-batch", 2048, true}, {"candidate", "audit-batch", 4096, true}, {"other-form", "other-batch", 2048, true}, {"low-coverage", "audit-batch", 2048, false}} {
 		for i := 0; i < 3; i++ {
-			run, err := repo.CreateRun(ctx, &service.ModelBenchmarkRun{PlanID: plan.ID, SuiteID: service.ModelBenchmarkSuiteID, SuiteVersion: service.ModelBenchmarkSuiteVersion, ScoringVersion: service.ModelBenchmarkScoringVer, ModelID: group.model, ComparisonKey: group.key, MaxOutputTokens: group.tokens, TimeoutSeconds: 90, SampleCount: 1, ItemCount: 112, StartedAt: now})
+			run, err := repo.CreateRun(ctx, &service.ModelBenchmarkRun{PlanID: plan.ID, SuiteID: service.ModelBenchmarkSuiteID, SuiteVersion: service.ModelBenchmarkSuiteVersion, ScoringVersion: service.ModelBenchmarkScoringVer, ModelID: group.model, ComparisonKey: group.key, MaxOutputTokens: group.tokens, TimeoutSeconds: 90, SampleCount: 1, ItemCount: 56, StartedAt: now})
 			require.NoError(t, err)
 			score := float64(80 + i)
 			output, latency := int64(600+i), int64(900+i)
@@ -84,7 +84,7 @@ func TestModelBenchmarkComparisonPostgres(t *testing.T) {
 			run.IntelligenceScore = &score
 			run.OutputTokens = &output
 			run.AvgLatencyMS = &latency
-			run.AnsweredCount = 112
+			run.AnsweredCount = 56
 			run.FinishedAt = &now
 			run.Quality = service.ModelBenchmarkQuality{CompletionRate: 100, FormatComplianceRate: 100, RankingEligible: group.eligible, CategoryCoverage: map[string]float64{"math": 100}}
 			require.NoError(t, repo.UpdateRun(ctx, run))
@@ -146,6 +146,6 @@ func TestModelBenchmarkComparisonPostgres(t *testing.T) {
 	restored, err := repo.GetRun(ctx, first.ID)
 	require.NoError(t, err)
 	require.Equal(t, "audit-batch", restored.ComparisonKey)
-	require.Equal(t, 112, restored.ItemCount)
+	require.Equal(t, 56, restored.ItemCount)
 	require.Equal(t, 2048, restored.MaxOutputTokens)
 }

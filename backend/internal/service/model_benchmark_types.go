@@ -295,7 +295,7 @@ func modelBenchmarkItemWeight(item ModelBenchmarkItem) float64 {
 	total := 0.0
 	for _, family := range modelBenchmarkFamilies {
 		if family.category == item.Category {
-			total += 2 * modelBenchmarkDifficultyWeight(family.difficulty)
+			total += 1 * modelBenchmarkDifficultyWeight(family.difficulty)
 		}
 	}
 	if total == 0 {
@@ -678,7 +678,7 @@ func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRu
 	expectedCategory, completedCategory := map[string]int{}, map[string]int{}
 	samples := max(run.SampleCount, 1)
 	for _, family := range modelBenchmarkFamilies {
-		expectedCategory[family.category] += 2 * samples
+		expectedCategory[family.category] += 1 * samples
 	}
 
 	totalWeight, earnedWeight, answered := 0.0, 0.0, 0
@@ -725,7 +725,7 @@ func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRu
 		run.Quality.CompletionRate = 100 * float64(valid) / float64(planned)
 		run.Quality.FormatComplianceRate = 100 * float64(valid) / float64(max(answered, 1))
 	}
-	run.Quality.RankingEligible = planned == len(modelBenchmarkFamilies)*2*samples && run.Quality.CompletionRate >= 90
+	run.Quality.RankingEligible = planned == len(modelBenchmarkFamilies)*1*samples && run.Quality.CompletionRate >= 90
 	for category, expected := range expectedCategory {
 		coverage := 100 * float64(completedCategory[category]) / float64(expected)
 		run.Quality.CategoryCoverage[category] = coverage

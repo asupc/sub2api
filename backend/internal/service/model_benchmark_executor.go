@@ -68,11 +68,36 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 	}
 	rawPayload, _ := json.Marshal(payload)
 	start := time.Now()
-	responseBody, status, err := e.postGateway(ctx, apiKey, rawPayload)
+	var responseBody []byte
+	var status int
+	// err was declared by resolveAPIKey; reuse it so retry results replace prior failures.
+	for attempt := 0; attempt < 2; attempt++ {
+		if attempt > 0 {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				break
+			}
+			// 短暂退避，避免在网关/上游短时抖动中立刻重試。
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+				break
+			case <-time.After(200 * time.Millisecond):
+			}
+			if err != nil {
+				break
+			}
+		}
+		responseBody, status, err = e.postGateway(ctx, apiKey, rawPayload)
+		if modelBenchmarkRetryableResult(status, err) {
+			continue
+		}
+		break
+	}
+	latency := time.Since(start).Milliseconds()
 	if err != nil {
 		return modelBenchmarkExecutionFailure(item, err)
 	}
-	latency := time.Since(start).Milliseconds()
 	if status < 200 || status >= 300 {
 		return modelBenchmarkExecutionFailure(item, fmt.Errorf("gateway returned %d: %s", status, truncateModelBenchmarkText(responseBody, 512)))
 	}
@@ -142,6 +167,18 @@ func (e *ModelBenchmarkExecutor) gatewayChatCompletionsURL() (string, error) {
 		return "", fmt.Errorf("config is not available")
 	}
 	return fmt.Sprintf("http://127.0.0.1:%d/v1/chat/completions", e.cfg.Server.Port), nil
+}
+
+// modelBenchmarkRetryableResult reports whether a failed gateway response should be retried once.
+// Only transport and transient gateway failures retry; business/account/format errors do not.
+func modelBenchmarkRetryableResult(status int, err error) bool {
+	if err != nil {
+		return true
+	}
+	if status == http.StatusTooManyRequests || status == http.StatusRequestTimeout {
+		return true
+	}
+	return status >= http.StatusInternalServerError
 }
 
 // postGateway performs one loopback request and returns the drained body.

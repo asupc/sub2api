@@ -198,7 +198,7 @@ func benchmarkExtendedOracle(t *testing.T, item ModelBenchmarkItem) any {
 		for rotation := 0; rotation < 4; rotation++ {
 			for mirror := 0; mirror < 2; mirror++ {
 				if reflect.DeepEqual(transform(bxInts(d["example_input"]), 3, rotation, mirror), bxInts(d["example_output"])) {
-					outputs = append(outputs, transform(bxInts(d["query"]), 4, rotation, mirror))
+					outputs = append(outputs, transform(bxInts(d["query"]), 5, rotation, mirror))
 				}
 			}
 		}
@@ -727,7 +727,7 @@ func TestModelBenchmarkPublicFormsAndSampling(t *testing.T) {
 	a := GenerateModelBenchmarkComparisonItems("study-2026", 1)
 	b := GenerateModelBenchmarkComparisonItems("study-2026", 1)
 	require.Equal(t, a, b)
-	require.Len(t, a, 112)
+	require.Len(t, a, 56)
 	hashes := map[string]map[string]bool{}
 	for form := 1; form <= 32; form++ {
 		for _, item := range GenerateModelBenchmarkComparisonItems(fmt.Sprintf("form-%d", form), form%3+1) {
@@ -750,12 +750,12 @@ func TestModelBenchmarkPublicFormsAndSampling(t *testing.T) {
 }
 
 func TestModelBenchmarkCoverageUsesPlannedItems(t *testing.T) {
-	run := &ModelBenchmarkRun{ItemCount: 112, SampleCount: 1}
+	run := &ModelBenchmarkRun{ItemCount: 56, SampleCount: 1}
 	items := []ModelBenchmarkRunItem{{Category: "math", Status: "correct", Score: 1, EarnedPoints: 1, PossiblePoints: 1}}
 	AggregateModelBenchmarkRun(run, items)
-	require.Equal(t, 112, run.ItemCount)
+	require.Equal(t, 56, run.ItemCount)
 	require.Equal(t, "partial", run.Status)
-	require.InDelta(t, 100.0/112, run.Quality.CompletionRate, 1e-9)
+	require.InDelta(t, 100.0/56, run.Quality.CompletionRate, 1e-9)
 	require.False(t, run.Quality.RankingEligible)
 	all := []ModelBenchmarkRunItem{}
 	for _, item := range GenerateModelBenchmarkComparisonItems("coverage", 1) {
@@ -778,7 +778,7 @@ func TestModelBenchmarkCoverageUsesPlannedItems(t *testing.T) {
 
 func TestModelBenchmarkBudgetIncludesAllSamples(t *testing.T) {
 	plan := &ModelBenchmarkPlan{SampleCount: 3, TimeoutSeconds: 600}
-	require.Greater(t, ModelBenchmarkRunBudget(plan), time.Duration(112*3*600)*time.Second)
+	require.Greater(t, ModelBenchmarkRunBudget(plan), time.Duration(56*3*600)*time.Second)
 }
 
 func TestModelBenchmarkEquivalentWitnesses(t *testing.T) {

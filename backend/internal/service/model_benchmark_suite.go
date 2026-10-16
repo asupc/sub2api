@@ -14,8 +14,8 @@ import (
 
 const (
 	ModelBenchmarkSuiteID      = "hard-v1"
-	ModelBenchmarkSuiteVersion = "2.0.0"
-	ModelBenchmarkScoringVer   = "2.0.0"
+	ModelBenchmarkSuiteVersion = "3.0.0"
+	ModelBenchmarkScoringVer   = "3.0.0"
 	modelBenchmarkSuiteSalt    = "sub2api-hard-v1-chinese-prompts-1"
 )
 
@@ -91,7 +91,7 @@ var modelBenchmarkCategoryWeights = map[string]float64{
 func GetModelBenchmarkSuite() ModelBenchmarkSuite {
 	return ModelBenchmarkSuite{
 		ID: ModelBenchmarkSuiteID, Version: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer,
-		ItemCount: len(modelBenchmarkFamilies) * 2, FamilyCount: len(modelBenchmarkFamilies),
+		ItemCount: len(modelBenchmarkFamilies) * 1, FamilyCount: len(modelBenchmarkFamilies),
 		MinDifficulty: 3, MaxDifficulty: 5, CategoryWeights: modelBenchmarkCategoryWeights,
 	}
 }
@@ -101,7 +101,7 @@ func GetModelBenchmarkSuite() ModelBenchmarkSuite {
 func GenerateModelBenchmarkItems(planID, runID int64) []ModelBenchmarkItem {
 	items := make([]ModelBenchmarkItem, 0, len(modelBenchmarkFamilies)*2)
 	for _, family := range modelBenchmarkFamilies {
-		for variant := 1; variant <= 2; variant++ {
+		for variant := 1; variant <= 1; variant++ {
 			seed := modelBenchmarkSeed(planID, runID, family.id, variant)
 			rng := newModelBenchmarkRNG(seed)
 			prompt, expected := generateModelBenchmarkInstance(family, rng, variant)
@@ -535,7 +535,7 @@ func GenerateModelBenchmarkComparisonItems(key string, sample int) []ModelBenchm
 
 // ModelBenchmarkRunBudget covers every configured item plus persistence time.
 func ModelBenchmarkRunBudget(plan *ModelBenchmarkPlan) time.Duration {
-	return time.Duration(len(modelBenchmarkFamilies)*2*max(plan.SampleCount, 1)*max(plan.TimeoutSeconds, 10))*time.Second + 2*time.Minute
+	return time.Duration(len(modelBenchmarkFamilies)*1*max(plan.SampleCount, 1)*max(plan.TimeoutSeconds, 10))*time.Second + 2*time.Minute
 }
 
 func modelBenchmarkIntArrayText(values []int) string {

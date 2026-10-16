@@ -20,11 +20,11 @@ import (
 func TestModelBenchmarkSuiteGeneratesHardV1(t *testing.T) {
 	suite := GetModelBenchmarkSuite()
 	require.Equal(t, "hard-v1", suite.ID)
-	require.Equal(t, "2.0.0", suite.Version)
-	require.Equal(t, "2.0.0", suite.ScoringVersion)
-	require.Equal(t, 112, suite.ItemCount)
+	require.Equal(t, "3.0.0", suite.Version)
+	require.Equal(t, "3.0.0", suite.ScoringVersion)
+	require.Equal(t, 56, suite.ItemCount)
 	items := GenerateModelBenchmarkItems(1, 2)
-	require.Len(t, items, 112)
+	require.Len(t, items, 56)
 	seen := map[string]bool{}
 	for _, item := range items {
 		require.False(t, seen[item.ID], "duplicate item %s", item.ID)

@@ -399,7 +399,7 @@ func (s *ModelBenchmarkService) ExecutePlan(ctx context.Context, plan *ModelBenc
 	// Generation and scoring use the built-in implementation, including for older plans.
 	// 网关回环模式：不绑定账号，由网关调度选号；upstream_model_id 以网关实际
 	// 服务模型为准（请求模型名兜底），在 executor 内按题捕获计费。
-	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 2 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: plan.ModelID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
+	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 1 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: plan.ModelID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
 	if run.ComparisonKey == "" {
 		run.ComparisonKey = ModelBenchmarkDefaultComparisonKey
 	}

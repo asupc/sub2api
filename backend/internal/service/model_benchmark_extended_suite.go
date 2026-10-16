@@ -107,18 +107,18 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 			}
 			examples = append(examples, map[string]any{"input": a, "output": transform(a)})
 		}
-		query := []int{r.int(1, 5), r.int(7, 12), r.int(15, 20), r.int(25, 30), r.int(35, 40), r.int(45, 50), r.int(55, 60)}
+		query := []int{r.int(1, 5), r.int(7, 12), r.int(15, 20), r.int(25, 30), r.int(35, 40), r.int(45, 50), r.int(55, 60), r.int(65, 70), r.int(75, 80), r.int(85, 90), r.int(95, 100), r.int(105, 110)}
 		return modelBenchmarkDataQuestion("同一未知规则先选择是否反转数组，再左循环移位 k 个位置，最后每个元素加 d。k∈{0,1,2}、d∈{-2,-1,0,1,2}。根据 examples 返回 query 的输出数组。", map[string]any{"examples": examples, "query": query}), transform(query)
 	case "grid-transform":
 		turns, mirror := r.int(0, 3), r.int(0, 1) == 1
 		input := []int{1, 2, 3, 4, 5, 6, 7, 8, 9}
 		benchmarkShuffle(r, input)
-		query := make([]int, 16)
+		query := make([]int, 25)
 		for i := range query {
 			query[i] = i + r.int(1, 3)*20
 		}
 		benchmarkShuffle(r, query)
-		return modelBenchmarkDataQuestion("矩阵按行展开。未知变换先顺时针旋转 0/90/180/270 度，再选择是否左右镜像，变换对所有尺寸相同。由 3x3 示例推断，返回 4x4 query 变换后按行展开的数组。", map[string]any{"example_input": input, "example_output": modelBenchmarkTransformGrid(input, 3, turns, mirror), "query": query}), modelBenchmarkTransformGrid(query, 4, turns, mirror)
+		return modelBenchmarkDataQuestion("矩阵按行展开。未知变换先顺时针旋转 0/90/180/270 度，再选择是否左右镜像，变换对所有尺寸相同。由 3x3 示例推断，返回 5x5 query 变换后按行展开的数组。", map[string]any{"example_input": input, "example_output": modelBenchmarkTransformGrid(input, 3, turns, mirror), "query": query}), modelBenchmarkTransformGrid(query, 5, turns, mirror)
 	case "relation-composition":
 		a, b := []int{0, 1, 2, 3, 4, 5}, []int{0, 1, 2, 3, 4, 5}
 		benchmarkShuffle(r, a)
@@ -126,7 +126,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		start := r.int(0, 5)
 		ops := []string{}
 		answer := start
-		for i := 0; i < 7+variant; i++ {
+		for i := 0; i < 12+variant; i++ {
 			if r.int(0, 1) == 0 {
 				ops = append(ops, "red")
 				answer = a[answer]
@@ -149,7 +149,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 			}
 		}
 		query := ""
-		for i := 0; i < 9; i++ {
+		for i := 0; i < 12; i++ {
 			query += string(byte('a' + r.int(0, 1)))
 		}
 		return modelBenchmarkDataQuestion("确定性机器只有状态 0/1，初始状态 0，每读入 a 或 b 根据未知但固定的转移表更新状态；输出最终状态。根据 examples 推断 query 的最终状态。空串不发生转移。", map[string]any{"examples": examples, "query": query}), modelBenchmarkAutomaton(transition, query)
@@ -224,7 +224,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		}
 		return modelBenchmarkDataQuestion("有限论域仅包含 rows 中的对象，每行两列依次给出 A、B 的完整布尔真值。判断 query 为真或假，返回 JSON 布尔值。", map[string]any{"rows": rows, "query": query}), answer
 	case "constraint-entailment":
-		c, d := r.int(1, 5), r.int(2, 6)
+		c, d := r.int(1, 9), r.int(2, 12)
 		possible, yes := 0, 0
 		for x := 0; x <= 3; x++ {
 			for y := 0; y <= 3; y++ {
@@ -254,17 +254,17 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		best := modelBenchmarkMinimumUnsat(claims)
 		return modelBenchmarkDataQuestion("x 是 0..10 的整数。claims 每项 [op,value] 分别表示 ge:>=、le:<=、eq:==、ne:!=。返回一个使条件无解的最少条目下标集合，0-based、升序；有多个同样短的正确集合时均接受。", map[string]any{"claims": claims}), best
 	case "missing-information":
-		total := r.int(4, 8)
-		known := r.int(0, 5)
+		total := r.int(8, 14)
+		known := r.int(0, 8)
 		mode := r.int(0, 2)
-		data := map[string]any{"total": total, "domain_max": 5}
+		data := map[string]any{"total": total, "domain_max": 8}
 		answer := map[string]any{"status": "unknown", "value": nil}
 		if mode != 0 {
 			data["known_x"] = known
 			if mode == 2 {
 				data["total"] = known + 6
 			}
-			if y := data["total"].(int) - known; y >= 0 && y <= 5 {
+			if y := data["total"].(int) - known; y >= 0 && y <= 8 {
 				answer = map[string]any{"status": "unique", "value": known}
 			} else {
 				answer = map[string]any{"status": "inconsistent", "value": nil}
@@ -310,7 +310,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 	case "ledger-reconciliation":
 		rows := []benchmarkLedgerEntry{}
 		answer := 0
-		for i := 0; i < 12; i++ {
+		for i := 0; i < 20; i++ {
 			kind := "payment"
 			if r.int(0, 2) == 0 {
 				kind = "refund"
@@ -349,7 +349,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 	case "long-context-join":
 		target := fmt.Sprintf("P%d", r.int(10, 99))
 		records := []benchmarkStockRecord{}
-		for warehouse := 0; warehouse < 6; warehouse++ {
+		for warehouse := 0; warehouse < 8; warehouse++ {
 			for version := 1; version <= 3; version++ {
 				records = append(records, benchmarkStockRecord{target, warehouse, version, r.int(0, 90), version == 3 && r.int(0, 1) == 1})
 			}
@@ -383,7 +383,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		}
 		return modelBenchmarkDataQuestion("退款政策 effective_day 当日及之后生效；订单采用下单日已生效政策中 effective_day 最大者，未来政策不追溯。goods_cents 为商品款，shipping_cents 运费始终不退；退商品款的 refund_percent%。返回退款整数分。", map[string]any{"policies": policies, "order_day": day, "goods_cents": goods, "shipping_cents": shipping}), goods * rate / 100
 	case "trace-loop-boundary":
-		start, end, step, mod := r.int(0, 3), r.int(12, 23), r.int(2, 4), r.int(2, 5)
+		start, end, step, mod := r.int(0, 3), r.int(24, 48), r.int(2, 4), r.int(2, 5)
 		sum := r.int(1, 5)
 		initial := sum
 		visited := []int{}
@@ -457,7 +457,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		for i := 0; i < 8; i++ {
 			items = append(items, benchmarkResourceItem{r.int(1, 7), r.int(1, 8), r.int(2, 20)})
 		}
-		budget, capacity := r.int(10, 18), r.int(12, 22)
+		budget, capacity := r.int(18, 36), r.int(24, 44)
 		best := modelBenchmarkBestResources(items, budget, capacity)
 		return modelBenchmarkDataQuestion("每项最多选一次，总 cost<=budget 且总 weight<=capacity，最大化总 value。返回被选项目的 0-based 下标升序数组。所有达到最大 value 的可行子集均接受。", map[string]any{"items": items, "budget": budget, "capacity": capacity}), best
 	case "route-with-windows":
@@ -479,7 +479,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		return modelBenchmarkDataQuestion("从节点 0 在 t=0 出发，节点 1..4 各访问一次，不需返回 0。travel 是对称耗时矩阵，windows[i-1]=[最早服务开始,最晚服务开始]；早到需等待，超最晚开始则不可行；每点服务 service 个时间单位。最小化最后服务结束时刻。返回 {\"order\":访问节点数组,\"finish_time\":时刻}，任一最优序列均接受；无可行解返回 order=[]、finish_time=-1。", data), answer
 	case "inventory-policy":
 		data := benchmarkInventoryData{Initial: r.int(3, 9), Threshold: r.int(2, 4), Batch: r.int(5, 9), Lead: r.int(1, 2), Demand: []int{}}
-		for i := 0; i < 8; i++ {
+		for i := 0; i < 12; i++ {
 			data.Demand = append(data.Demand, r.int(1, 6))
 		}
 		return modelBenchmarkDataQuestion("按日模拟库存，day 从 0 开始。每天先接收入库，再满足 demand[day]；不足时只卖现有库存，未满足需求丢失，不欠货。当天销售后库存<=threshold 且没有在途订单时下单 batch，恰在 day+lead 的当天销售前到货。返回每天销售/下单完成后的现有库存数组，不能把在途算现货。", data), modelBenchmarkInventory(data)
@@ -494,7 +494,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 			rows = append(rows, benchmarkFilterRow{ID: fmt.Sprintf("R%02d", i), Score: r.int(0, 20), Active: r.int(0, 3) != 0})
 		}
 		benchmarkShuffle(r, rows)
-		threshold := r.int(5, 12)
+		threshold := r.int(8, 16)
 		k := r.int(2, 4)
 		filtered := []benchmarkFilterRow{}
 		for _, row := range rows {
