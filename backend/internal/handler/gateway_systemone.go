@@ -177,7 +177,7 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 			}
 		}
 		// 准入终检：与其他网关入口一致，利润控制否决的账号不得承接本次请求。
-		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
+		admissionCtx := service.ContextWithSelectedAccountPlatform(service.ContextWithSelectionProfitGate(c.Request.Context(), selection), selection)
 		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
 		if vetoed {
 			if accountRelease != nil {

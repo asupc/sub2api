@@ -17,6 +17,11 @@ func ensureCompositeTargetPlatform(c *gin.Context, apiKey *service.APIKey, model
 	if _, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
 		return
 	}
+	// 多平台集合已由入口中间件解析时不得覆盖：探测器是单值猜测，会把集合
+	// 塌缩成一个可能错误的平台。
+	if _, multi := service.ResolvedTargetPlatformsFromContext(c.Request.Context()); multi {
+		return
+	}
 	if platform, ok := service.DetectModelPlatform(model); ok {
 		c.Request = c.Request.WithContext(service.WithResolvedTargetPlatform(c.Request.Context(), platform))
 	}
@@ -27,6 +32,18 @@ func compositeTargetPlatformAllowed(c *gin.Context, apiKey *service.APIKey, mode
 		return true
 	}
 	ensureCompositeTargetPlatform(c, apiKey, model)
+	// 多平台集合：与白名单有交集即放行（端点能力由集合中目标平台的账号承接，
+	// 调度层只会在认领账号中选号）。
+	if platforms, multi := service.ResolvedTargetPlatformsFromContext(c.Request.Context()); multi {
+		for _, platform := range platforms {
+			for _, allowedPlatform := range allowed {
+				if platform == allowedPlatform {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
 	if !ok {
 		return false
@@ -44,8 +61,11 @@ func compositeTargetPlatformResolved(c *gin.Context, apiKey *service.APIKey, mod
 		return true
 	}
 	ensureCompositeTargetPlatform(c, apiKey, model)
-	_, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context())
-	return ok
+	if _, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
+		return true
+	}
+	_, multi := service.ResolvedTargetPlatformsFromContext(c.Request.Context())
+	return multi
 }
 
 func effectiveAPIKeyPlatform(c *gin.Context, apiKey *service.APIKey) string {

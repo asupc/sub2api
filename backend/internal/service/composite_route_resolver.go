@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 )
@@ -112,11 +113,35 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 			if _, detectable := DetectModelPlatform(model); !detectable {
 				return decision, fmt.Errorf("resolve account model ownership: %w", err)
 			}
-		} else if ownership.Ambiguous {
-			decision.Reason = "model is exposed by multiple provider platforms"
+		} else if len(ownership.TargetPlatforms) > 1 {
+			// 多平台所有权：同族合并为统一调度池；跨族保持 fail-closed（一条
+			// 请求只能进一条网关协议链，无法跨族负载均衡），日志提示配显式
+			// 路由钉住平台。
+			platforms := ownership.TargetPlatforms
+			if !allConcreteRequestPlatforms(platforms) {
+				decision.Reason = "account model ownership has no concrete target platform"
+				return decision, nil
+			}
+			if CompositePlatformsShareGatewayFamily(platforms) {
+				return CompositeRouteDecision{
+					Matched:         true,
+					Source:          CompositeRouteSourceAccount,
+					GroupID:         groupID,
+					PublicModel:     model,
+					TargetPlatforms: platforms,
+					UpstreamModel:   model,
+					Endpoint:        endpoint,
+				}, nil
+			}
+			slog.Warn("composite_model_ownership_cross_family",
+				"group_id", groupID,
+				"model", model,
+				"platforms", strings.Join(platforms, ","))
+			decision.Reason = "model is exposed by multiple provider platforms across gateway families; configure an explicit composite route to pin one platform"
 			return decision, nil
 		} else if ownership.Matched {
-			platform := strings.TrimSpace(ownership.TargetPlatform)
+			platform, _ := ownership.SinglePlatform()
+			platform = strings.TrimSpace(platform)
 			if !isConcreteRequestPlatform(platform) {
 				decision.Reason = "account model ownership has no concrete target platform"
 				return decision, nil
@@ -146,6 +171,16 @@ func (r *CompositeRouteResolver) Resolve(ctx context.Context, groupID int64, mod
 	}
 	decision.Reason = "no explicit route or built-in detector match"
 	return decision, nil
+}
+
+// allConcreteRequestPlatforms 报告平台集合是否全部为可请求的具体平台。
+func allConcreteRequestPlatforms(platforms []string) bool {
+	for _, platform := range platforms {
+		if !isConcreteRequestPlatform(platform) {
+			return false
+		}
+	}
+	return true
 }
 
 func matchCompositeRoute(routes []CompositeModelRoute, model, endpoint string) (CompositeModelRoute, bool) {

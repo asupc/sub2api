@@ -909,6 +909,41 @@ func (s *SettingService) IsBudgetRectifierEnabled(ctx context.Context) bool {
 	return settings.Enabled && settings.ThinkingBudgetEnabled
 }
 
+// GetModelBenchmarkSettings 获取模型能力测评配置
+func (s *SettingService) GetModelBenchmarkSettings(ctx context.Context) (*ModelBenchmarkSettings, error) {
+	value, err := s.settingRepo.GetValue(ctx, SettingKeyModelBenchmarkSettings)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return DefaultModelBenchmarkSettings(), nil
+		}
+		return nil, fmt.Errorf("get model benchmark settings: %w", err)
+	}
+	if value == "" {
+		return DefaultModelBenchmarkSettings(), nil
+	}
+
+	var settings ModelBenchmarkSettings
+	if err := json.Unmarshal([]byte(value), &settings); err != nil {
+		return DefaultModelBenchmarkSettings(), nil
+	}
+
+	return &settings, nil
+}
+
+// SetModelBenchmarkSettings 设置模型能力测评配置
+func (s *SettingService) SetModelBenchmarkSettings(ctx context.Context, settings *ModelBenchmarkSettings) error {
+	if settings == nil {
+		return fmt.Errorf("settings cannot be nil")
+	}
+
+	data, err := json.Marshal(settings)
+	if err != nil {
+		return fmt.Errorf("marshal model benchmark settings: %w", err)
+	}
+
+	return s.settingRepo.Set(ctx, SettingKeyModelBenchmarkSettings, string(data))
+}
+
 // GetBetaPolicySettings 获取 Beta 策略配置
 func (s *SettingService) GetBetaPolicySettings(ctx context.Context) (*BetaPolicySettings, error) {
 	value, err := s.settingRepo.GetValue(ctx, SettingKeyBetaPolicySettings)

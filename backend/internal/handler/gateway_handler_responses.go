@@ -250,7 +250,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 		// 终检与准入后绑定必须使用选号结果携带的门：门安装在调度栈的局部
 		// ctx 上（composite/fallback 还可能解析出与入口分组不同的门），直接用
 		// requestCtx 会退化为空操作。
-		admissionCtx := service.ContextWithSelectionProfitGate(requestCtx, selection)
+		admissionCtx := service.ContextWithSelectedAccountPlatform(service.ContextWithSelectionProfitGate(requestCtx, selection), selection)
 		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
 		if vetoed {
 			if accountReleaseFunc != nil {

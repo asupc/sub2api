@@ -42,11 +42,11 @@ func TestResolveCompositeModelOwnershipKeepsProviderAccountsIsolated(t *testing.
 
 	deepSeekOwnership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "reasoning-alias")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, deepSeekOwnership)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformDeepseek}, Matched: true}, deepSeekOwnership)
 
 	openAIOwnership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "gpt-public")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, openAIOwnership)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformOpenAI}, Matched: true}, openAIOwnership)
 }
 
 // Scenario: 通配符和空映射不声明所有权
@@ -80,10 +80,12 @@ func TestResolveCompositeModelOwnershipRequiresNonEmptyExactMappings(t *testing.
 
 	ownership, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "grok-public")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformGrok, Matched: true}, ownership)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformGrok}, Matched: true}, ownership)
 }
 
-func TestResolveCompositeModelOwnershipAllowsSamePlatformAndRejectsCrossPlatformAliases(t *testing.T) {
+// Scenario: 同平台多账号共享别名 = 单平台所有权；同族多平台别名 = 平台集合
+//（族同构与合并调度由 Resolve 判定，所有权解析只负责如实上报认领平台）。
+func TestResolveCompositeModelOwnershipAllowsSamePlatformAndReturnsCrossPlatformSet(t *testing.T) {
 	groupID := int64(7)
 	repo := &compositeOwnershipAccountRepo{
 		accounts: []Account{
@@ -96,11 +98,11 @@ func TestResolveCompositeModelOwnershipAllowsSamePlatformAndRejectsCrossPlatform
 
 	samePlatform, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "shared-openai")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, samePlatform)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformOpenAI}, Matched: true}, samePlatform)
 
-	ambiguous, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "ambiguous")
+	multiPlatform, err := svc.resolveCompositeModelOwnership(context.Background(), groupID, "ambiguous")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{Ambiguous: true}, ambiguous)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformDeepseek, PlatformOpenAI}, Matched: true}, multiPlatform)
 }
 
 func TestNewGatewayServiceWiresCompositeModelOwnershipResolver(t *testing.T) {
@@ -228,4 +230,33 @@ func TestCompositeConcretePlatformsIncludeCNProviders(t *testing.T) {
 		require.True(t, isConcreteRequestPlatform(platform))
 		require.True(t, canCopyAccountsFromGroupPlatform(PlatformComposite, platform))
 	}
+}
+
+// Scenario: 多平台决策在账号选定后回填实际平台为单值 ctx
+func TestContextWithSelectedAccountPlatformBackfillsActualPlatform(t *testing.T) {
+	multi := WithResolvedTargetPlatforms(context.Background(), []string{PlatformQoder, PlatformWorkbuddy})
+	apiKey := &APIKey{Group: &Group{Platform: PlatformComposite}}
+
+	// 回填前：QuotaPlatform 为空（composite 兜底），单值不存在
+	_, hasSingle := ResolvedTargetPlatformFromContext(multi)
+	require.False(t, hasSingle)
+	require.Empty(t, QuotaPlatform(multi, apiKey))
+
+	// 选中集合内账号：回填该账号平台，计费配额按实际平台计量
+	sel := &AccountSelectionResult{Account: &Account{ID: 1, Platform: PlatformWorkbuddy}}
+	backfilled := ContextWithSelectedAccountPlatform(multi, sel)
+	platform, ok := ResolvedTargetPlatformFromContext(backfilled)
+	require.True(t, ok)
+	require.Equal(t, PlatformWorkbuddy, platform)
+	require.Equal(t, PlatformWorkbuddy, QuotaPlatform(backfilled, apiKey))
+
+	// 选中集合外账号（调度异常兜底）：不回填假归属
+	outOfSet := &AccountSelectionResult{Account: &Account{ID: 9, Platform: PlatformAnthropic}}
+	unchanged := ContextWithSelectedAccountPlatform(multi, outOfSet)
+	_, stillSingle := ResolvedTargetPlatformFromContext(unchanged)
+	require.False(t, stillSingle)
+
+	// 非多平台路径（无集合 key）：不做任何事
+	plain := context.Background()
+	require.Equal(t, plain, ContextWithSelectedAccountPlatform(plain, sel))
 }

@@ -155,7 +155,7 @@ func TestCompositeRouteResolverUsesAccountModelOwnershipForUnprefixedAlias(t *te
 	resolver.SetModelOwnershipResolver(func(_ context.Context, groupID int64, model string) (CompositeModelOwnership, error) {
 		require.Equal(t, int64(7), groupID)
 		require.Equal(t, "reasoning-alias", model)
-		return CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, nil
+		return CompositeModelOwnership{TargetPlatforms: []string{PlatformDeepseek}, Matched: true}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "reasoning-alias", CompositeRouteEndpointChatCompletions)
@@ -170,7 +170,7 @@ func TestCompositeRouteResolverUsesAccountModelOwnershipForUnprefixedAlias(t *te
 func TestCompositeRouteResolverAccountOwnershipOverridesBuiltInDetector(t *testing.T) {
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
-		return CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, nil
+		return CompositeModelOwnership{TargetPlatforms: []string{PlatformDeepseek}, Matched: true}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "gpt-5", CompositeRouteEndpointResponses)
@@ -196,7 +196,7 @@ func TestCompositeRouteResolverExplicitRouteBeatsAccountOwnership(t *testing.T) 
 		}},
 	})
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
-		return CompositeModelOwnership{TargetPlatform: PlatformDeepseek, Matched: true}, nil
+		return CompositeModelOwnership{TargetPlatforms: []string{PlatformDeepseek}, Matched: true}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "reasoning-alias", CompositeRouteEndpointChatCompletions)
@@ -208,11 +208,28 @@ func TestCompositeRouteResolverExplicitRouteBeatsAccountOwnership(t *testing.T) 
 	require.Equal(t, "gpt-5", decision.UpstreamModel)
 }
 
-// Scenario: 跨平台同名别名不被猜测
-func TestCompositeRouteResolverDoesNotGuessAmbiguousAccountOwnership(t *testing.T) {
+// Scenario: 同族多平台所有权合并为统一调度集合（TargetPlatform 留空）
+func TestCompositeRouteResolverMergesSameFamilyMultiPlatformOwnership(t *testing.T) {
 	resolver := NewCompositeRouteResolver(nil)
 	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
-		return CompositeModelOwnership{Ambiguous: true}, nil
+		return CompositeModelOwnership{TargetPlatforms: []string{PlatformQoder, PlatformWorkbuddy}, Matched: true}, nil
+	})
+
+	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointChatCompletions)
+
+	require.NoError(t, err)
+	require.True(t, decision.Matched)
+	require.Equal(t, CompositeRouteSourceAccount, decision.Source)
+	require.Empty(t, decision.TargetPlatform)
+	require.Equal(t, []string{PlatformQoder, PlatformWorkbuddy}, decision.TargetPlatforms)
+	require.Equal(t, "shared-alias", decision.UpstreamModel)
+}
+
+// Scenario: 跨网关族的多平台别名不被猜测——一条请求只能进一条协议链
+func TestCompositeRouteResolverDoesNotGuessCrossFamilyAccountOwnership(t *testing.T) {
+	resolver := NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (CompositeModelOwnership, error) {
+		return CompositeModelOwnership{TargetPlatforms: []string{PlatformAnthropic, PlatformQoder}, Matched: true}, nil
 	})
 
 	decision, err := resolver.Resolve(context.Background(), 7, "shared-alias", CompositeRouteEndpointChatCompletions)
@@ -220,7 +237,9 @@ func TestCompositeRouteResolverDoesNotGuessAmbiguousAccountOwnership(t *testing.
 	require.NoError(t, err)
 	require.False(t, decision.Matched)
 	require.Empty(t, decision.TargetPlatform)
-	require.Equal(t, "model is exposed by multiple provider platforms", decision.Reason)
+	require.Empty(t, decision.TargetPlatforms)
+	require.Contains(t, decision.Reason, "model is exposed by multiple provider platforms")
+	require.Contains(t, decision.Reason, "explicit composite route")
 }
 
 func TestCompositeRouteResolverOwnershipLookupErrorFallsBackOnlyForDetectableModels(t *testing.T) {

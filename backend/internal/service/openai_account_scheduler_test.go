@@ -1280,10 +1280,10 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_AccountModelRouteOnlyUs
 	repo := schedulerTestOpenAIAccountRepo{accounts: []Account{owner, nonOwner}}
 	ownership, err := (&GatewayService{accountRepo: repo}).resolveCompositeModelOwnership(ctx, groupID, "team-alias")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, ownership)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformOpenAI}, Matched: true}, ownership)
 	ctx = WithCompositeRouteDecision(ctx, CompositeRouteDecision{
 		Matched: true, Source: CompositeRouteSourceAccount, GroupID: groupID,
-		PublicModel: "team-alias", TargetPlatform: ownership.TargetPlatform, UpstreamModel: "team-alias",
+		PublicModel: "team-alias", TargetPlatform: ownership.TargetPlatforms[0], UpstreamModel: "team-alias",
 	})
 
 	for _, tt := range []struct {
@@ -2280,7 +2280,7 @@ func TestOpenAIGatewayService_RecheckSelectedOpenAIAccountFromDB_SimpleModeUsesF
 	requestedGroupID := int64(100)
 
 	for _, groupID := range []*int64{nil, &requestedGroupID} {
-		fresh := svc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, groupID, PlatformOpenAI, "gpt-5.1", false, "")
+		fresh := svc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, groupID, newOpenAIPlatformConstraint(PlatformOpenAI), "gpt-5.1", false, "")
 		require.NotNil(t, fresh)
 		require.Equal(t, grouped.ID, fresh.ID)
 	}
@@ -2293,8 +2293,8 @@ func TestOpenAIGatewayService_RecheckSelectedOpenAIAccountFromDB_SimpleModeUsesF
 		cfg:               &config.Config{RunMode: config.RunModeStandard},
 		schedulerSnapshot: &SchedulerSnapshotService{cache: &openAISnapshotCacheStub{}},
 	}
-	require.Nil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, nil, PlatformOpenAI, "gpt-5.1", false, ""))
-	require.NotNil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &ungrouped, nil, PlatformOpenAI, "gpt-5.1", false, ""))
+	require.Nil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &grouped, nil, newOpenAIPlatformConstraint(PlatformOpenAI), "gpt-5.1", false, ""))
+	require.NotNil(t, standardSvc.recheckSelectedOpenAIAccountFromDB(context.Background(), &ungrouped, nil, newOpenAIPlatformConstraint(PlatformOpenAI), "gpt-5.1", false, ""))
 }
 
 func TestOpenAIGatewayService_SelectAccountWithScheduler_PreviousResponseSticky(t *testing.T) {
@@ -3950,10 +3950,10 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LegacyAccountModelRoute
 	repo := schedulerTestOpenAIAccountRepo{accounts: []Account{owner, nonOwner}}
 	ownership, err := (&GatewayService{accountRepo: repo}).resolveCompositeModelOwnership(ctx, groupID, "team-alias")
 	require.NoError(t, err)
-	require.Equal(t, CompositeModelOwnership{TargetPlatform: PlatformOpenAI, Matched: true}, ownership)
+	require.Equal(t, CompositeModelOwnership{TargetPlatforms: []string{PlatformOpenAI}, Matched: true}, ownership)
 	ctx = WithCompositeRouteDecision(ctx, CompositeRouteDecision{
 		Matched: true, Source: CompositeRouteSourceAccount, GroupID: groupID,
-		PublicModel: "team-alias", TargetPlatform: ownership.TargetPlatform, UpstreamModel: "team-alias",
+		PublicModel: "team-alias", TargetPlatform: ownership.TargetPlatforms[0], UpstreamModel: "team-alias",
 	})
 
 	for _, tt := range []struct {
@@ -4048,4 +4048,73 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_LegacyAccountModelRoute
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()
 	}
+}
+
+// Scenario: 复合分组同族多平台统一调度——platformOverride 集合合并两平台账号池，
+// 跨平台 failover 生效，归属闸门（仅认领账号可服务）延续。
+func TestOpenAIGatewayService_SelectAccountWithScheduler_MultiPlatformUnifiedPool(t *testing.T) {
+	groupID := int64(79)
+	ctx := WithCompositeRouteDecision(context.Background(), CompositeRouteDecision{
+		Matched:         true,
+		Source:          CompositeRouteSourceAccount,
+		GroupID:         groupID,
+		PublicModel:     "shared-alias",
+		TargetPlatforms: []string{PlatformQoder, PlatformWorkbuddy},
+		UpstreamModel:   "shared-alias",
+		Endpoint:        CompositeRouteEndpointChatCompletions,
+	})
+
+	newRepo := func() *schedulerTestOpenAIAccountRepo {
+		repo := &schedulerTestOpenAIAccountRepo{accounts: []Account{
+			{
+				ID: 1, Platform: PlatformQoder, Type: AccountTypeOAuth, Priority: 1,
+				Status: StatusActive, Schedulable: true, Concurrency: 1,
+				Credentials: map[string]any{"model_mapping": map[string]any{"shared-alias": "qoder-internal"}},
+				GroupIDs:    []int64{groupID},
+			},
+			{
+				ID: 2, Platform: PlatformWorkbuddy, Type: AccountTypeOAuth, Priority: 2,
+				Status: StatusActive, Schedulable: true, Concurrency: 1,
+				Credentials: map[string]any{"model_mapping": map[string]any{"shared-alias": "workbuddy-internal"}},
+				GroupIDs:    []int64{groupID},
+			},
+			{
+				// 非认领账号：同分组 openai 平台但未声明该别名映射
+				ID: 3, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Priority: 0,
+				Status: StatusActive, Schedulable: true, Concurrency: 1,
+				GroupIDs: []int64{groupID},
+			},
+		}}
+		return repo
+	}
+	svc := &OpenAIGatewayService{accountRepo: newRepo()}
+
+	// 1. 统一池：优先级最高的认领账号胜出（qoder #1）
+	selection, _, err := svc.SelectAccountWithSchedulerForCapability(
+		ctx, &groupID, "", "", "shared-alias", nil,
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+		false, false, false, PlatformQoder, PlatformWorkbuddy,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(1), selection.Account.ID)
+
+	// 2. 跨平台 failover：排除 qoder 账号后落到 workbuddy 认领账号
+	selection, _, err = svc.SelectAccountWithSchedulerForCapability(
+		ctx, &groupID, "", "", "shared-alias", map[int64]struct{}{1: {}},
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+		false, false, false, PlatformQoder, PlatformWorkbuddy,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Equal(t, int64(2), selection.Account.ID)
+	require.Equal(t, PlatformWorkbuddy, selection.Account.Platform)
+
+	// 3. 归属闸门：两个认领账号都被排除后不可兜底到非认领账号 #3
+	_, _, err = svc.SelectAccountWithSchedulerForCapability(
+		ctx, &groupID, "", "", "shared-alias", map[int64]struct{}{1: {}, 2: {}},
+		OpenAIUpstreamTransportAny, OpenAIEndpointCapabilityChatCompletions,
+		false, false, false, PlatformQoder, PlatformWorkbuddy,
+	)
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
 }

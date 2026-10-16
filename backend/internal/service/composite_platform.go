@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/domain"
@@ -32,11 +34,106 @@ func ResolvedTargetPlatformFromContext(ctx context.Context) (string, bool) {
 	return platform, true
 }
 
+// WithResolvedTargetPlatforms stores the same-gateway-family provider set
+// resolved for a composite multi-platform decision. The single-platform key
+// stays unset until an account is selected.
+func WithResolvedTargetPlatforms(ctx context.Context, platforms []string) context.Context {
+	normalized := NormalizeCompositePlatformSet(platforms)
+	if ctx == nil || len(normalized) < 2 {
+		return ctx
+	}
+	return context.WithValue(ctx, ctxkey.ResolvedTargetPlatforms, normalized)
+}
+
+// ResolvedTargetPlatformsFromContext returns the multi-platform provider set
+// for the current request, if a composite decision resolved to more than one
+// platform.
+func ResolvedTargetPlatformsFromContext(ctx context.Context) ([]string, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	platforms, ok := ctx.Value(ctxkey.ResolvedTargetPlatforms).([]string)
+	if !ok || len(platforms) < 2 {
+		return nil, false
+	}
+	return platforms, true
+}
+
+// ContextWithSelectedAccountPlatform 在复合分组多平台决策下，把选号结果中
+// 账号的实际平台回填为单值 ResolvedTargetPlatform，使计费配额（QuotaPlatform）、
+// 渠道费率（channelLookupPlatform）、ops 平台归因等单值消费者无需感知集合。
+// 仅当 ctx 处于「多平台集合且无单值」状态时写入；failover 换号后每次重选重调，
+// 天然 per-attempt 正确。单平台路径（无集合 key）不做任何事。
+func ContextWithSelectedAccountPlatform(ctx context.Context, sel *AccountSelectionResult) context.Context {
+	if ctx == nil || sel == nil || sel.Account == nil {
+		return ctx
+	}
+	if _, hasSingle := ResolvedTargetPlatformFromContext(ctx); hasSingle {
+		return ctx
+	}
+	platforms, multi := ResolvedTargetPlatformsFromContext(ctx)
+	if !multi {
+		return ctx
+	}
+	if !slices.Contains(platforms, sel.Account.Platform) {
+		// 调度层异常兜底：选中账号不在候选集合内时不回填假归属。
+		return ctx
+	}
+	return WithResolvedTargetPlatform(ctx, sel.Account.Platform)
+}
+
+// NormalizeCompositePlatformSet trims, deduplicates (case-insensitive) and
+// sorts a platform set for deterministic storage and cache/ctx reuse.
+func NormalizeCompositePlatformSet(platforms []string) []string {
+	if len(platforms) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(platforms))
+	normalized := make([]string, 0, len(platforms))
+	for _, platform := range platforms {
+		platform = strings.TrimSpace(platform)
+		if platform == "" {
+			continue
+		}
+		lower := strings.ToLower(platform)
+		if _, dup := seen[lower]; dup {
+			continue
+		}
+		seen[lower] = struct{}{}
+		normalized = append(normalized, platform)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+// CompositePlatformsShareGatewayFamily reports whether every platform in the
+// set is served by the same gateway family (domain.UsesOpenAIGateway binary
+// split). Ownership that spans families stays fail-closed because a single
+// request can only enter one gateway handler chain.
+func CompositePlatformsShareGatewayFamily(platforms []string) bool {
+	if len(platforms) <= 1 {
+		return true
+	}
+	first := domain.UsesOpenAIGateway(platforms[0])
+	for _, platform := range platforms[1:] {
+		if domain.UsesOpenAIGateway(platform) != first {
+			return false
+		}
+	}
+	return true
+}
+
 func WithCompositeRouteDecision(ctx context.Context, decision CompositeRouteDecision) context.Context {
 	if ctx == nil || !decision.Matched {
 		return ctx
 	}
-	ctx = WithResolvedTargetPlatform(ctx, decision.TargetPlatform)
+	// 多平台决策：写集合、不写单值（避免下游读到假平台）；账号选定后由
+	// ContextWithSelectedAccountPlatform 回填实际平台为单值。
+	if len(decision.TargetPlatforms) > 1 {
+		ctx = WithResolvedTargetPlatforms(ctx, decision.TargetPlatforms)
+	} else {
+		ctx = WithResolvedTargetPlatform(ctx, decision.TargetPlatform)
+	}
 	if model := strings.TrimSpace(decision.UpstreamModel); model != "" {
 		ctx = context.WithValue(ctx, ctxkey.ResolvedUpstreamModel, model)
 	}
@@ -195,6 +292,25 @@ func (s *GatewayService) resolveCompositeRouteDecision(ctx context.Context, grou
 			TargetPlatform: platform,
 			UpstreamModel:  upstreamModel,
 			Endpoint:       normalizeCompositeRouteEndpoint(endpoint),
+		}, true, nil
+	}
+	if platforms, ok := ResolvedTargetPlatformsFromContext(ctx); ok {
+		upstreamModel := requestedModel
+		if resolvedModel, modelOK := ResolvedUpstreamModelFromContext(ctx); modelOK {
+			upstreamModel = resolvedModel
+		}
+		source := CompositeRouteSourceDetector
+		if resolvedSource, sourceOK := CompositeRouteSourceFromContext(ctx); sourceOK {
+			source = resolvedSource
+		}
+		return CompositeRouteDecision{
+			Matched:         true,
+			Source:          source,
+			GroupID:         group.ID,
+			PublicModel:     requestedModel,
+			TargetPlatforms: platforms,
+			UpstreamModel:   upstreamModel,
+			Endpoint:        normalizeCompositeRouteEndpoint(endpoint),
 		}, true, nil
 	}
 	decision, err := s.compositeResolver.Resolve(ctx, group.ID, requestedModel, endpoint)

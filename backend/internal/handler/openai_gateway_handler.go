@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -202,10 +203,18 @@ func resolveOpenAIMessagesDispatchMappedModel(c *gin.Context, apiKey *service.AP
 	}
 	// composite 解析到 grok/CN/OpenCode 目标时调度级映射不适用（Group 级映射的
 	// gpt-5.x 默认值是 openai 专属,发给这些上游必错）,模型改写交给账号级 model_mapping。
+	// 多平台集合含任一此类成员时同样不适用（选号可能落到该成员平台）。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
 			(platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform)) {
 			return ""
+		}
+		if platforms, multi := service.ResolvedTargetPlatformsFromContext(c.Request.Context()); multi {
+			for _, platform := range platforms {
+				if platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform) {
+					return ""
+				}
+			}
 		}
 	}
 	return strings.TrimSpace(apiKey.Group.ResolveMessagesDispatchModel(requestedModel))
@@ -287,6 +296,38 @@ func openAICompatibleRequestPlatform(ctx context.Context, apiKey *service.APIKey
 	return service.PlatformOpenAI
 }
 
+// openAICompositeSchedulingPlatforms 返回文本调度入口的候选平台集合：
+// 复合分组多平台决策时为集合成员（具体平台 ID，不折叠，统一调度池），
+// 否则回退单值（与旧 openAICompatibleRequestPlatform 语义一致）。
+func openAICompositeSchedulingPlatforms(ctx context.Context, apiKey *service.APIKey) []string {
+	if platforms, multi := service.ResolvedTargetPlatformsFromContext(ctx); multi {
+		return platforms
+	}
+	return []string{openAICompatibleRequestPlatform(ctx, apiKey)}
+}
+
+// openAICapabilityPlatformFor 返回端点能力判定的代表平台：集合含 openai 时
+// 为 openai（维持 Responses/生图能力判定），否则为空串（与旧单值非 openai
+// 平台的行为一致）。
+func openAICapabilityPlatformFor(platforms []string) string {
+	for _, platform := range platforms {
+		if platform == service.PlatformOpenAI {
+			return platform
+		}
+	}
+	return ""
+}
+
+// openAISchedulingPlatformForLog 返回日志与无账号错误分类用的单值标签：
+// 单平台为平台名，多平台为空串（分类器按单平台诊断池，多平台时保持 503 兜底，
+// 不把集合误标为某个成员平台）。
+func openAISchedulingPlatformForLog(platforms []string) string {
+	if len(platforms) == 1 {
+		return platforms[0]
+	}
+	return ""
+}
+
 func openAIResponsesRequiredCapability(imageIntent bool, platform string) service.OpenAIEndpointCapability {
 	if imageIntent && platform == service.PlatformOpenAI {
 		return service.OpenAIEndpointCapabilityResponses
@@ -320,10 +361,18 @@ func allowOpenAICompatibleMessagesDispatch(c *gin.Context, apiKey *service.APIKe
 	}
 	// composite 分组解析到 grok/CN/OpenCode Go 目标时与对应独立分组同语义豁免；
 	// 解析到 openai 目标则受 composite 分组自身的可配置开关控制。
+	// 多平台集合含任一 grok/CN 成员时同样豁免（选号可能落到该成员平台）。
 	if apiKey.Group.Platform == service.PlatformComposite && c != nil && c.Request != nil {
 		if platform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok &&
 			(platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform)) {
 			return true
+		}
+		if platforms, multi := service.ResolvedTargetPlatformsFromContext(c.Request.Context()); multi {
+			for _, platform := range platforms {
+				if platform == service.PlatformGrok || service.IsMultiProtocolAPIKeyProvider(platform) {
+					return true
+				}
+			}
 		}
 	}
 	return apiKey.Group.AllowMessagesDispatch
@@ -591,7 +640,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	// Get subscription info (may be nil)
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+	requestPlatforms := openAICompositeSchedulingPlatforms(c.Request.Context(), apiKey)
+	requestPlatform := openAISchedulingPlatformForLog(requestPlatforms)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -655,7 +705,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	// 复用前置权限与并发阶段在未修改 body 上确认的显式生图意图，避免大 tools 请求重复扫描。
 	// 该判断已排除 Codex 被动 image_gen namespace，避免 CC-only 账号被误过滤（#4476）。
 	needsResponses := nativeV2 || legacyCompact
-	requiredCapability := openAIResponsesRequiredCapabilityForRequest(imageIntent, needsResponses, requestPlatform)
+	requiredCapability := openAIResponsesRequiredCapabilityForRequest(imageIntent, needsResponses, openAICapabilityPlatformFor(requestPlatforms))
 
 	// 分组利润控制：请求级装配定价上下文——pricingAt 固定本请求的
 	// D 与计费高峰因子，选号、槽位终检与全部 failover 重入共用同一门与阈值。
@@ -685,7 +735,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			requireCompact,
 			false,
 			!imageIntent,
-			requestPlatform,
+			requestPlatforms...,
 		)
 		if err != nil {
 			if failoverClientGone(c) {
@@ -738,7 +788,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
-		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() {
+		if previousResponseID != "" && slices.Contains(requestPlatforms, service.PlatformOpenAI) && !account.IsOpenAIApiKey() {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead
 			// of silently deleting continuation state from a mixed account pool.
@@ -1242,7 +1292,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+	requestPlatforms := openAICompositeSchedulingPlatforms(c.Request.Context(), apiKey)
+	requestPlatform := openAISchedulingPlatformForLog(requestPlatforms)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -1318,7 +1369,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			false,
 			false,
 			true,
-			requestPlatform,
+			requestPlatforms...,
 		)
 		if err != nil {
 			if failoverClientGone(c) {
@@ -1359,6 +1410,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
+		// 复合分组多平台决策：把实际账号平台回填为单值 ctx（计费/渠道/ops 归因）。
+		c.Request = c.Request.WithContext(service.ContextWithSelectedAccountPlatform(c.Request.Context(), selection))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)
@@ -2289,7 +2342,7 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 
 	// 终检与准入后绑定使用选号结果携带的门：composite 等跨分组调度解析出的
 	// 门只存在于调度栈的局部 ctx，必须经选号结果重放到本函数的 ctx 上。
-	ctx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
+	ctx := service.ContextWithSelectedAccountPlatform(service.ContextWithSelectionProfitGate(c.Request.Context(), selection), selection)
 	account := selection.Account
 	if selection.Acquired {
 		latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)
@@ -2547,10 +2600,21 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 	ctx = c.Request.Context()
 	if apiKey.Group != nil && apiKey.Group.Platform == service.PlatformComposite {
-		platform, ok := service.ResolvedTargetPlatformFromContext(ctx)
-		if !ok || !isResponsesWebSocketCompositePlatform(platform) {
-			closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "Responses WebSocket API only supports OpenAI-compatible models for composite groups")
-			return
+		// 多平台集合：全部成员都受 WS 支持才放行（任一 CN 成员都无法通过
+		// transport 过滤/HTTP 桥转换，与单值判定同语义收紧）。
+		if platforms, multi := service.ResolvedTargetPlatformsFromContext(ctx); multi {
+			for _, platform := range platforms {
+				if !isResponsesWebSocketCompositePlatform(platform) {
+					closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "Responses WebSocket API only supports OpenAI-compatible models for composite groups")
+					return
+				}
+			}
+		} else {
+			platform, ok := service.ResolvedTargetPlatformFromContext(ctx)
+			if !ok || !isResponsesWebSocketCompositePlatform(platform) {
+				closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "Responses WebSocket API only supports OpenAI-compatible models for composite groups")
+				return
+			}
 		}
 	}
 	previousResponseID := strings.TrimSpace(gjson.GetBytes(firstMessage, "previous_response_id").String())
@@ -2659,10 +2723,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	requestPlatform := openAICompatibleRequestPlatform(ctx, apiKey)
+	requestPlatforms := openAICompositeSchedulingPlatforms(ctx, apiKey)
+	requestPlatform := openAISchedulingPlatformForLog(requestPlatforms)
 	requiredTransport := service.OpenAIUpstreamTransportResponsesWebsocketV2Ingress
 	if requestPlatform == service.PlatformGrok {
 		requiredTransport = service.OpenAIUpstreamTransportHTTPSSE
+	} else if len(requestPlatforms) > 1 {
+		// 多平台集合（WS 守卫保证成员 ∈ {openai, grok}）：transport 交给调度器
+		// 按账号能力匹配（grok 账号走 HTTPSSE 桥，openai 账号走 V2 ingress）。
+		requiredTransport = service.OpenAIUpstreamTransportAny
 	}
 	if err := h.billingCacheService.CheckBillingEligibility(ctx, apiKey.User, apiKey, apiKey.Group, subscription, service.QuotaPlatform(c.Request.Context(), apiKey)); err != nil {
 		reqLog.Info("openai.websocket_billing_eligibility_check_failed", zap.Error(err))
@@ -2775,7 +2844,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	// WSv2 传输本身已隐含 Responses 支持，此处为防御性对齐。
 	// 使用 IsExplicitImageGenerationIntent 排除被动 namespace 声明（#4476）。
 	requiredCapability := service.OpenAIEndpointCapabilityChatCompletions
-	if service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, firstMessage) && requestPlatform == service.PlatformOpenAI {
+	if service.IsExplicitImageGenerationIntent("/v1/responses", reqModel, firstMessage) && slices.Contains(requestPlatforms, service.PlatformOpenAI) {
 		requiredCapability = service.OpenAIEndpointCapabilityResponses
 	}
 
@@ -2804,7 +2873,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			false,
 			previousResponseCanMove,
 			!imageIntent,
-			requestPlatform,
+			requestPlatforms...,
 		)
 		if err != nil {
 			reqLog.Warn("openai.websocket_account_select_failed",
@@ -2834,7 +2903,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 		// 终检、准入后绑定与后续 turn 级复核都使用选号结果携带的门（composite
 		// 等跨分组调度的门只存在于调度栈局部 ctx）；准入成功后并入连接 ctx。
-		admissionCtx := service.ContextWithSelectionProfitGate(ctx, selection)
+		admissionCtx := service.ContextWithSelectedAccountPlatform(service.ContextWithSelectionProfitGate(ctx, selection), selection)
 		accountReleaseFunc := selection.ReleaseFunc
 		if selection.Acquired {
 			// 调度器已抢槽路径同样终检：选号与抢槽之间账号倍率可能刷新。

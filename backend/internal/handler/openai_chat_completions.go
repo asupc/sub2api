@@ -123,7 +123,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 
 	subscription, _ := middleware2.GetSubscriptionFromContext(c)
-	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+	requestPlatforms := openAICompositeSchedulingPlatforms(c.Request.Context(), apiKey)
+	requestPlatform := openAISchedulingPlatformForLog(requestPlatforms)
 
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	routingStart := time.Now()
@@ -191,7 +192,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			false,
 			false,
 			true,
-			requestPlatform,
+			requestPlatforms...,
 		)
 		if err != nil {
 			if failoverClientGone(c) {
@@ -231,6 +232,8 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_chat_completions.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
+		// 复合分组多平台决策：把实际账号平台回填为单值 ctx（计费/渠道/ops 归因）。
+		c.Request = c.Request.WithContext(service.ContextWithSelectedAccountPlatform(c.Request.Context(), selection))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, reqStream, &streamStarted, reqLog)

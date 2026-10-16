@@ -388,7 +388,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_Anthropic(t *testing.T
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(1), acc.ID, "应选择优先级最高的 anthropic 账户")
@@ -473,7 +473,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_Antigravity(t *testing
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-sonnet-4-5", nil, PlatformAntigravity)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-sonnet-4-5", nil, []string{PlatformAntigravity})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID)
@@ -504,7 +504,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_PriorityAndLastUsed(t 
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID, "同优先级应选择最久未用的账户")
@@ -532,7 +532,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_GeminiOAuthPreference(
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-2.5-pro", nil, PlatformGemini)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-2.5-pro", nil, []string{PlatformGemini})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID, "同优先级且未使用时应优先选择OAuth账户")
@@ -555,7 +555,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_NoAvailableAccounts(t 
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 	require.Error(t, err)
 	require.Nil(t, acc)
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
@@ -585,7 +585,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_AllExcluded(t *testing
 	}
 
 	excludedIDs := map[int64]struct{}{1: {}, 2: {}}
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", excludedIDs, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", excludedIDs, []string{PlatformAnthropic})
 	require.Error(t, err)
 	require.Nil(t, acc)
 }
@@ -660,7 +660,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_Schedulability(t *test
 				cfg:         testConfig(),
 			}
 
-			acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+			acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 			require.NoError(t, err)
 			require.NotNil(t, acc)
 			require.Equal(t, tt.expectedID, acc.ID)
@@ -694,7 +694,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickySession(t *testi
 			cfg:         testConfig(),
 		}
 
-		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 		require.NoError(t, err)
 		require.NotNil(t, acc)
 		require.Equal(t, int64(1), acc.ID, "应返回粘性会话绑定的账户")
@@ -723,7 +723,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickySession(t *testi
 		}
 
 		// 请求 anthropic 平台，但粘性会话绑定的是 antigravity 账户
-		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 		require.NoError(t, err)
 		require.NotNil(t, acc)
 		require.Equal(t, int64(2), acc.ID, "粘性会话账户平台不匹配，应降级选择同平台账户")
@@ -753,7 +753,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickySession(t *testi
 		}
 
 		excludedIDs := map[int64]struct{}{1: {}}
-		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", excludedIDs, PlatformAnthropic)
+		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", excludedIDs, []string{PlatformAnthropic})
 		require.NoError(t, err)
 		require.NotNil(t, acc)
 		require.Equal(t, int64(2), acc.ID, "粘性会话账户被排除，应选择其他账户")
@@ -781,7 +781,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickySession(t *testi
 			cfg:         testConfig(),
 		}
 
-		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+		acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-123", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 		require.NoError(t, err)
 		require.NotNil(t, acc)
 		require.Equal(t, int64(2), acc.ID, "粘性会话账户不可调度，应选择其他账户")
@@ -861,7 +861,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_RoutedStickySessionCle
 		groupRepo:   groupRepo,
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "session-123", requestedModel, nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "session-123", requestedModel, nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID)
@@ -912,7 +912,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_RoutedStickySessionHit
 		groupRepo:   groupRepo,
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "session-456", requestedModel, nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "session-456", requestedModel, nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(1), acc.ID)
@@ -959,7 +959,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_RoutedFallbackToNormal
 		groupRepo:   groupRepo,
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "", requestedModel, nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "", requestedModel, nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(1), acc.ID)
@@ -993,7 +993,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_NoModelSupport(t *test
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 	require.Error(t, err)
 	require.Nil(t, acc)
 	require.Contains(t, err.Error(), "supporting model")
@@ -1021,7 +1021,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_GeminiPreferOAuth(t *t
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-2.5-pro", nil, PlatformGemini)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-2.5-pro", nil, []string{PlatformGemini})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID)
@@ -1065,12 +1065,12 @@ func TestGatewayService_SelectAccountForModelWithPlatform_GeminiAPIKeyModelMappi
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-2.5-flash", nil, PlatformGemini)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-2.5-flash", nil, []string{PlatformGemini})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID, "应过滤不支持请求模型的 APIKey 账号")
 
-	acc, err = svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-3-pro-preview", nil, PlatformGemini)
+	acc, err = svc.selectAccountForModelWithPlatform(ctx, nil, "", "gemini-3-pro-preview", nil, []string{PlatformGemini})
 	require.Error(t, err)
 	require.Nil(t, acc)
 	require.Contains(t, err.Error(), "supporting model")
@@ -1101,7 +1101,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickyInGroup(t *testi
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "session-group", "", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "session-group", "", nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(1), acc.ID)
@@ -1138,7 +1138,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_StickyModelMismatchFal
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-miss", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "session-miss", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID)
@@ -1167,7 +1167,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_PreferNeverUsed(t *tes
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "claude-3-5-sonnet-20241022", nil, []string{PlatformAnthropic})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID)
@@ -1188,7 +1188,7 @@ func TestGatewayService_SelectAccountForModelWithPlatform_NoAccounts(t *testing.
 		cfg:         testConfig(),
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "", nil, PlatformAnthropic)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, nil, "", "", nil, []string{PlatformAnthropic})
 	require.Error(t, err)
 	require.Nil(t, acc)
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
@@ -3581,8 +3581,72 @@ func TestGatewayService_SelectAccountForModelWithPlatform_RoutedOpenAIGroup(t *t
 		groupRepo:   groupRepo,
 	}
 
-	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "", requestedModel, nil, PlatformOpenAI)
+	acc, err := svc.selectAccountForModelWithPlatform(ctx, &groupID, "", requestedModel, nil, []string{PlatformOpenAI})
 	require.NoError(t, err)
 	require.NotNil(t, acc)
 	require.Equal(t, int64(2), acc.ID, "routed account must win over the higher-priority unrouted one")
+}
+
+// Scenario: 复合分组同族多平台统一池——跨平台 failover 与归属闸门
+func TestGatewayService_SelectAccountForModelWithExclusions_CompositeMultiPlatformPool(t *testing.T) {
+	groupID := int64(78)
+	repo := &mockAccountRepoForPlatform{
+		accounts: []Account{
+			{
+				ID: 1, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Priority: 1,
+				Status: StatusActive, Schedulable: true,
+				Credentials:   map[string]any{"model_mapping": map[string]any{"shared-alias": "claude-opus-4-8"}},
+				AccountGroups: []AccountGroup{{GroupID: groupID}},
+			},
+			{
+				ID: 2, Platform: PlatformTypeSafe, Type: AccountTypeAPIKey, Priority: 2,
+				Status: StatusActive, Schedulable: true,
+				Credentials:   map[string]any{"model_mapping": map[string]any{"shared-alias": "jev-latest"}},
+				AccountGroups: []AccountGroup{{GroupID: groupID}},
+			},
+			{
+				// 非认领账号：同分组同平台但未声明该别名映射，绝不能进入统一池
+				ID: 3, Platform: PlatformAnthropic, Type: AccountTypeAPIKey, Priority: 0,
+				Status: StatusActive, Schedulable: true,
+				AccountGroups: []AccountGroup{{GroupID: groupID}},
+			},
+		},
+		accountsByID: map[int64]*Account{},
+	}
+	for i := range repo.accounts {
+		repo.accountsByID[repo.accounts[i].ID] = &repo.accounts[i]
+	}
+
+	group := &Group{ID: groupID, Platform: PlatformComposite, Status: StatusActive, Hydrated: true}
+	svc := &GatewayService{
+		accountRepo: repo,
+		groupRepo:   &mockGroupRepoForGateway{groups: map[int64]*Group{groupID: group}},
+		cfg:         testConfig(),
+	}
+	ctx := WithCompositeRouteDecision(context.Background(), CompositeRouteDecision{
+		Matched:         true,
+		Source:          CompositeRouteSourceAccount,
+		GroupID:         groupID,
+		PublicModel:     "shared-alias",
+		TargetPlatforms: []string{PlatformAnthropic, PlatformTypeSafe},
+		UpstreamModel:   "shared-alias",
+		Endpoint:        CompositeRouteEndpointMessages,
+	})
+
+	// 不排除：优先级最高的认领账号胜出（anthropic #1, priority 1 < typesafe #2 的 2）
+	account, err := svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "shared-alias", nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, int64(1), account.ID)
+
+	// 跨平台 failover：排除 anthropic 认领账号后落到 typesafe 认领账号
+	account, err = svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "shared-alias", map[int64]struct{}{1: {}})
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, int64(2), account.ID)
+	require.Equal(t, PlatformTypeSafe, account.Platform)
+
+	// 归属闸门：两个认领账号都被排除后，非认领账号 #3 不可兜底 → 无可用账号
+	_, err = svc.SelectAccountForModelWithExclusions(ctx, &groupID, "", "shared-alias", map[int64]struct{}{1: {}, 2: {}})
+	require.ErrorIs(t, err, ErrNoAvailableAccounts)
 }

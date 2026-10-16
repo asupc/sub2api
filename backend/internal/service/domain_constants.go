@@ -658,6 +658,14 @@ const (
 	SettingKeyRectifierSettings = "rectifier_settings"
 
 	// =========================
+	// Model Benchmark (模型能力测评)
+	// =========================
+
+	// SettingKeyModelBenchmarkSettings stores JSON config for model benchmark execution
+	// (which API key the loopback gateway requests authenticate with).
+	SettingKeyModelBenchmarkSettings = "model_benchmark_settings"
+
+	// =========================
 	// Beta Policy Settings
 	// =========================
 

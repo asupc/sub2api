@@ -631,7 +631,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			}
 		}
 		// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
-		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
+		admissionCtx := service.ContextWithSelectedAccountPlatform(service.ContextWithSelectionProfitGate(c.Request.Context(), selection), selection)
 		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
 		if vetoed {
 			if accountReleaseFunc != nil {

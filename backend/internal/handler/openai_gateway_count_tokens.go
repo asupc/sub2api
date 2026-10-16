@@ -93,7 +93,8 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 
 	// Token counting is not billed, so it must not be excluded by the profit gate.
 	c.Request = c.Request.WithContext(service.WithOpenAIProfitControlSuppressed(c.Request.Context()))
-	requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+	requestPlatforms := openAICompositeSchedulingPlatforms(c.Request.Context(), apiKey)
+	requestPlatform := openAISchedulingPlatformForLog(requestPlatforms)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	requestStart := time.Now()
 	account, err := h.gatewayService.SelectAccountForTokenCount(
@@ -102,7 +103,7 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 		sessionHash,
 		routingModel,
 		service.OpenAIEndpointCapabilityChatCompletions,
-		requestPlatform,
+		requestPlatforms...,
 	)
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	if err != nil {
@@ -268,17 +269,18 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	if preferredMappedModel != "" {
 		currentRoutingModel = preferredMappedModel
 	}
+	countTokenPlatforms := openAICompositeSchedulingPlatforms(c.Request.Context(), apiKey)
 	account, err := h.gatewayService.SelectAccountForTokenCount(
 		c.Request.Context(),
 		apiKey.GroupID,
 		sessionHash,
 		currentRoutingModel,
 		service.OpenAIEndpointCapabilityChatCompletions,
-		openAICompatibleRequestPlatform(c.Request.Context(), apiKey),
+		countTokenPlatforms...,
 	)
 	service.SetOpsLatencyMs(c, service.OpsAuthLatencyMsKey, time.Since(requestStart).Milliseconds())
 	if err != nil {
-		requestPlatform := openAICompatibleRequestPlatform(c.Request.Context(), apiKey)
+		requestPlatform := openAISchedulingPlatformForLog(countTokenPlatforms)
 		reqLog.Warn("openai_count_tokens.account_select_failed", zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)))
 		cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 		if !cls.ModelNotFound {

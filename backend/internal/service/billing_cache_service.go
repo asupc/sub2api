@@ -759,9 +759,18 @@ func (s *BillingCacheService) CheckBillingEligibility(ctx context.Context, user 
 		}
 	}
 
-	// user × platform quota 仅在 standard（余额）模式生效；订阅模式豁免
+	// user × platform quota 仅在 standard（余额）模式生效；订阅模式豁免。
+	// 复合分组多平台统一调度决策下（QuotaPlatform 返回空、ctx 携带候选集合），
+	// 平台配额按"任一候选平台有余量即放行"预检（未配置配额的成员视为通过；
+	// 实际计量仍按选号后的真实平台）。
 	if !isSubscriptionMode {
-		if err := s.checkUserPlatformQuotaEligibility(ctx, user.ID, platform); err != nil {
+		quotaPlatforms := []string{platform}
+		if platform == "" {
+			if ctxPlatforms, multi := ResolvedTargetPlatformsFromContext(ctx); multi {
+				quotaPlatforms = ctxPlatforms
+			}
+		}
+		if err := s.checkUserPlatformQuotaEligibilityAnyOf(ctx, user.ID, quotaPlatforms); err != nil {
 			return err
 		}
 	}
@@ -1110,6 +1119,28 @@ func circuitStateString(state billingCircuitBreakerState) string {
 //     免除 DB 查询。
 //  2. cache MISS 或旧版 entry（SchemaVersion==0）→ 查 DB 回填完整 entry（含 limits/window_start）。
 //  3. Redis 故障（err != nil）→ fail-open，查 DB 做一次性检查，不回填。
+// checkUserPlatformQuotaEligibilityAnyOf 按平台集合预检用户×平台配额：
+// 单成员直接委托单平台检查；多成员时任一平台通过（无配额配置视为通过）
+// 即放行，全部成员拒绝才返回第一个错误（复合分组多平台统一调度的准入语义）。
+func (s *BillingCacheService) checkUserPlatformQuotaEligibilityAnyOf(ctx context.Context, userID int64, platforms []string) error {
+	if len(platforms) <= 1 {
+		single := ""
+		if len(platforms) == 1 {
+			single = platforms[0]
+		}
+		return s.checkUserPlatformQuotaEligibility(ctx, userID, single)
+	}
+	var firstErr error
+	for _, platform := range platforms {
+		if err := s.checkUserPlatformQuotaEligibility(ctx, userID, platform); err == nil {
+			return nil
+		} else if firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 func (s *BillingCacheService) checkUserPlatformQuotaEligibility(
 	ctx context.Context,
 	userID int64,

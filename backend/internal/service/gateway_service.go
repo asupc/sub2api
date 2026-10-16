@@ -1502,23 +1502,25 @@ func (s *GatewayService) resolveCompositeModelOwnership(ctx context.Context, gro
 		return CompositeModelOwnership{}, err
 	}
 
-	platforms := make(map[string]struct{})
+	platformSet := make(map[string]struct{})
 	for _, account := range accounts {
 		platform := strings.TrimSpace(account.Platform)
 		if !isConcreteRequestPlatform(platform) || !explicitModelMappingClaims(account, model) {
 			continue
 		}
-		platforms[platform] = struct{}{}
+		platformSet[platform] = struct{}{}
 	}
 
+	// 单平台 = 唯一所有权；多平台 = 同族候选集合（由 Resolve 判定族同构并
+	// 决定合并调度或跨族 fail-closed），不再在此处直接拒绝。
 	ownership := CompositeModelOwnership{}
-	if len(platforms) == 1 {
-		for platform := range platforms {
-			ownership.TargetPlatform = platform
+	if len(platformSet) > 0 {
+		platforms := make([]string, 0, len(platformSet))
+		for platform := range platformSet {
+			platforms = append(platforms, platform)
 		}
+		ownership.TargetPlatforms = NormalizeCompositePlatformSet(platforms)
 		ownership.Matched = true
-	} else if len(platforms) > 1 {
-		ownership.Ambiguous = true
 	}
 
 	if s.modelsListCache != nil {

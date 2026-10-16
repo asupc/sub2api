@@ -26,12 +26,23 @@ const (
 	CompositeRouteSourceAccount  = "account_model"
 )
 
-// CompositeModelOwnership identifies the concrete provider that exposes a
-// public model through an account-level exact mapping.
+// CompositeModelOwnership identifies the concrete providers that expose a
+// public model through account-level exact mappings. TargetPlatforms is
+// deduplicated and sorted; len >= 1 implies Matched. Same-gateway-family
+// multi-platform ownership is schedulable (unified pool); cross-family
+// ownership stays fail-closed at the resolver.
 type CompositeModelOwnership struct {
-	TargetPlatform string
-	Matched        bool
-	Ambiguous      bool
+	TargetPlatforms []string
+	Matched         bool
+}
+
+// SinglePlatform returns the sole platform when ownership resolved to
+// exactly one platform.
+func (o CompositeModelOwnership) SinglePlatform() (string, bool) {
+	if len(o.TargetPlatforms) != 1 {
+		return "", false
+	}
+	return o.TargetPlatforms[0], true
 }
 
 type CompositeModelOwnershipResolver func(context.Context, int64, string) (CompositeModelOwnership, error)
@@ -69,10 +80,25 @@ type CompositeRouteDecision struct {
 	GroupID        int64                `json:"group_id"`
 	PublicModel    string               `json:"public_model"`
 	TargetPlatform string               `json:"target_platform"`
-	UpstreamModel  string               `json:"upstream_model"`
-	Endpoint       string               `json:"endpoint"`
-	Route          *CompositeModelRoute `json:"route,omitempty"`
-	Reason         string               `json:"reason,omitempty"`
+	// TargetPlatforms 仅在同族多平台所有权决策时填充（排序去重）；此时
+	// TargetPlatform 留空，单平台消费者不读该字段。单平台决策（显式路由/
+	// 探测器/唯一所有权）只填 TargetPlatform。
+	TargetPlatforms []string             `json:"target_platforms,omitempty"`
+	UpstreamModel   string               `json:"upstream_model"`
+	Endpoint        string               `json:"endpoint"`
+	Route           *CompositeModelRoute `json:"route,omitempty"`
+	Reason          string               `json:"reason,omitempty"`
+}
+
+// SingleTargetPlatform 返回决策的唯一目标平台；多平台决策返回 false。
+func (d CompositeRouteDecision) SingleTargetPlatform() (string, bool) {
+	if d.TargetPlatform != "" {
+		return d.TargetPlatform, true
+	}
+	if len(d.TargetPlatforms) == 1 {
+		return d.TargetPlatforms[0], true
+	}
+	return "", false
 }
 
 type CompositeRouteInput struct {

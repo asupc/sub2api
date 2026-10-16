@@ -368,3 +368,103 @@ func TestCompositeLiveRouteDispatchesBySessionModelNotTopLevelAlias(t *testing.T
 
 	require.Equal(t, http.StatusNoContent, w.Code)
 }
+
+// Scenario: 同族多平台所有权——入口写集合、不写单值、body 不改写
+func TestCompositeTargetPlatformMiddlewareMultiPlatformOwnershipWritesSetNotSingle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resolver := service.NewCompositeRouteResolver(nil)
+	resolver.SetModelOwnershipResolver(func(context.Context, int64, string) (service.CompositeModelOwnership, error) {
+		return service.CompositeModelOwnership{TargetPlatforms: []string{service.PlatformQoder, service.PlatformWorkbuddy}, Matched: true}, nil
+	})
+	router := gin.New()
+	groupID := int64(1)
+	router.Use(gin.HandlerFunc(servermiddleware.APIKeyAuthMiddleware(func(c *gin.Context) {
+		c.Set(string(servermiddleware.ContextKeyAPIKey), &service.APIKey{
+			GroupID: &groupID,
+			Group:   &service.Group{ID: groupID, Platform: service.PlatformComposite},
+		})
+		c.Next()
+	})))
+	router.Use(compositeTargetPlatformMiddleware(resolver))
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		platforms, multi := service.ResolvedTargetPlatformsFromContext(c.Request.Context())
+		require.True(t, multi, "multi-platform set must be written to ctx")
+		require.Equal(t, []string{service.PlatformQoder, service.PlatformWorkbuddy}, platforms)
+		_, hasSingle := service.ResolvedTargetPlatformFromContext(c.Request.Context())
+		require.False(t, hasSingle, "single-platform key must stay unset until an account is selected")
+		body, err := io.ReadAll(c.Request.Body)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"model":"shared-alias"}`, string(body), "ownership-sourced decision must not rewrite the body model")
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"shared-alias"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+}
+
+// Scenario: 多平台集合下 getGroupPlatform 返回族代表（排序首个成员）
+func TestGetGroupPlatformMultiPlatformSetReturnsFamilyRepresentative(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	groupID := int64(1)
+	router.Use(gin.HandlerFunc(servermiddleware.APIKeyAuthMiddleware(func(c *gin.Context) {
+		c.Set(string(servermiddleware.ContextKeyAPIKey), &service.APIKey{
+			GroupID: &groupID,
+			Group:   &service.Group{ID: groupID, Platform: service.PlatformComposite},
+		})
+		c.Next()
+	})))
+	var observed string
+	router.POST("/v1/chat/completions", func(c *gin.Context) {
+		observed = getGroupPlatform(c)
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	ctx := service.WithResolvedTargetPlatforms(req.Context(), []string{service.PlatformWorkbuddy, service.PlatformQoder})
+	req = req.WithContext(ctx)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Equal(t, service.PlatformQoder, observed, "family representative must be the sorted first member")
+}
+
+// Scenario: 平台专属门对多平台集合按交集放行
+func TestResolvedPlatformSetIntersectsGatesMultiPlatformRequests(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	groupID := int64(1)
+	router.Use(gin.HandlerFunc(servermiddleware.APIKeyAuthMiddleware(func(c *gin.Context) {
+		c.Set(string(servermiddleware.ContextKeyAPIKey), &service.APIKey{
+			GroupID: &groupID,
+			Group:   &service.Group{ID: groupID, Platform: service.PlatformComposite},
+		})
+		c.Next()
+	})))
+	var allowed, denied bool
+	router.POST("/v1/embeddings", func(c *gin.Context) {
+		allowed = resolvedPlatformSetIntersects(c, service.PlatformOpenAI)
+		c.Status(http.StatusNoContent)
+	})
+	router.POST("/v1/tts", func(c *gin.Context) {
+		denied = !resolvedPlatformSetIntersects(c, service.PlatformGrok)
+		c.Status(http.StatusNoContent)
+	})
+
+	// 集合含 openai → openai-only 门放行；同一集合不含 grok → grok 门拒绝。
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings", strings.NewReader(`{}`))
+	ctx := service.WithResolvedTargetPlatforms(req.Context(), []string{service.PlatformOpenAI, service.PlatformQoder})
+	req = req.WithContext(ctx)
+	router.ServeHTTP(httptest.NewRecorder(), req)
+	require.True(t, allowed)
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/tts", strings.NewReader(`{}`))
+	ctx = service.WithResolvedTargetPlatforms(req.Context(), []string{service.PlatformOpenAI, service.PlatformQoder})
+	req = req.WithContext(ctx)
+	router.ServeHTTP(httptest.NewRecorder(), req)
+	require.True(t, denied)
+}

@@ -531,6 +531,16 @@ type RectifierSettings struct {
 	APIKeySignaturePatterns  []string `json:"apikey_signature_patterns"`  // API Key 自定义匹配关键词
 }
 
+// ModelBenchmarkSettings 模型能力测评配置：回环网关请求使用的 API Key。
+type ModelBenchmarkSettings struct {
+	APIKeyID int64 `json:"api_key_id"` // 0 = 未配置（测评执行将报错提示）
+}
+
+// DefaultModelBenchmarkSettings 返回默认测评配置（未选择 Key）。
+func DefaultModelBenchmarkSettings() *ModelBenchmarkSettings {
+	return &ModelBenchmarkSettings{APIKeyID: 0}
+}
+
 // DefaultRectifierSettings 返回默认的整流器配置（全部启用）
 func DefaultRectifierSettings() *RectifierSettings {
 	return &RectifierSettings{
