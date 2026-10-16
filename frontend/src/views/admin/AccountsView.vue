@@ -4,7 +4,6 @@
       <template #filters>
         <div class="flex flex-wrap-reverse items-center justify-between gap-2.5">
           <AccountTableFilters
-            class="lg:w-auto lg:flex-1"
             v-model:searchQuery="params.search"
             :filters="params"
             :groups="groups"

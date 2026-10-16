@@ -10,8 +10,7 @@
     />
     <Select :model-value="filters.platform" size="sm" class="w-32" :options="pOpts" @update:model-value="updatePlatform" @change="$emit('change')" />
     <Select :model-value="filters.status" size="sm" class="w-32" :options="sOpts" @update:model-value="updateStatus" @change="$emit('change')" />
-    <Select :model-value="filters.group" size="sm" class="w-36" :options="gOpts" @update:model-value="updateGroup" @change="$emit('change')" />
-  </div>
+    <Select :model-value="filters.group" size="sm" class="w-36" :options="gOpts" @update:model-value="updateGroup" @change="$emit('change')" />  </div>
 </template>
 
 <script setup lang="ts">

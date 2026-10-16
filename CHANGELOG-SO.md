@@ -318,3 +318,26 @@
 - **Antigravity 用量刷新**：`getAntigravityUsage` 支持 `force` 绕过 3 分钟缓存并交由主动查询链路；前端 Antigravity 用量单元格新增单独的主动查询按钮（`loadActiveUsage`），避免用量窗口长期不刷新或刷新结果失真。
 - **改动文件**：`frontend/src/components/admin/account/AccountActionMenu.vue`、`frontend/src/views/admin/components/benchmark/{ModelLeaderboard,ModelDetailDrawer,RunsTable}.vue`、`frontend/src/components/account/AccountUsageCell.vue`、`backend/internal/service/account_usage_service.go`。
 - **合并影响**：均为二开增量；不推进 `UPSTREAM-BASE`。
+
+
+## 同步 v0.2.17（2026-10-16）
+
+- **区间**：`UPSTREAM-BASE 4d9ac3e4... -> b0a02a33...`（v0.2.16 → v0.2.17），48 commits / 153 upstream files。
+- **本次策略**：用户明确“支付链路不用，不同步”，故 `backend/payment/`、webhook、支付前端、支付测试等路径全部跳过；其余按建议 selective sync（110 文件覆盖/merge，32 跳过，11 个冲突手工裁决）。
+- **优先同步项**：
+  - 安全路由：composite OAuth 歧义路由拒绝含 OpenAI 网关 OAuth 的组合（`composite_route_resolver`、`gateway_service`、`gateway_handler`）。
+  - OpenAI 兼容：GPT-5.5 retirement、Responses `created_at` 修补、Anthropic base URL honoring、可配置 min output token floor、Codex import workspace 隔离、web_search emulation、account eligibility。
+  - Gemini/Antigravity：compat thinking、Vertex SA 已删除处理、共享容量 429 同号退避、错误策略单查、Gemini 4 Argon catalog/pricing、tool_result 图片、native functionCall/thoughtSignature、v1beta 路由。
+  - Zhipu GLM Coding Plan 5h/weekly 窗口修正、account websearch config、config example、模型与计费价格表。
+  - 前端：`useModelWhitelist`、Antigravity/AccountModal 兼容修改、AccountTableFilters 保持二开 dense 版（上游布局改动未覆盖）。
+- **冲突裁决要点**：
+  - `account.go`：保留二开“Antigravity 空映射直通 / 非空映射不强注默认条目”语义；同时带入上游 `antigravityDefaultPassthroughModels` + `isAntigravityInjectedDefaultPassthrough`。
+  - `antigravity_gateway_service.go`：函数重命名为 `buildGeminiTestRequestWithPrompt`，整合图片模型分支；文本路径移除 `maxOutputTokens: 1`（防 thinking 假成功），保留上游 `toolConfig VALIDATED`。
+  - `antigravity_gemini_thinking_variant*.go`：采用上游变体解析逻辑与测试。
+  - `composite_*`、`gateway_service.go`：保持二开多平台候选集合语义，叠加上游 OpenAI Gateway OAuth 歧义标记。
+  - `vertex_service_account.go`：带入 `vertexTokenRequestError` / `vertexServiceAccountNotFoundError`，移除 so 未实现的 Express mode 依赖。
+  - `gemini_messages_compat_service.go`：保留上游 `isVertexSharedCapacity429` / `handleGeminiThirdParty429`，恢复 `parseGeminiRetryDelayResetTime`。
+- **测试适配**：`openai_model_retirement_test.go`（platform constraint 类型），`pricing_service_test.go`（`LiteLLMModelPricing.CacheStorageCostPerTokenPerHour` + raw entry + conversion），补 `pricing_service.go` 字段。
+- **验证**：`go build ./...`、`go vet -tags=unit ./...` 通过；`pnpm build`（i18n + vue-tsc）通过。
+- **版本号**：`VERSION` 已同步为 `0.2.17`；`UPSTREAM-BASE` 推进至 `b0a02a3304a0a78cdd003ddda1dd23ba02c03084`。
+- **跳过/未同步**：支付链路（用户声明不使用）、README/sponsor/logo、en locale 包（so 已裁剪）、`AccountTableFilters.spec.ts`（上游删除、so 无）、 PaymentView/StripePaymentView/AccountTestModal 路径差异、部分 cropped-module 测试。

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -728,9 +729,71 @@ func modelMappingSignature(rawMapping map[string]any) uint64 {
 	return h.Sum64()
 }
 
-// applyAntigravityGemini31ProAliases 把已配置的 3.1 Pro 旧别名迁移到
-// 上游实际的 gemini-pro-agent 路由。只改写已存在的键，不补条目——补条目会
-// 让管理员删掉的模型重新出现在 /v1/models（列表与调度准入都读这份映射）。
+// antigravityDefaultPassthroughModels 是 Antigravity 显式 model_mapping 运行时补齐的默认透传条目：
+// 让新模型发布前保存的映射也能调用这些模型。
+var antigravityDefaultPassthroughModels = []string{
+	"gemini-3-flash",
+	"gemini-3.1-pro-high",
+	"gemini-3.1-pro-low",
+	"gemini-3.6-flash",
+	"gemini-3.6-flash-high",
+	"gemini-3.6-flash-low",
+	"gemini-3.6-flash-medium",
+	"gemini-3.6-flash-tiered",
+	"gemini-3.7-flash",
+	"gemini-3.7-flash-high",
+	"gemini-3.7-flash-low",
+	"gemini-3.7-flash-medium",
+	"gemini-3.7-flash-tiered",
+	"gemini-3.8-flash",
+	"gemini-3.8-flash-high",
+	"gemini-3.8-flash-low",
+	"gemini-3.8-flash-medium",
+	"gemini-3.8-flash-tiered",
+}
+
+// isAntigravityInjectedDefaultPassthrough 判断 GetModelMapping 中的 key→target 是否仅由
+// resolveModelMapping 运行时补齐（管理员未写入 credentials.model_mapping）。
+func (a *Account) isAntigravityInjectedDefaultPassthrough(key, target string) bool {
+	if a == nil || a.Platform != domain.PlatformAntigravity || key != target || !slices.Contains(antigravityDefaultPassthroughModels, key) {
+		return false
+	}
+	rawMapping, _ := a.Credentials["model_mapping"].(map[string]any)
+	hasExplicitEntry := false
+	for _, v := range rawMapping {
+		if _, ok := v.(string); ok {
+			hasExplicitEntry = true
+			break
+		}
+	}
+	if !hasExplicitEntry {
+		// 空映射走默认目录，不做运行时补齐。
+		return false
+	}
+	_, configured := rawMapping[key].(string)
+	return !configured
+}
+
+func ensureAntigravityDefaultPassthrough(mapping map[string]string, model string) {
+	if mapping == nil || model == "" {
+		return
+	}
+	if _, exists := mapping[model]; exists {
+		return
+	}
+	for pattern := range mapping {
+		if matchWildcard(pattern, model) {
+			return
+		}
+	}
+	mapping[model] = model
+}
+
+func ensureAntigravityDefaultPassthroughs(mapping map[string]string, models []string) {
+	for _, model := range models {
+		ensureAntigravityDefaultPassthrough(mapping, model)
+	}
+}
 func applyAntigravityGemini31ProAliases(mapping map[string]string) {
 	target := strings.TrimSpace(mapping[domain.AntigravityGemini31ProAgentModel])
 	if target == "" {
@@ -825,6 +888,10 @@ func resolveRequestedModelInMapping(mapping map[string]string, requestedModel st
 // （isDeepseekServableModel）——未知模型名透传上游只会得到 404/400，并误触发
 // per-(账号,模型) 30 分钟冷却；带 [1m] 上下文后缀的写法先归一化再比对。
 func (a *Account) IsModelSupported(requestedModel string) bool {
+	return supportsOpenAIRequestModel(a, requestedModel, false)
+}
+
+func (a *Account) isModelMappingSupported(requestedModel string) bool {
 	// 透传模式仅替换认证、模型语义完全交由上游决定，因此放行所有模型。
 	// 该短路必须在 model_mapping 判定之前：账号从"白名单模式"切换到透传后，
 	// credentials 里常残留旧的非空 model_mapping，若不在此放行，透传账号会被
@@ -2252,7 +2319,10 @@ const (
 // 三态：default（跟随渠道）/ enabled（强制开启）/ disabled（强制关闭）。
 // 兼容旧 bool 值：true→enabled, false→default（并记录 debug 日志）。
 func (a *Account) GetWebSearchEmulationMode() string {
-	if a == nil || a.Platform != PlatformAnthropic || a.Type != AccountTypeAPIKey || a.Extra == nil {
+	// OpenAI API Key accounts reach this via /v1/messages; their upstreams
+	// (DeepSeek etc. over Chat Completions) have no web_search tool.
+	if a == nil || a.Type != AccountTypeAPIKey || a.Extra == nil ||
+		(a.Platform != PlatformAnthropic && a.Platform != PlatformOpenAI) {
 		return WebSearchModeDefault
 	}
 	raw := a.Extra[featureKeyWebSearchEmulation]
