@@ -1,12 +1,12 @@
 export default {
   modelBenchmark: {
     title: '模型能力测评',
-    description: '覆盖九类能力，按相同试卷和预算比较模型，分开展示正确率、完成率、格式合规与成本',
+    description: '覆盖九类能力，强化编程与算法测评；按相同试卷和预算比较模型，分开展示正确率、完成率、格式合规与成本',
     loadFailed: '加载模型能力测评数据失败',
     refresh: '刷新',
     items: '题',
     fields: {
-      name: '计划名称', model: '模型', cron: 'Cron', samples: '采样次数', maxTokens: '单题 max tokens',
+      name: '计划名称', model: '模型', cron: 'Cron', samples: '采样次数', maxTokens: '单题 max tokens', reasoningEffort: '推理级别',
       timeout: '单题超时（秒）', enabled: '启用计划', status: '状态', nextRun: '下次运行', intelligence: '能力分',
       efficiency: '效率分', composite: '综合评级', outputTokens: '输出 Token', totalTokens: '总 Token', latency: '平均耗时',
       cost: '估算成本', usage: 'Usage', lastRun: '最近运行', created: '创建时间', category: '类别', score: '得分',
@@ -14,8 +14,8 @@ export default {
     },
     settings: {
       title: '测评设置',
-      help: '测评执行走公共网关回环（127.0.0.1），由网关调度选号，计划不绑定账号；选择用于认证的 API Key（须已绑定分组，测评流量按该 Key 正常计费）。',
-      configured: '已配置 Key #{id}',
+      help: '测评执行走公共网关回环（127.0.0.1），由网关调度选号，计划不绑定账号；选择用于认证的 API Key（须已绑定分组，测评流量按该 Key 正常计费）。采样次数与单题 max tokens 在此全局统一配置，保存后应用到所有测评计划。',
+      configured: '已配置 Key {name}',
       missing: '未配置测评 API Key，计划将执行失败',
       groupPlaceholder: '选择分组',
       keyPlaceholder: '选择 API Key'
@@ -25,7 +25,7 @@ export default {
       activePlans: '启用计划', upstreamUsage: '上游 usage', usageMissing: 'usage 缺失', serialRunner: '计划并行，题目依次执行',
       runs: '执行次数', managePlans: '管理测评计划'
     },
-    category: { math: '数学组合', algorithms: '算法复杂度', logic: '形式逻辑', code: '代码缺陷', planning: '规划图论', instruction: '精确指令', abstraction: '抽象归纳', understanding: '材料与数据', causal: '因果与概率' },
+    category: { math: '数学组合', algorithms: '算法与数据结构', logic: '形式逻辑', code: '编程与代码修复', planning: '规划图论', instruction: '精确指令', abstraction: '抽象归纳', understanding: '材料与数据', causal: '因果与概率' },
     rankings: { title: '模型排行', suite: '题库', latest: '最新', hint: '按题库版本展示；分数取每模型最新一次成功/部分成功执行，无最少次数与预算门槛', empty: '该题库暂无可排名的成功执行' },
     categories: { title: '能力拆解', empty: '暂无成功测评数据' },
     history: { title: '历史曲线', hint: '能力分、效率分、Token、耗时与成本分开呈现，避免综合分掩盖问题', allModels: '全部模型', empty: '暂无历史数据' },
@@ -40,10 +40,16 @@ export default {
       runQueued: '已开始执行：{name}，可在最近执行中查看进度。',
       runFailed: '手动执行失败：{error}',
       queued: '已排队', pageTitle: '测评计划', pageDescription: '管理模型能力测评计划：创建、启停与手动执行一次',
-      loading: '加载中...', comparisonHelp: '参与比较的模型使用相同批次、独立试卷数和预算。更换批次会生成新题；重复执行同一批次主要反映稳定性。'
+      loading: '加载中...', comparisonHelp: '参与比较的模型使用相同批次、独立试卷数和预算。更换批次会生成新题；重复执行同一批次主要反映稳定性。',
+      managedBySettings: '由「测评设置」统一配置，计划内不可修改'
     },
     runs: { title: '最近执行', empty: '暂无执行记录' },
-    runDetail: { title: 'Run 详情' },
+    runDetail: {
+      title: 'Run 详情',
+      itemProgress: '已作答 {answered} / 共 {total} 题',
+      unansweredHint: '未作答的题目按 0 分计入能力分分母，能力分被相应拉低',
+      unansweredBadge: '{count} 题未作答 · 按 0 分计入'
+    },
     comparison: {
       apply: '应用比较条件',
       hint: '题库难度尚待真实模型校准；分数表示这些任务上的表现。当前提供112题，每增加一份独立试卷会增加112次模型请求。本表单只作用于执行记录与历史曲线，不影响模型排行。',

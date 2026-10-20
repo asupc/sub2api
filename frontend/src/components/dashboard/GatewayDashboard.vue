@@ -378,7 +378,7 @@
               <span class="h-2 w-2 rounded-full bg-sky-500"></span>
               <h3 class="text-xs font-semibold text-slate-800 dark:text-slate-200">Token 请求统计 · 今日</h3>
             </div>
-            <span class="text-[10px] text-slate-400">按请求数 Top 10 · 模型总数 {{ formatNumber(todayTokenStatsTotal) }}</span>
+            <span class="text-[10px] text-slate-400">按请求数 Top 10（点击表头排序）· 模型总数 {{ formatNumber(todayTokenStatsTotal) }}</span>
           </div>
 
           <div v-if="todayTokenStatsLoading" class="flex items-center justify-center py-5">
@@ -398,19 +398,19 @@
               <table class="min-w-full text-left text-xs">
                 <thead class="bg-slate-50 dark:bg-dark-700/60">
                   <tr class="border-b border-slate-200 text-slate-500 dark:border-dark-700 dark:text-slate-400">
-                    <th class="px-3 py-2 font-semibold">模型</th>
-                    <th class="px-3 py-2 text-right font-semibold">请求数</th>
-                    <th class="px-3 py-2 text-right font-semibold" title="用量 = 输入 + 输出 + 缓存写入/读取 Token 总量">用量(含缓存)</th>
-                    <th class="px-3 py-2 text-right font-semibold" title="缓存命中率 = 缓存读取 / (输入 + 缓存读取)">缓存命中率</th>
-                    <th class="px-3 py-2 text-right font-semibold">平均 Tokens/秒</th>
-                    <th class="px-3 py-2 text-right font-semibold">平均首 Token(ms)</th>
-                    <th class="px-3 py-2 text-right font-semibold">输出 Token 总数</th>
-                    <th class="px-3 py-2 text-right font-semibold">平均时长(ms)</th>
+                    <th class="px-3 py-2 font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" @click="toggleTodayTokenSort('model')">模型{{ todayTokenSortIndicator('model') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" @click="toggleTodayTokenSort('request_count')">请求数{{ todayTokenSortIndicator('request_count') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" title="用量 = 输入 + 输出 + 缓存写入/读取 Token 总量" @click="toggleTodayTokenSort('total_tokens')">用量(含缓存){{ todayTokenSortIndicator('total_tokens') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" title="缓存命中率 = 缓存读取 / (输入 + 缓存读取)" @click="toggleTodayTokenSort('cache_hit_rate')">缓存命中率{{ todayTokenSortIndicator('cache_hit_rate') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" @click="toggleTodayTokenSort('avg_tokens_per_sec')">平均 Tokens/秒{{ todayTokenSortIndicator('avg_tokens_per_sec') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" @click="toggleTodayTokenSort('avg_first_token_ms')">平均首 Token(ms){{ todayTokenSortIndicator('avg_first_token_ms') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" @click="toggleTodayTokenSort('total_output_tokens')">输出 Token 总数{{ todayTokenSortIndicator('total_output_tokens') }}</th>
+                    <th class="px-3 py-2 text-right font-semibold cursor-pointer select-none hover:text-sky-600 dark:hover:text-sky-400" @click="toggleTodayTokenSort('avg_duration_ms')">平均时长(ms){{ todayTokenSortIndicator('avg_duration_ms') }}</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr
-                    v-for="row in todayTokenStats"
+                    v-for="row in sortedTodayTokenStats"
                     :key="row.model"
                     class="border-b border-slate-100 text-slate-700 last:border-b-0 dark:border-dark-800 dark:text-slate-200"
                   >
@@ -880,9 +880,44 @@ const todayModelStats = ref<ModelStat[]>([])
 // Token 请求统计（今日）：仅 admin 视角，复用运维监控同款口径，时间区间锁死今天
 const todayTokenStats = ref<OpsOpenAITokenStatsItem[]>([])
 const todayTokenStatsTotal = ref(0)
+// 「Token 请求统计 · 今日」表头点击排序状态
+const todayTokenSortKey = ref<string>('request_count')
+const todayTokenSortDir = ref<'asc' | 'desc'>('desc')
 const todayTokenStatsLoading = ref(false)
 const todayTokenStatsError = ref('')
 let chartLoadSeq = 0
+
+// 「Token 请求统计 · 今日」按表头排序后的列表（客户端排序，数据源仍为后端 Top10）
+const sortedTodayTokenStats = computed(() => {
+  const arr = [...todayTokenStats.value]
+  const key = todayTokenSortKey.value
+  const dir = todayTokenSortDir.value === 'asc' ? 1 : -1
+  const num = (v: any) => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  arr.sort((a: any, b: any) => {
+    if (key === 'model') {
+      return String(a?.model ?? '').localeCompare(String(b?.model ?? '')) * dir
+    }
+    const va = num(a?.[key])
+    const vb = num(b?.[key])
+    if (va === vb) return String(a?.model ?? '').localeCompare(String(b?.model ?? ''))
+    return (va - vb) * dir
+  })
+  return arr
+})
+
+function toggleTodayTokenSort(key: string) {
+  if (todayTokenSortKey.value === key) {
+    todayTokenSortDir.value = todayTokenSortDir.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    todayTokenSortKey.value = key
+    todayTokenSortDir.value = key === 'model' ? 'asc' : 'desc'
+  }
+}
+
+function todayTokenSortIndicator(key: string): string {
+  if (todayTokenSortKey.value !== key) return ''
+  return todayTokenSortDir.value === 'asc' ? ' ▲' : ' ▼'
+}
 
 // Helper function to format date in local timezone
 const formatLocalDate = (date: Date): string => {

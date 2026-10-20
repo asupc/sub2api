@@ -67,7 +67,7 @@
             <td class="px-3 py-3 max-w-[200px]">
               <div class="truncate font-semibold text-gray-900 dark:text-white">{{ run.model_id }}</div>
               <div class="mt-0.5 text-[11px] text-gray-400 font-mono">
-                {{ run.comparison_key || '—' }} · {{ run.max_output_tokens > 0 ? `${run.max_output_tokens} tokens` : '上游预算' }}
+                {{ run.comparison_key || '—' }} · {{ run.max_output_tokens > 0 ? `${run.max_output_tokens} tokens` : '上游预算' }} · {{ t('admin.modelBenchmark.fields.reasoningEffort') }} {{ run.reasoning_effort || run.reasoning_level || '-' }}
               </div>
             </td>
             <td class="px-3 py-3">

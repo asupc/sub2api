@@ -30,6 +30,8 @@ export interface ModelBenchmarkPlan {
   sample_count: number
   max_output_tokens: number
   timeout_seconds: number
+  reasoning_effort?: string
+  reasoning_level?: string
   max_results: number
   running_status: 'idle' | 'running'
   claim_expires_at?: string | null
@@ -51,6 +53,8 @@ export interface ModelBenchmarkPlanRequest {
   sample_count?: number
   max_output_tokens?: number
   timeout_seconds?: number
+  reasoning_effort?: string
+  reasoning_level?: string
   max_results?: number
 }
 
@@ -68,6 +72,8 @@ export interface ModelBenchmarkRun {
   comparison_key: string
   max_output_tokens: number
   timeout_seconds: number
+  reasoning_effort?: string
+  reasoning_level?: string
   sample_count: number
   quality?: ModelBenchmarkQuality
   id: number
@@ -153,6 +159,8 @@ export interface ModelBenchmarkRanking {
   comparison_key: string
   max_output_tokens: number
   timeout_seconds: number
+  reasoning_effort?: string
+  reasoning_level?: string
   sample_count: number
   model_id: string
   suite_id: string
@@ -187,9 +195,11 @@ export interface ModelBenchmarkRankingSuite {
   last_run_at: string
 }
 
-/** 测评执行配置：回环网关请求使用的 API Key（0 = 未配置） */
+/** 测评执行配置：回环网关请求使用的 API Key（0 = 未配置）与全局统一的采样次数、单题输出预算 */
 export interface ModelBenchmarkSettings {
   api_key_id: number
+  sample_count: number
+  max_output_tokens: number
 }
 
 export async function listSuites(): Promise<ModelBenchmarkSuite[]> {

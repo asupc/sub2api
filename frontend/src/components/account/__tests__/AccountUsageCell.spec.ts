@@ -407,7 +407,57 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).not.toContain('-')
   })
 
-  it('Antigravity 图片用量会聚合新旧 image 模型', async () => {
+  it('Antigravity 按额度组渲染 5h / 7d 窗口', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota_groups: [
+        {
+          key: 'gemini',
+          display_name: 'Gemini Models',
+          buckets: [
+            { window: 'weekly', utilization: 6, reset_time: '2026-10-19T08:35:15Z' },
+            { window: '5h', utilization: 0, reset_time: '2026-10-17T18:35:31Z' }
+          ]
+        },
+        {
+          key: 'claude-gpt',
+          display_name: 'Claude and GPT models',
+          buckets: [
+            { window: 'weekly', utilization: 0, reset_time: '2026-10-24T13:35:31Z' },
+            { window: '5h', utilization: 50, reset_time: '2026-10-17T18:35:31Z' }
+          ]
+        }
+      ]
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 1001,
+          platform: 'antigravity',
+          type: 'oauth',
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini 5h|0|2026-10-17T18:35:31Z')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini 7d|6|2026-10-19T08:35:15Z')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.claude 5h|50|2026-10-17T18:35:31Z')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.claude 7d|0|2026-10-24T13:35:31Z')
+  })
+
+  it('Antigravity 旧 antigravity_quota 数据仍可回退渲染', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
         'gemini-2.5-flash-image': {

@@ -3,12 +3,18 @@
     <div class="min-w-0 space-y-4">
       <!-- 页面顶部导航栏与快捷操作 -->
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <span
             v-if="suite"
             class="rounded-lg border border-primary-200 bg-primary-50 px-2.5 py-1 text-xs font-semibold text-primary-700 dark:border-primary-800 dark:bg-primary-900/30 dark:text-primary-300"
           >
-            {{ suite.id }} · D{{ suite.min_difficulty }}-D{{ suite.max_difficulty }} · {{ suite.item_count }} {{ t('admin.modelBenchmark.items') }}
+            {{ suite.id }} v{{ suite.version }} · D{{ suite.min_difficulty }}-D{{ suite.max_difficulty }} · {{ suite.item_count }} {{ t('admin.modelBenchmark.items') }}
+          </span>
+          <span
+            v-if="suite?.category_weights.code != null && suite?.category_weights.algorithms != null"
+            class="text-xs text-gray-500 dark:text-dark-400"
+          >
+            {{ t('admin.modelBenchmark.category.code') }} {{ Math.round(suite.category_weights.code * 100) }}% · {{ t('admin.modelBenchmark.category.algorithms') }} {{ Math.round(suite.category_weights.algorithms * 100) }}%
           </span>
         </div>
 
@@ -45,43 +51,8 @@
         </div>
       </div>
 
-      <!-- 视角切换 Tab -->
-      <div class="flex items-center gap-1 border-b border-gray-200 dark:border-dark-700">
-        <button
-          type="button"
-          class="flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-semibold transition"
-          :class="
-            activeTab === 'leaderboard'
-              ? 'border-primary-600 text-primary-600 dark:border-primary-400 dark:text-primary-400'
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200'
-          "
-          @click="activeTab = 'leaderboard'"
-        >
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-          </svg>
-          <span>{{ t('admin.modelBenchmark.tabs.leaderboard') }}</span>
-        </button>
-
-        <button
-          type="button"
-          class="flex items-center gap-2 border-b-2 px-4 py-2.5 text-sm font-semibold transition"
-          :class="
-            activeTab === 'runs'
-              ? 'border-primary-600 text-primary-600 dark:border-primary-400 dark:text-primary-400'
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200'
-          "
-          @click="activeTab = 'runs'"
-        >
-          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-          </svg>
-          <span>{{ t('admin.modelBenchmark.tabs.runs') }}</span>
-        </button>
-      </div>
-
-      <!-- Tab 1: 模型能力中心（天梯榜单与全景画像） -->
-      <div v-show="activeTab === 'leaderboard'">
+      <!-- 模型能力中心（天梯榜单与全景画像） -->
+      <div v-show="mode !== 'runs'">
         <ModelLeaderboard
           :rankings="rankings"
           :suite-key="rankingSuiteKey"
@@ -91,8 +62,8 @@
         />
       </div>
 
-      <!-- Tab 2: 评测执行记录流水 -->
-      <div v-show="activeTab === 'runs'">
+      <!-- 评测执行记录流水 -->
+      <div v-show="mode === 'runs'">
         <RunsTable
           :runs="runs"
           :suite-version="suite?.version"
@@ -139,9 +110,14 @@ import RunDetailModal from '../../components/benchmark/RunDetailModal.vue'
 
 const { t } = useI18n()
 
+withDefaults(defineProps<{
+  mode?: 'leaderboard' | 'runs'
+}>(), {
+  mode: 'leaderboard'
+})
+
 const loadError = ref('')
 const actionError = ref('')
-const activeTab = ref<'leaderboard' | 'runs'>('leaderboard')
 
 const suites = ref<ModelBenchmarkSuite[]>([])
 const rankings = ref<ModelBenchmarkRanking[]>([])

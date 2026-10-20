@@ -31,7 +31,14 @@
         <div class="flex items-center gap-2">
           <h4 class="text-xs font-bold text-gray-900 dark:text-white">{{ t('admin.modelBenchmark.drawer.itemEvidence') }}</h4>
           <span class="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600 dark:bg-dark-800 dark:text-dark-300">
-            {{ filteredItems.length }} / {{ items.length }}
+            {{ itemProgressText }}
+          </span>
+          <span
+            v-if="unansweredCount > 0"
+            class="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+            :title="t('admin.modelBenchmark.runDetail.unansweredHint')"
+          >
+            {{ t('admin.modelBenchmark.runDetail.unansweredBadge', { count: unansweredCount }) }}
           </span>
         </div>
         <div class="flex items-center gap-2">
@@ -147,6 +154,22 @@ const filteredItems = computed(() => {
       return item.item_id.toLowerCase().includes(q) || item.category.toLowerCase().includes(q)
     }
     return true
+  })
+})
+
+// 明细行只包含已落库的作答；中断/超时的 run 题数远少于 run.item_count，
+// 因此徽标同时给出「已作答/总题数」，避免把「15 / 15」误读为全卷全对。
+const unansweredCount = computed(() => {
+  const total = props.run?.item_count ?? props.items.length
+  const answered = props.run?.answered_count ?? props.items.length
+  return Math.max(total - answered, 0)
+})
+
+const itemProgressText = computed(() => {
+  const total = props.run?.item_count ?? props.items.length
+  return t('admin.modelBenchmark.runDetail.itemProgress', {
+    answered: props.run?.answered_count ?? props.items.length,
+    total
   })
 })
 

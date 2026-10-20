@@ -1168,10 +1168,25 @@ export interface UsageProgress {
   limit_requests?: number
 }
 
-// Antigravity 单个模型的配额信息
+// Antigravity 单个模型的配额信息（旧口径，fetchAvailableModels 恒为 100%，仅兼容保留）
 export interface AntigravityModelQuota {
   utilization: number // 使用率 0-100
   reset_time: string  // 重置时间 ISO8601
+}
+
+// Antigravity 额度窗口（retrieveUserQuotaSummary）
+export interface AntigravityQuotaBucket {
+  window: string       // "5h" / "weekly"
+  utilization: number  // 使用率 0-100
+  reset_time: string   // 重置时间 ISO8601
+  description?: string
+}
+
+// Antigravity 额度组（Gemini / Claude+GPT）
+export interface AntigravityQuotaGroup {
+  key: string            // "gemini" / "claude-gpt"
+  display_name: string
+  buckets: AntigravityQuotaBucket[]
 }
 
 export interface GrokQuotaWindow {
@@ -1231,6 +1246,7 @@ export interface AccountUsageInfo {
   gemini_shared_minute?: UsageProgress | null
   gemini_pro_minute?: UsageProgress | null
   gemini_flash_minute?: UsageProgress | null
+  antigravity_quota_groups?: AntigravityQuotaGroup[] | null
   antigravity_quota?: Record<string, AntigravityModelQuota> | null
   grok_request_quota?: GrokQuotaWindow | null
   grok_token_quota?: GrokQuotaWindow | null

@@ -107,7 +107,7 @@
                 {{ ranking.model_id }}
               </div>
               <div class="mt-0.5 text-[11px] text-gray-400 font-mono">
-                {{ ranking.comparison_key }} · {{ ranking.max_output_tokens > 0 ? `${ranking.max_output_tokens} tokens` : t('admin.modelBenchmark.comparison.providerBudget') }}
+                {{ ranking.comparison_key }} · {{ ranking.max_output_tokens > 0 ? `${ranking.max_output_tokens} tokens` : t('admin.modelBenchmark.comparison.providerBudget') }} · {{ t('admin.modelBenchmark.fields.reasoningEffort') }} {{ ranking.reasoning_effort || ranking.reasoning_level || '-' }}
               </div>
             </td>
 

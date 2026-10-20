@@ -30,11 +30,11 @@
       </div>
 
       <!-- Tab 内容：全部挂载，用 v-show 保留状态 -->
-      <div v-show="activeTab === 'overview'">
-        <OverviewTab />
-      </div>
       <div v-show="activeTab === 'manifest'">
         <ManifestTab />
+      </div>
+      <div v-show="activeTab === 'ranking' || activeTab === 'runs'">
+        <OverviewTab :mode="activeTab === 'runs' ? 'runs' : 'leaderboard'" />
       </div>
       <div v-show="activeTab === 'plans'">
         <PlansTab />
@@ -56,15 +56,20 @@ const route = useRoute()
 const router = useRouter()
 
 const tabs = [
-  { key: 'overview', label: '模型能力测评' },
   { key: 'manifest', label: '模型清单' },
+  { key: 'ranking', label: '模型排名' },
   { key: 'plans', label: '测评计划' },
+  { key: 'runs', label: '测评流水' },
 ]
 
 function normalizeTab(value: unknown): string {
   const raw = Array.isArray(value) ? value[0] : value
   const candidate = typeof raw === 'string' ? raw : ''
-  return tabs.some(tab => tab.key === candidate) ? candidate : 'overview'
+  const mapped =
+    candidate === 'overview' || candidate === 'leaderboard' ? 'ranking' :
+    candidate === 'runs' ? 'runs' :
+    candidate
+  return tabs.some(tab => tab.key === mapped) ? mapped : 'ranking'
 }
 
 const activeTab = ref(normalizeTab(route.query.tab))

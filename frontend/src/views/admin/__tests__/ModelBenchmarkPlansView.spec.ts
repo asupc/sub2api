@@ -117,14 +117,14 @@ describe('admin ModelBenchmarkPlansView', () => {
   beforeEach(() => {
     getModelManifest.mockReset().mockResolvedValue(buildManifest())
     listSuites.mockReset().mockResolvedValue([{
-      id: 'hard-v1', version: '1.1.0', scoring_version: '1.0.0', item_count: 48,
-      family_count: 24, min_difficulty: 3, max_difficulty: 5, category_weights: {},
+      id: 'hard-v1', version: '7.0.0', scoring_version: '7.0.0', item_count: 106,
+      family_count: 106, min_difficulty: 3, max_difficulty: 7, category_weights: { code: .28, algorithms: .18 },
     }])
     listTargets.mockReset().mockResolvedValue([buildManifest().models[0]])
     listPlans.mockReset().mockResolvedValue([buildPlan()])
     queueRun.mockReset().mockResolvedValue(buildPlan())
-    getSettings.mockReset().mockResolvedValue({ api_key_id: 11 })
-    updateSettings.mockReset().mockResolvedValue({ api_key_id: 11 })
+    getSettings.mockReset().mockResolvedValue({ api_key_id: 11, sample_count: 1, max_output_tokens: 8192 })
+    updateSettings.mockReset().mockImplementation(async (req: Record<string, unknown>) => ({ api_key_id: 11, sample_count: req.sample_count ?? 1, max_output_tokens: req.max_output_tokens ?? 8192 }))
     groupGetAll.mockReset().mockResolvedValue([{ id: 3, name: 'benchmark-group' }])
     getGroupApiKeys.mockReset().mockResolvedValue({ items: [{ id: 11, name: 'loopback-key', status: 'active' }], total: 1, page: 1, page_size: 100, pages: 1 })
     showSuccess.mockReset()
@@ -147,9 +147,35 @@ describe('admin ModelBenchmarkPlansView', () => {
     // 去账号化：不再渲染账号列
     expect(wrapper.text()).not.toContain('admin.modelBenchmark.fields.account')
     // 设置卡片展示已配置 Key 状态
-    expect(wrapper.text()).toContain('admin.modelBenchmark.settings.configured:{"id":11}')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.settings.configured:{"name":"loopback-key"}')
     // 停用计划渲染停用态
     expect(wrapper.text()).toContain('admin.modelBenchmark.status.disabled')
+  })
+
+  it('saves unified budget settings and renders plan budget fields read-only', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    // 未重新选择 Key：保存时沿用已配置 Key #11，并提交全局预算两项
+    const saveButton = wrapper.findAll('button').find(button => button.text() === 'common.save')
+    expect(saveButton).toBeTruthy()
+    await saveButton!.trigger('click')
+    await flushPromises()
+
+    expect(updateSettings).toHaveBeenCalledWith({ api_key_id: 11, sample_count: 1, max_output_tokens: 8192 })
+    expect(showSuccess).toHaveBeenCalled()
+
+    // 新建计划弹窗：采样次数与单题 max tokens 只读（disabled）并回显全局值
+    const createButton = wrapper.findAll('button').find(button => button.text().includes('admin.modelBenchmark.plans.create'))
+    expect(createButton).toBeTruthy()
+    await createButton!.trigger('click')
+    await flushPromises()
+
+    const disabledNumbers = Array.from(document.body.querySelectorAll('input[type="number"]:disabled'))
+    expect(disabledNumbers.length).toBe(2)
+    expect((disabledNumbers[0] as HTMLInputElement).value).toBe('1')
+    expect((disabledNumbers[1] as HTMLInputElement).value).toBe('8192')
+    document.body.innerHTML = ''
   })
 
   it('offers the full manifest as model options and marks unsupported targets in modal', async () => {
@@ -161,6 +187,8 @@ describe('admin ModelBenchmarkPlansView', () => {
     expect(createButton).toBeTruthy()
     await createButton!.trigger('click')
     await flushPromises()
+
+    expect(document.body.textContent).toContain('admin.modelBenchmark.plans.costWarning:{"count":106,"samples":1}')
 
     // 全量模型清单（含不可测评模型）都进入模型下拉，平台选择已被移除
     expect(document.body.textContent).not.toContain('admin.modelBenchmark.plans.platformFilter')

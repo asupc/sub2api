@@ -73,11 +73,11 @@ function mountView() {
 describe('admin ModelBenchmarkView', () => {
   beforeEach(() => {
     listSuites.mockReset().mockResolvedValue([{
-      id: 'hard-v1', version: '2.0.0', scoring_version: '2.0.0', item_count: 112,
-      family_count: 56, min_difficulty: 3, max_difficulty: 5, category_weights: {},
+      id: 'hard-v1', version: '7.0.0', scoring_version: '7.0.0', item_count: 106,
+      family_count: 106, min_difficulty: 3, max_difficulty: 7, category_weights: { code: .28, algorithms: .18 },
     }])
     listRankings.mockReset().mockResolvedValue([{
-      model_id: 'glm-5.3', suite_id: 'hard-v1', suite_version: '2.0.0', scoring_version: '2.0.0',
+      model_id: 'glm-5.3', suite_id: 'hard-v1', suite_version: '4.0.0', scoring_version: '4.0.0',
       comparison_key: 'baseline-v2', max_output_tokens: 2048, timeout_seconds: 90, sample_count: 1,
       run_count: 3, intelligence_score: 79.2, efficiency_score: 97.5, composite_score: 82.0,
       output_tokens: 11282, avg_latency_ms: 6040, estimated_cost: 0.1, last_run_at: '2026-10-15T22:09:40Z',
@@ -116,6 +116,10 @@ describe('admin ModelBenchmarkView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('glm-5.3')
+    expect(wrapper.text()).toContain('hard-v1 v7.0.0')
+    expect(wrapper.text()).toContain('106 admin.modelBenchmark.items')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.category.code 28%')
+    expect(wrapper.text()).toContain('admin.modelBenchmark.category.algorithms 18%')
     expect(wrapper.text()).not.toContain('admin.modelBenchmark.plans.create')
     expect(wrapper.text()).not.toContain('admin.modelBenchmark.plans.title')
     expect(wrapper.text()).toContain('admin.modelBenchmark.stats.managePlans')
@@ -146,7 +150,7 @@ describe('admin ModelBenchmarkView', () => {
     expect(wrapper.text()).toContain('admin.modelBenchmark.drawer.subtitle')
   })
 
-  it('renders run records in the runs tab', async () => {
+  it('renders run records in the runs view', async () => {
     listRuns.mockResolvedValue([{
       id: 12, plan_id: 4, suite_id: 'hard-v1', suite_version: '1.1.0', scoring_version: '1.0.0',
       model_id: 'minimax-m3', upstream_model_id: 'MiniMax-M3', status: 'partial',
@@ -154,16 +158,12 @@ describe('admin ModelBenchmarkView', () => {
       usage_source: 'missing', usage_field_coverage: {}, error_message: '', started_at: '2026-10-15T22:51:10Z',
       created_at: '2026-10-15T22:51:10Z',
     }])
-    const wrapper = mountView()
+    const { default: OverviewTab } = await import('../model-capability/tabs/OverviewTab.vue')
+    const wrapper = mount(OverviewTab, { props: { mode: 'runs' } })
+    wrappers.push(wrapper)
     await flushPromises()
 
     expect(listRuns).toHaveBeenCalled()
-    // 切换到 Runs Tab
-    const runsTabButton = wrapper.findAll('button').find(b => b.text().includes('admin.modelBenchmark.tabs.runs'))
-    expect(runsTabButton).toBeDefined()
-    await runsTabButton!.trigger('click')
-    await flushPromises()
-
     expect(wrapper.text()).toContain('minimax-m3')
     expect(wrapper.text()).toContain('admin.modelBenchmark.runStatus.partial')
   })

@@ -17,7 +17,7 @@
       </div>
       <div v-if="loadError" class="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700 dark:border-rose-800 dark:bg-rose-900/20 dark:text-rose-300">{{ loadError }}</div>
 
-      <!-- 测评设置：回环网关认证身份（公共网关统一调度，计划不绑定账号） -->
+      <!-- 测评设置：回环网关认证身份与全局统一的采样次数 / 单题输出预算 -->
       <div class="rounded-xl border border-gray-200 bg-white p-4 shadow-xs dark:border-dark-700 dark:bg-dark-900">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="min-w-0">
@@ -25,7 +25,7 @@
             <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.settings.help') }}</p>
           </div>
           <div class="flex flex-wrap items-center gap-2">
-            <span v-if="settingsKeyId" class="badge badge-success">{{ t('admin.modelBenchmark.settings.configured', { id: settingsKeyId }) }}</span>
+            <span v-if="settingsKeyId" class="badge badge-success">{{ t('admin.modelBenchmark.settings.configured', { name: settingsKeyName || `#${settingsKeyId}` }) }}</span>
             <span v-else class="badge badge-secondary">{{ t('admin.modelBenchmark.settings.missing') }}</span>
             <Select
               v-model="settingsGroupId"
@@ -43,7 +43,15 @@
               :disabled="!settingsGroupId"
               :placeholder="settingsGroupId ? t('admin.modelBenchmark.settings.keyPlaceholder') : t('admin.modelBenchmark.settings.groupPlaceholder')"
             />
-            <button type="button" class="btn btn-primary btn-sm" :disabled="savingSettings || !settingsGroupId || !settingsFormKeyId" @click="saveSettings">
+            <label class="flex items-center gap-1.5 text-xs text-gray-600 dark:text-dark-300">
+              {{ t('admin.modelBenchmark.fields.samples') }}
+              <input v-model.number="settingsSampleCount" type="number" min="1" max="3" class="input input-sm w-16" />
+            </label>
+            <label class="flex items-center gap-1.5 text-xs text-gray-600 dark:text-dark-300">
+              {{ t('admin.modelBenchmark.fields.maxTokens') }}
+              <input v-model.number="settingsMaxTokens" type="number" min="128" max="32768" class="input input-sm w-24" />
+            </label>
+            <button type="button" class="btn btn-primary btn-sm" :disabled="savingSettings" @click="saveSettings">
               {{ savingSettings ? t('common.saving') : t('common.save') }}
             </button>
           </div>
@@ -70,7 +78,7 @@
             </thead>
             <tbody>
               <tr v-for="plan in plans" :key="plan.id" class="border-b border-gray-50 last:border-0 dark:border-dark-800/70 hover:bg-gray-50/50 dark:hover:bg-dark-800/40 transition">
-                <td class="max-w-[180px] px-4 py-3 font-medium text-gray-900 dark:text-white"><div class="truncate">{{ plan.name }}</div><div class="mt-1 text-[11px] font-normal text-gray-500">{{ plan.comparison_key || 'baseline-v2' }} · {{ plan.max_output_tokens }} tokens</div></td>
+                <td class="max-w-[180px] px-4 py-3 font-medium text-gray-900 dark:text-white"><div class="truncate">{{ plan.name }}</div><div class="mt-1 text-[11px] font-normal text-gray-500">{{ plan.comparison_key || 'baseline-v2' }} · {{ t('admin.modelBenchmark.fields.samples') }} {{ plan.sample_count }} · {{ t('admin.modelBenchmark.fields.maxTokens') }} {{ plan.max_output_tokens }} · {{ t('admin.modelBenchmark.fields.reasoningEffort') }} {{ plan.reasoning_effort || plan.reasoning_level || '-' }} · {{ t('admin.modelBenchmark.fields.timeout') }} {{ plan.timeout_seconds }}s · max_results {{ plan.max_results || 50 }}</div></td>
                 <td class="max-w-[160px] truncate px-3 py-3 text-gray-600 dark:text-dark-300 font-mono text-xs">{{ plan.model_id }}</td>
                 <td class="px-3 py-3 text-xs font-mono text-gray-600 dark:text-dark-300">{{ plan.cron_expression }}</td>
                 <td class="px-3 py-3">
@@ -150,10 +158,10 @@
             <input
               v-model.number="planForm.sample_count"
               type="number"
-              min="1"
-              max="3"
-              class="input input-sm w-full"
+              disabled
+              class="input input-sm w-full cursor-not-allowed opacity-70"
             />
+            <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.managedBySettings') }}</p>
           </div>
           <div>
             <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
@@ -162,21 +170,19 @@
             <input
               v-model.number="planForm.max_output_tokens"
               type="number"
-              min="128"
-              max="4096"
-              class="input input-sm w-full"
+              disabled
+              class="input input-sm w-full cursor-not-allowed opacity-70"
             />
+            <p class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">{{ t('admin.modelBenchmark.plans.managedBySettings') }}</p>
           </div>
           <div>
             <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-dark-300">
-              {{ t('admin.modelBenchmark.fields.timeout') }}
+              {{ t('admin.modelBenchmark.fields.reasoningEffort') }}
             </label>
             <input
-              v-model.number="planForm.timeout_seconds"
-              type="number"
-              min="10"
-              max="600"
+              v-model.trim="planForm.reasoning_effort"
               class="input input-sm w-full"
+              placeholder="high"
             />
           </div>
           <div>
@@ -194,7 +200,7 @@
           {{ t('admin.modelBenchmark.fields.enabled') }}
         </label>
         <p class="rounded-lg bg-amber-50 p-2.5 text-[11px] text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
-          {{ t('admin.modelBenchmark.plans.costWarning', { count: suite?.item_count ?? 48, samples: planForm.sample_count || 1 }) }}
+          {{ t('admin.modelBenchmark.plans.costWarning', { count: suite?.item_count ?? 48, samples: settingsSampleCount || 1 }) }}
         </p>
         <div class="flex justify-end gap-2 pt-2 border-t border-gray-100 dark:border-dark-800">
           <button type="button" class="btn btn-secondary btn-sm" @click="closePlanModal">
@@ -263,8 +269,9 @@ const defaultForm = () => ({
   enabled: false,
   sample_count: 1,
   comparison_key: 'baseline-v2',
-  max_output_tokens: 2048,
+  max_output_tokens: 8192,
   timeout_seconds: 90,
+  reasoning_effort: '',
   max_results: 50
 })
 
@@ -284,10 +291,13 @@ const modelSelectOptions = computed(() => manifestModels.value.map(model => ({
   label: model.display_name ? `${model.id} (${model.display_name})` : model.id
 })))
 
-// ---- 测评设置：回环网关认证 Key ----
+// ---- 测评设置：回环网关认证 Key + 全局统一的采样次数 / 单题输出预算 ----
 const settingsKeyId = ref(0)
+const settingsKeyName = ref('')
 const settingsGroupId = ref<number | ''>('')
 const settingsFormKeyId = ref<number | ''>('')
+const settingsSampleCount = ref(1)
+const settingsMaxTokens = ref(8192)
 const savingSettings = ref(false)
 const groups = ref<{ id: number; name: string }[]>([])
 const groupApiKeys = ref<{ id: number; name: string }[]>([])
@@ -309,12 +319,18 @@ async function onSettingsGroupChange() {
 }
 
 async function saveSettings() {
-  const keyId = settingsFormKeyId.value
-  if (!keyId) return
   savingSettings.value = true
   try {
-    const settings = await adminAPI.modelBenchmarks.updateSettings({ api_key_id: Number(keyId) })
+    // 未重新选择 Key 时沿用已配置值，避免把 api_key_id 置 0 清掉现有配置
+    const keyId = settingsFormKeyId.value || settingsKeyId.value
+    const sampleCount = Math.min(3, Math.max(1, Math.round(Number(settingsSampleCount.value) || 1)))
+    const maxTokens = Math.min(32768, Math.max(128, Math.round(Number(settingsMaxTokens.value) || 8192)))
+    const settings = await adminAPI.modelBenchmarks.updateSettings({ api_key_id: Number(keyId) || 0, sample_count: sampleCount, max_output_tokens: maxTokens })
     settingsKeyId.value = settings.api_key_id ?? 0
+    settingsSampleCount.value = settings.sample_count ?? sampleCount
+    settingsMaxTokens.value = settings.max_output_tokens ?? maxTokens
+    const selected = groupApiKeys.value.find(key => key.id === Number(keyId))
+    if (selected) settingsKeyName.value = selected.name
     appStore.showSuccess(t('common.saved'))
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error))
@@ -330,7 +346,7 @@ const queueConfirmMessage = computed(() => {
     name: plan.name,
     model: plan.model_id,
     count: suite.value?.item_count ?? 112,
-    samples: plan.sample_count || 1
+    samples: plan.sample_count || settingsSampleCount || 1
   })
 })
 
@@ -342,7 +358,7 @@ async function loadAll() {
       adminAPI.models.getModelManifest(),
       adminAPI.modelBenchmarks.listTargets(),
       adminAPI.modelBenchmarks.listPlans(),
-      adminAPI.modelBenchmarks.getSettings().catch(() => ({ api_key_id: 0 })),
+      adminAPI.modelBenchmarks.getSettings().catch(() => ({ api_key_id: 0, sample_count: 1, max_output_tokens: 8192 })),
       adminAPI.groups.getAll().catch(() => [])
     ])
     suites.value = suiteData
@@ -350,7 +366,34 @@ async function loadAll() {
     targets.value = targetData
     plans.value = planData
     settingsKeyId.value = settingsData.api_key_id ?? 0
+    settingsSampleCount.value = settingsData.sample_count ?? 1
+    settingsMaxTokens.value = settingsData.max_output_tokens ?? 8192
     groups.value = (groupData ?? []).map(group => ({ id: group.id, name: group.name }))
+
+    // 回显测评设置：定位已配置 Key 所属分组与 Key，并回填右侧选择器
+    settingsGroupId.value = ''
+    settingsFormKeyId.value = ''
+    groupApiKeys.value = []
+    settingsKeyName.value = ''
+    const configuredKeyId = settingsKeyId.value
+    if (configuredKeyId) {
+      for (const group of groups.value) {
+        try {
+          const data = await adminAPI.groups.getGroupApiKeys(Number(group.id), 1, 100)
+          const keys = (data.items ?? []).filter((key: { status?: string }) => key.status === 'active')
+          const found = keys.find((key: { id: number }) => key.id === configuredKeyId)
+          if (found) {
+            settingsGroupId.value = group.id
+            groupApiKeys.value = keys
+            settingsFormKeyId.value = found.id
+            settingsKeyName.value = found.name
+            break
+          }
+        } catch {
+          // 忽略单个分组拉取失败，继续尝试下一个
+        }
+      }
+    }
   } catch (error) {
     loadError.value = extractApiErrorMessage(error, t('admin.modelBenchmark.loadFailed'))
   }
@@ -372,6 +415,9 @@ function openCreateModal() {
   editingPlanId.value = null
   modalError.value = ''
   Object.assign(planForm, defaultForm())
+  // 采样次数与单题 max tokens 由测评设置统一管理，只读展示全局值
+  planForm.sample_count = settingsSampleCount.value
+  planForm.max_output_tokens = settingsMaxTokens.value
   applyPreferredModel()
   showPlanModal.value = true
 }
@@ -386,6 +432,7 @@ function openEditModal(plan: ModelBenchmarkPlan) {
   planForm.sample_count = plan.sample_count
   planForm.max_output_tokens = plan.max_output_tokens
   planForm.timeout_seconds = plan.timeout_seconds
+  planForm.reasoning_effort = plan.reasoning_effort || plan.reasoning_level || ''
   planForm.max_results = plan.max_results || 50
   planForm.comparison_key = plan.comparison_key || 'baseline-v2'
   showPlanModal.value = true
@@ -420,7 +467,7 @@ async function handleSavePlan() {
 
 async function togglePlan(plan: ModelBenchmarkPlan) {
   try {
-    await adminAPI.modelBenchmarks.updatePlan(plan.id, { comparison_key: plan.comparison_key, name: plan.name, model_id: plan.model_id, cron_expression: plan.cron_expression, enabled: !plan.enabled, sample_count: plan.sample_count, max_output_tokens: plan.max_output_tokens, timeout_seconds: plan.timeout_seconds, max_results: plan.max_results })
+    await adminAPI.modelBenchmarks.updatePlan(plan.id, { comparison_key: plan.comparison_key, name: plan.name, model_id: plan.model_id, cron_expression: plan.cron_expression, enabled: !plan.enabled, sample_count: plan.sample_count, max_output_tokens: plan.max_output_tokens, timeout_seconds: plan.timeout_seconds, reasoning_effort: plan.reasoning_effort || plan.reasoning_level || '', max_results: plan.max_results })
     await loadAll()
   } catch (error) {
     appStore.showError(extractApiErrorMessage(error))

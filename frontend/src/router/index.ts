@@ -341,7 +341,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/admin/model-benchmarks',
     name: 'AdminModelBenchmark',
-    redirect: { path: '/admin/model-capability', query: { tab: 'overview' } },
+    redirect: { path: '/admin/model-capability', query: { tab: 'ranking' } },
   },
   {
     path: '/admin/model-capability',
