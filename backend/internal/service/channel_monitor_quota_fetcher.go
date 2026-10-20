@@ -289,7 +289,22 @@ func usageQuotaTiers(usage *UsageInfo) []domain.MonitorQuotaTier {
 	// Grok requests/tokens 两个日窗口 + 月度计费窗口。
 	appendQuotaWindowTier(&tiers, "daily", "requests", usage.GrokRequestQuota)
 	appendQuotaWindowTier(&tiers, "daily", "tokens", usage.GrokTokenQuota)
-	// Antigravity per-model 总量额度，Label = 模型名（按名排序保证输出稳定）。
+	// Antigravity 按额度组的真实窗口（retrieveUserQuotaSummary）：Gemini / Claude 各有 5h、weekly。
+	for _, group := range usage.AntigravityQuotaGroups {
+		for _, bucket := range group.Buckets {
+			window := bucket.Window
+			if window == "" {
+				window = "total"
+			}
+			tiers = append(tiers, domain.MonitorQuotaTier{
+				Window:      window,
+				Label:       group.Key,
+				UsedPercent: float64(bucket.Utilization),
+				ResetAt:     bucket.ResetTime,
+			})
+		}
+	}
+	// Antigravity 旧口径 per-model 总量额度（仅历史数据回显，按名排序保证输出稳定）。
 	for _, model := range sortedQuotaModelNames(usage.AntigravityQuota) {
 		q := usage.AntigravityQuota[model]
 		if q == nil {

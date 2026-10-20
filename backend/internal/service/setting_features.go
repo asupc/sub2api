@@ -926,6 +926,13 @@ func (s *SettingService) GetModelBenchmarkSettings(ctx context.Context) (*ModelB
 	if err := json.Unmarshal([]byte(value), &settings); err != nil {
 		return DefaultModelBenchmarkSettings(), nil
 	}
+	// 旧版本存储的 JSON 不含这两项，读取时兜底为默认值。
+	if settings.SampleCount <= 0 {
+		settings.SampleCount = 1
+	}
+	if settings.MaxOutputTokens <= 0 {
+		settings.MaxOutputTokens = 8192
+	}
 
 	return &settings, nil
 }

@@ -24,10 +24,16 @@ import (
 type ForbiddenError struct {
 	StatusCode int
 	Body       string
+	// Operation 触发 403 的接口名；为空时按 fetchAvailableModels 呈现以保持历史错误文案。
+	Operation string
 }
 
 func (e *ForbiddenError) Error() string {
-	return fmt.Sprintf("fetchAvailableModels 失败 (HTTP %d): %s", e.StatusCode, e.Body)
+	op := e.Operation
+	if op == "" {
+		op = "fetchAvailableModels"
+	}
+	return fmt.Sprintf("%s 失败 (HTTP %d): %s", op, e.StatusCode, e.Body)
 }
 
 // NewAPIRequestWithURL 使用指定的 base URL 创建 Antigravity API 请求（v1internal 端点）
@@ -284,6 +290,8 @@ const (
 	proxyTLSHandshakeTimeout = 5 * time.Second
 	// clientTimeout 整体请求超时（含连接、发送、等待响应、读取 body）
 	clientTimeout = 10 * time.Second
+	// quotaSummaryReadLimit retrieveUserQuotaSummary 响应读取上限（该接口返回极小，留足余量）
+	quotaSummaryReadLimit = 1 << 20
 )
 
 func NewClient(proxyURL string) (*Client, error) {
@@ -647,9 +655,108 @@ func extractProjectIDFromOnboardResponse(resp map[string]any) string {
 }
 
 // ModelQuotaInfo 模型配额信息
+//
+// 注意：fetchAvailableModels 返回的 quotaInfo 只反映模型目录层面的剩余比例，
+// 实测所有模型恒为 1，不能用于展示账号真实用量。真实分窗额度请使用
+// RetrieveUserQuotaSummary（按 Gemini / Claude+GPT 分组，含 5h 与 weekly 窗口）。
 type ModelQuotaInfo struct {
 	RemainingFraction float64 `json:"remainingFraction"`
 	ResetTime         string  `json:"resetTime,omitempty"`
+}
+
+// QuotaBucket retrieveUserQuotaSummary 返回的单个额度窗口
+type QuotaBucket struct {
+	BucketID          string  `json:"bucketId,omitempty"`
+	DisplayName       string  `json:"displayName,omitempty"`
+	Window            string  `json:"window,omitempty"` // "5h" / "weekly"
+	ResetTime         string  `json:"resetTime,omitempty"`
+	Description       string  `json:"description,omitempty"`
+	RemainingFraction float64 `json:"remainingFraction"`
+}
+
+// QuotaGroup retrieveUserQuotaSummary 返回的额度组（如 Gemini / Claude and GPT models）
+type QuotaGroup struct {
+	DisplayName string        `json:"displayName,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Buckets     []QuotaBucket `json:"buckets,omitempty"`
+}
+
+// RetrieveUserQuotaSummaryResponse retrieveUserQuotaSummary 响应
+type RetrieveUserQuotaSummaryResponse struct {
+	Groups      []QuotaGroup `json:"groups"`
+	Description string       `json:"description,omitempty"`
+}
+
+// RetrieveUserQuotaSummary 获取账号按额度组划分的真实用量窗口。
+// 这是上游客户端展示额度的接口；fetchAvailableModels 的 quotaInfo 不能替代。
+func (c *Client) RetrieveUserQuotaSummary(ctx context.Context, accessToken, projectID string) (*RetrieveUserQuotaSummaryResponse, map[string]any, error) {
+	if c == nil || c.httpClient == nil {
+		return nil, nil, errors.New("antigravity client is not configured")
+	}
+	bodyBytes, err := json.Marshal(FetchAvailableModelsRequest{Project: projectID})
+	if err != nil {
+		return nil, nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+
+	var lastErr error
+	for urlIdx, baseURL := range BaseURLs {
+		apiURL := baseURL + "/v1internal:retrieveUserQuotaSummary"
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			lastErr = fmt.Errorf("创建请求失败: %w", err)
+			continue
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
+
+		resp, err := servertiming.Do(c.httpClient, req)
+		if err != nil {
+			lastErr = fmt.Errorf("retrieveUserQuotaSummary 请求失败: %w", err)
+			if shouldFallbackToNextURL(err, 0) && urlIdx < len(BaseURLs)-1 {
+				log.Printf("[antigravity] retrieveUserQuotaSummary URL fallback: %s -> %s", baseURL, BaseURLs[urlIdx+1])
+				continue
+			}
+			return nil, nil, lastErr
+		}
+
+		respBodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, quotaSummaryReadLimit+1))
+		_ = resp.Body.Close() // 立即关闭，避免循环内 defer 导致的资源泄漏
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取响应失败: %w", err)
+		}
+		if int64(len(respBodyBytes)) > quotaSummaryReadLimit {
+			return nil, nil, fmt.Errorf("响应超过 %d 字节", quotaSummaryReadLimit)
+		}
+
+		if shouldFallbackToNextURL(nil, resp.StatusCode) && urlIdx < len(BaseURLs)-1 {
+			log.Printf("[antigravity] retrieveUserQuotaSummary URL fallback (HTTP %d): %s -> %s", resp.StatusCode, baseURL, BaseURLs[urlIdx+1])
+			continue
+		}
+
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, nil, &ForbiddenError{
+				StatusCode: resp.StatusCode,
+				Body:       string(respBodyBytes),
+				Operation:  "retrieveUserQuotaSummary",
+			}
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, nil, fmt.Errorf("retrieveUserQuotaSummary 失败 (HTTP %d): %s", resp.StatusCode, string(respBodyBytes))
+		}
+
+		var quotaResp RetrieveUserQuotaSummaryResponse
+		if err := json.Unmarshal(respBodyBytes, &quotaResp); err != nil {
+			return nil, nil, fmt.Errorf("响应解析失败: %w", err)
+		}
+		var rawResp map[string]any
+		_ = json.Unmarshal(respBodyBytes, &rawResp)
+
+		DefaultURLAvailability.MarkSuccess(baseURL)
+		return &quotaResp, rawResp, nil
+	}
+
+	return nil, nil, lastErr
 }
 
 // ModelInfo 模型信息

@@ -160,9 +160,27 @@ type UsageProgress struct {
 }
 
 // AntigravityModelQuota Antigravity 单个模型的配额信息
+//
+// 仅用于兼容旧数据：fetchAvailableModels 的 quotaInfo 恒为 100% 剩余，不再作为
+// 用量来源。真实用量见 AntigravityQuotaGroup。
 type AntigravityModelQuota struct {
 	Utilization int    `json:"utilization"` // 使用率 0-100
 	ResetTime   string `json:"reset_time"`  // 重置时间 ISO8601
+}
+
+// AntigravityQuotaBucket Antigravity 单个额度窗口（5h / weekly）
+type AntigravityQuotaBucket struct {
+	Window      string `json:"window"`       // "5h" / "weekly"
+	Utilization int    `json:"utilization"`  // 使用率 0-100
+	ResetTime   string `json:"reset_time"`   // 重置时间 ISO8601
+	Description string `json:"description,omitempty"`
+}
+
+// AntigravityQuotaGroup Antigravity 额度组（Gemini Models / Claude and GPT models）
+type AntigravityQuotaGroup struct {
+	Key         string                   `json:"key"`   // "gemini" / "claude-gpt" / 上游原始名
+	DisplayName string                   `json:"display_name"`
+	Buckets     []AntigravityQuotaBucket `json:"buckets"`
 }
 
 // AntigravityModelDetail Antigravity 单个模型的详细能力信息
@@ -199,7 +217,10 @@ type UsageInfo struct {
 	GeminiProMinute    *UsageProgress `json:"gemini_pro_minute,omitempty"`    // Gemini Pro RPM
 	GeminiFlashMinute  *UsageProgress `json:"gemini_flash_minute,omitempty"`  // Gemini Flash RPM
 
-	// Antigravity 多模型配额
+	// Antigravity 按额度组的真实用量窗口（5h / weekly），来自 retrieveUserQuotaSummary
+	AntigravityQuotaGroups []AntigravityQuotaGroup `json:"antigravity_quota_groups,omitempty"`
+
+	// Antigravity 多模型配额（旧口径，fetchAvailableModels 恒为 100%，仅兼容保留）
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
 
 	// Grok / xAI 被动额度快照

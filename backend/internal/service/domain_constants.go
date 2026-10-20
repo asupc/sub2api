@@ -144,7 +144,7 @@ const (
 // 输出预算上限。与 Qoder/Trae 既有 benchmark 覆写值（4096）保持一致；实际
 // 生效值仍受上游与 plan.MaxOutputTokens 语义约束。
 // 注意：OpenAI OAuth/Codex 端点不接受该字段，测评路径对其不下发。
-const defaultModelBenchmarkMaxOutputTokens = 4096
+const defaultModelBenchmarkMaxOutputTokens = 32768
 
 // modelBenchmarkInstructions 是测评请求的 instructions。题库要求每题只输出一个
 // JSON 对象，用 Codex base prompt（openai.DefaultInstructions）会抬高

@@ -703,6 +703,44 @@ func TestUsageQuotaTiers_NilAndEmptyInputs(t *testing.T) {
 	require.Nil(t, tiers)
 }
 
+func TestUsageQuotaTiers_AntigravityQuotaGroups(t *testing.T) {
+	usage := &UsageInfo{
+		AntigravityQuotaGroups: []AntigravityQuotaGroup{
+			{
+				Key:         "gemini",
+				DisplayName: "Gemini Models",
+				Buckets: []AntigravityQuotaBucket{
+					{Window: "weekly", Utilization: 6, ResetTime: "2026-10-19T08:35:15Z"},
+					{Window: "5h", Utilization: 0, ResetTime: "2026-10-17T18:35:31Z"},
+				},
+			},
+			{
+				Key:         "claude-gpt",
+				DisplayName: "Claude and GPT models",
+				Buckets: []AntigravityQuotaBucket{
+					{Window: "weekly", Utilization: 0, ResetTime: "2026-10-24T13:35:31Z"},
+					{Window: "5h", Utilization: 50, ResetTime: "2026-10-17T18:35:31Z"},
+				},
+			},
+		},
+	}
+
+	tiers := usageQuotaTiers(usage)
+	require.Len(t, tiers, 4)
+
+	byKey := make(map[string]domain.MonitorQuotaTier, len(tiers))
+	for _, tier := range tiers {
+		byKey[tier.Window+"/"+tier.Label] = tier
+	}
+
+	geminiWeekly := byKey["weekly/gemini"]
+	require.InDelta(t, 6.0, geminiWeekly.UsedPercent, 0.001)
+	require.Equal(t, "2026-10-19T08:35:15Z", geminiWeekly.ResetAt)
+
+	claudeFiveHour := byKey["5h/claude-gpt"]
+	require.InDelta(t, 50.0, claudeFiveHour.UsedPercent, 0.001)
+}
+
 // --- 状态推导 ---
 
 func TestDeriveQuotaCheckResult_StatusMatrix(t *testing.T) {

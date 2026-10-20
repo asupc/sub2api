@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -24,6 +25,13 @@ const (
 	errorCodeUnauthenticated = "unauthenticated"
 	errorCodeRateLimited     = "rate_limited"
 	errorCodeNetworkError    = "network_error"
+
+	// Antigravity 额度组的稳定 key（上游 displayName 可读性差且可能变化）
+	antigravityQuotaGroupGemini    = "gemini"
+	antigravityQuotaGroupClaudeGPT = "claude-gpt"
+
+	antigravityWindowFiveHour = "5h"
+	antigravityWindowWeekly   = "weekly"
 )
 
 // AntigravityQuotaFetcher 从 Antigravity API 获取额度
@@ -56,8 +64,10 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
 	}
 
-	// 调用 API 获取配额
-	modelsResp, modelsRaw, err := client.FetchAvailableModels(ctx, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
+	// 额度查询使用 retrieveUserQuotaSummary：按额度组返回 5h / weekly 窗口。
+	// fetchAvailableModels 的 quotaInfo 恒为 100% 剩余，不能用于展示用量。
+	// 不带 project 也能返回同一份分组数据，这里不强制要求 project_id。
+	quotaResp, quotaRaw, err := client.RetrieveUserQuotaSummary(ctx, accessToken, projectID)
 	if err != nil {
 		// 403 Forbidden: 不报错，返回 is_forbidden 标记
 		var forbiddenErr *antigravity.ForbiddenError
@@ -84,11 +94,11 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	tierRaw, tierNormalized, loadResp := f.fetchSubscriptionTier(ctx, client, accessToken)
 
 	// 转换为 UsageInfo
-	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
+	usageInfo := f.buildUsageInfo(quotaResp, tierRaw, tierNormalized, loadResp)
 
 	return &QuotaResult{
 		UsageInfo: usageInfo,
-		Raw:       modelsRaw,
+		Raw:       quotaRaw,
 	}, nil
 }
 
@@ -127,68 +137,74 @@ func normalizeTier(raw string) string {
 	}
 }
 
-// buildUsageInfo 将 API 响应转换为 UsageInfo。
-func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAvailableModelsResponse, tierRaw, tierNormalized string, loadResp *antigravity.LoadCodeAssistResponse) *UsageInfo {
+// antigravityQuotaGroupKey 把上游额度组名归一为稳定 key
+func antigravityQuotaGroupKey(displayName string) string {
+	lower := strings.ToLower(strings.TrimSpace(displayName))
+	switch {
+	case strings.Contains(lower, "claude") || strings.Contains(lower, "gpt"):
+		return antigravityQuotaGroupClaudeGPT
+	case strings.Contains(lower, "gemini"):
+		return antigravityQuotaGroupGemini
+	default:
+		return lower
+	}
+}
+
+// buildUsageInfo 将 retrieveUserQuotaSummary 响应转换为 UsageInfo。
+func (f *AntigravityQuotaFetcher) buildUsageInfo(quotaResp *antigravity.RetrieveUserQuotaSummaryResponse, tierRaw, tierNormalized string, loadResp *antigravity.LoadCodeAssistResponse) *UsageInfo {
 	now := time.Now()
 	info := &UsageInfo{
-		UpdatedAt:               &now,
-		AntigravityQuota:        make(map[string]*AntigravityModelQuota),
-		AntigravityQuotaDetails: make(map[string]*AntigravityModelDetail),
-		SubscriptionTier:        tierNormalized,
-		SubscriptionTierRaw:     tierRaw,
+		UpdatedAt:              &now,
+		AntigravityQuotaGroups: make([]AntigravityQuotaGroup, 0, len(quotaResp.Groups)),
+		SubscriptionTier:       tierNormalized,
+		SubscriptionTierRaw:    tierRaw,
 	}
 
-	// 遍历所有模型，填充 AntigravityQuota 和 AntigravityQuotaDetails
-	for modelName, modelInfo := range modelsResp.Models {
-		if modelInfo.QuotaInfo == nil {
-			continue
+	for _, group := range quotaResp.Groups {
+		quotaGroup := AntigravityQuotaGroup{
+			Key:         antigravityQuotaGroupKey(group.DisplayName),
+			DisplayName: group.DisplayName,
+			Buckets:     make([]AntigravityQuotaBucket, 0, len(group.Buckets)),
 		}
-
-		// remainingFraction 是剩余比例 (0.0-1.0)，转换为使用率百分比
-		utilization := int((1.0 - modelInfo.QuotaInfo.RemainingFraction) * 100)
-
-		info.AntigravityQuota[modelName] = &AntigravityModelQuota{
-			Utilization: utilization,
-			ResetTime:   modelInfo.QuotaInfo.ResetTime,
-		}
-
-		// 填充模型详细能力信息
-		detail := &AntigravityModelDetail{
-			DisplayName:        modelInfo.DisplayName,
-			SupportsImages:     modelInfo.SupportsImages,
-			SupportsThinking:   modelInfo.SupportsThinking,
-			ThinkingBudget:     modelInfo.ThinkingBudget,
-			Recommended:        modelInfo.Recommended,
-			MaxTokens:          modelInfo.MaxTokens,
-			MaxOutputTokens:    modelInfo.MaxOutputTokens,
-			SupportedMimeTypes: modelInfo.SupportedMimeTypes,
-		}
-		info.AntigravityQuotaDetails[modelName] = detail
-	}
-
-	// 废弃模型转发规则
-	if len(modelsResp.DeprecatedModelIDs) > 0 {
-		info.ModelForwardingRules = make(map[string]string, len(modelsResp.DeprecatedModelIDs))
-		for oldID, deprecated := range modelsResp.DeprecatedModelIDs {
-			info.ModelForwardingRules[oldID] = deprecated.NewModelID
-		}
-	}
-
-	// 同时设置 FiveHour 用于兼容展示（取主要模型）
-	priorityModels := []string{"claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"}
-	for _, modelName := range priorityModels {
-		if modelInfo, ok := modelsResp.Models[modelName]; ok && modelInfo.QuotaInfo != nil {
-			utilization := (1.0 - modelInfo.QuotaInfo.RemainingFraction) * 100
-			progress := &UsageProgress{
-				Utilization: utilization,
+		for _, bucket := range group.Buckets {
+			// remainingFraction 是剩余比例 (0.0-1.0)，转换为使用率百分比。
+			// 必须四舍五入：截断会把 1-0.8 算成 19%。
+			utilization := int(math.Round((1.0 - bucket.RemainingFraction) * 100))
+			if utilization < 0 {
+				utilization = 0
 			}
-			if modelInfo.QuotaInfo.ResetTime != "" {
-				if resetTime, err := time.Parse(time.RFC3339, modelInfo.QuotaInfo.ResetTime); err == nil {
+			if utilization > 100 {
+				utilization = 100
+			}
+			quotaGroup.Buckets = append(quotaGroup.Buckets, AntigravityQuotaBucket{
+				Window:      bucket.Window,
+				Utilization: utilization,
+				ResetTime:   bucket.ResetTime,
+				Description: bucket.Description,
+			})
+		}
+		if len(quotaGroup.Buckets) > 0 {
+			info.AntigravityQuotaGroups = append(info.AntigravityQuotaGroups, quotaGroup)
+		}
+	}
+
+	// 兼容字段：FiveHour 取首个 5h 窗口，供仍按 5h 口径统计的消费方使用。
+	for _, group := range info.AntigravityQuotaGroups {
+		for _, bucket := range group.Buckets {
+			if bucket.Window != antigravityWindowFiveHour {
+				continue
+			}
+			progress := &UsageProgress{Utilization: float64(bucket.Utilization)}
+			if bucket.ResetTime != "" {
+				if resetTime, err := time.Parse(time.RFC3339, bucket.ResetTime); err == nil {
 					progress.ResetsAt = &resetTime
 					progress.RemainingSeconds = int(time.Until(resetTime).Seconds())
 				}
 			}
 			info.FiveHour = progress
+			break
+		}
+		if info.FiveHour != nil {
 			break
 		}
 	}
