@@ -6,6 +6,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -16,11 +17,11 @@ func TestModelBenchmarkRepositoryClaimDuePlansUsesAtomicLease(t *testing.T) {
 
 	now := time.Now().UTC().Truncate(time.Second)
 	lease := 25 * time.Hour
-	columns := []string{"id", "name", "suite_id", "suite_version", "scoring_version", "model_id", "cron_expression", "enabled", "sample_count", "max_output_tokens", "timeout_seconds", "max_results", "running_status", "claim_expires_at", "manual_trigger_at", "last_run_at", "next_run_at", "created_at", "updated_at", "comparison_key"}
+	columns := []string{"id", "name", "suite_id", "suite_version", "scoring_version", "model_id", "cron_expression", "enabled", "sample_count", "max_output_tokens", "timeout_seconds", "max_results", "running_status", "claim_expires_at", "manual_trigger_at", "last_run_at", "next_run_at", "created_at", "updated_at", "comparison_key", "reasoning_effort", "reasoning_level"}
 	mock.ExpectBegin()
 	mock.ExpectQuery(`(?s)FROM model_benchmark_plans.*FOR UPDATE SKIP LOCKED`).
 		WithArgs(now, 1).
-		WillReturnRows(sqlmock.NewRows(columns).AddRow(int64(1), "weekly", "hard-v1", "1.0.0", "1.0.0", "gpt-test", "0 4 * * 1", true, 1, 768, 90, 50, "idle", nil, nil, nil, now, now, now, "baseline-v2"))
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(int64(1), "weekly", "hard-v1", "1.0.0", "1.0.0", "gpt-test", "0 4 * * 1", true, 1, 768, 90, 50, "idle", nil, nil, nil, now, now, now, "baseline-v2", "high", "high"))
 	mock.ExpectExec(`UPDATE model_benchmark_plans SET running_status='running',claim_expires_at=\$2,manual_trigger_at=NULL`).
 		WithArgs(int64(1), now.Add(lease)).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -32,6 +33,25 @@ func TestModelBenchmarkRepositoryClaimDuePlansUsesAtomicLease(t *testing.T) {
 	require.Len(t, plans, 1)
 	require.Equal(t, int64(1), plans[0].ID)
 	require.Equal(t, "idle", plans[0].RunningStatus)
+	require.Equal(t, "high", plans[0].ReasoningEffort)
+	require.Equal(t, "high", plans[0].ReasoningLevel)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestModelBenchmarkRepositoryUpdatePlanKeepsReasoningFields(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now().UTC().Truncate(time.Second)
+	plan := &service.ModelBenchmarkPlan{ID: 7, Name: "coding", SuiteID: "hard-v1", SuiteVersion: "4.0.0", ScoringVersion: "4.0.0", ModelID: "fixture", CronExpression: "0 4 * * 1", SampleCount: 1, MaxOutputTokens: 2048, TimeoutSeconds: 90, MaxResults: 50, NextRunAt: &now, ComparisonKey: "baseline-v2", ReasoningEffort: "high", ReasoningLevel: "high"}
+	columns := []string{"id", "name", "suite_id", "suite_version", "scoring_version", "model_id", "cron_expression", "enabled", "sample_count", "max_output_tokens", "timeout_seconds", "max_results", "running_status", "claim_expires_at", "manual_trigger_at", "last_run_at", "next_run_at", "created_at", "updated_at", "comparison_key", "reasoning_effort", "reasoning_level"}
+	mock.ExpectQuery(`(?s)UPDATE model_benchmark_plans.*reasoning_effort=\$16,reasoning_level=\$17.*RETURNING.*comparison_key,reasoning_effort,reasoning_level`).
+		WithArgs(plan.ID, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, plan.NextRunAt, plan.ManualTriggerAt, plan.ComparisonKey, plan.ReasoningEffort, plan.ReasoningLevel).
+		WillReturnRows(sqlmock.NewRows(columns).AddRow(plan.ID, plan.Name, plan.SuiteID, plan.SuiteVersion, plan.ScoringVersion, plan.ModelID, plan.CronExpression, plan.Enabled, plan.SampleCount, plan.MaxOutputTokens, plan.TimeoutSeconds, plan.MaxResults, "idle", nil, nil, nil, now, now, now, plan.ComparisonKey, plan.ReasoningEffort, plan.ReasoningLevel))
+	updated, err := NewModelBenchmarkRepository(db).UpdatePlan(context.Background(), plan)
+	require.NoError(t, err)
+	require.Equal(t, "high", updated.ReasoningEffort)
+	require.Equal(t, "high", updated.ReasoningLevel)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

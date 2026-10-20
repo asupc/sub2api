@@ -517,7 +517,7 @@ func generateModelBenchmarkExtended(f modelBenchmarkFamilySpec, r *modelBenchmar
 		}
 		return modelBenchmarkDataQuestion("筛选 active=true 且 score>=threshold 的行，按 score 降序、同分 id 字典序升序，取前 k 条（不足全部取），每条仅保留 id、score 两字段。answer 必须是 {\"count\":条数,\"rows\":结果数组}，无结果时 rows=[]。", map[string]any{"rows": rows, "threshold": threshold, "k": k}), map[string]any{"count": len(output), "rows": output}
 	default:
-		panic("unknown extended benchmark family: " + f.id)
+		return generateModelBenchmarkCoding(f, r, variant)
 	}
 }
 
@@ -875,6 +875,104 @@ func scoreModelBenchmarkWitness(item ModelBenchmarkItem, answer any) (float64, s
 			actual, feasible := modelBenchmarkRouteFinish(data, order)
 			valid = feasible && reported == int64(actual) && reported == optimum
 		}
+	// ----- D6 witness families -----
+	case "d6-sat-witness":
+		var data d6SATData
+		if err := modelBenchmarkQuestionData(item, &data); err != nil {
+			return 0, err.Error()
+		}
+		raw, ok := modelBenchmarkNormalizeList(answer)
+		if !ok {
+			return 0, "answer must be a boolean array"
+		}
+		assignment := make([]bool, len(raw))
+		for i, entry := range raw {
+			b, ok := entry.(bool)
+			if !ok {
+				return 0, "assignment entries must be booleans"
+			}
+			assignment[i] = b
+		}
+		valid = d6SATCheck(data, assignment)
+	case "d6-route-windows":
+		object, ok := answer.(map[string]any)
+		if !ok || len(object) != 2 {
+			return 0, "answer requires order and finish_time"
+		}
+		raw, ok := modelBenchmarkNormalizeList(object["order"])
+		if !ok {
+			return 0, "order must be an array"
+		}
+		order := []int{}
+		for _, entry := range raw {
+			n, ok := modelBenchmarkJSONInt(entry)
+			if !ok || n < 0 || n > 1000 {
+				return 0, "invalid route node"
+			}
+			order = append(order, int(n))
+		}
+		reported, ok := modelBenchmarkJSONInt(object["finish_time"])
+		if !ok {
+			return 0, "finish_time must be an integer"
+		}
+		var data d6RouteData
+		if err := modelBenchmarkQuestionData(item, &data); err != nil {
+			return 0, err.Error()
+		}
+		reference := item.Expected.(map[string]any)
+		optimum, _ := modelBenchmarkJSONInt(reference["finish_time"])
+		if optimum < 0 {
+			valid = len(order) == 0 && reported == -1
+		} else {
+			actual, feasible := d6RouteFinish(data, order)
+			valid = feasible && reported == int64(actual) && reported == optimum
+		}
+	case "d6-resource-alloc":
+		var data d6ResourceData
+		if err := modelBenchmarkQuestionData(item, &data); err != nil {
+			return 0, err.Error()
+		}
+		raw, ok := modelBenchmarkNormalizeList(answer)
+		if !ok {
+			return 0, "answer must be an index array"
+		}
+		indices := []int{}
+		previous := -1
+		for _, entry := range raw {
+			index, ok := modelBenchmarkJSONInt(entry)
+			if !ok || index < 0 || index > 1000 || int(index) <= previous {
+				return 0, "indices must be distinct and ascending"
+			}
+			previous = int(index)
+			indices = append(indices, int(index))
+		}
+		// Feasibility across all 5 dimensions + value.
+		var used [5]int
+		value := 0
+		feasible := true
+		for _, i := range indices {
+			if i >= len(data.Items) {
+				return 0, "item index out of range"
+			}
+			for d := 0; d < 5; d++ {
+				used[d] += data.Items[i].Costs[d]
+				if used[d] > data.Capacities[d] {
+					feasible = false
+				}
+			}
+			value += data.Items[i].Value
+		}
+		// Optimal value from the reference subset.
+		expected, _ := modelBenchmarkNormalizeList(item.Expected)
+		optimum := 0
+		for _, entry := range expected {
+			i, ok := modelBenchmarkJSONInt(entry)
+			if !ok {
+				return 0, "invalid reference indices"
+			}
+			optimum += data.Items[i].Value
+		}
+		valid = feasible && value == optimum
 	}
 	if valid {
 		return 1, ""

@@ -65,7 +65,8 @@ func (s *ModelBenchmarkService) GetBenchmarkSettings(ctx context.Context) (*Mode
 
 // UpdateBenchmarkSettings validates and persists the loopback API key choice.
 // 校验：Key 存在、启用、未过期且已绑定分组（未分组 Key 会被网关的
-// RequireGroupAssignment 拦截）；KeyID=0 表示清除配置。
+// RequireGroupAssignment 拦截）；KeyID=0 表示清除配置。采样次数与单题输出
+// 预算在此统一管理：保存成功后回填到所有测评计划（计划内这两项只读）。
 func (s *ModelBenchmarkService) UpdateBenchmarkSettings(ctx context.Context, input *ModelBenchmarkSettings) (*ModelBenchmarkSettings, error) {
 	if s.settings == nil || s.apiKeys == nil {
 		return nil, fmt.Errorf("benchmark settings dependencies are unavailable")
@@ -88,8 +89,22 @@ func (s *ModelBenchmarkService) UpdateBenchmarkSettings(ctx context.Context, inp
 			return nil, fmt.Errorf("%w: API key has no group assignment", ErrModelBenchmarkInvalidPlan)
 		}
 	}
+	if input.SampleCount <= 0 {
+		input.SampleCount = 1
+	}
+	if input.MaxOutputTokens <= 0 {
+		input.MaxOutputTokens = 8192
+	}
+	if input.SampleCount < 1 || input.SampleCount > 3 || input.MaxOutputTokens < 128 || input.MaxOutputTokens > 32768 {
+		return nil, fmt.Errorf("%w: sample_count or max_output_tokens is out of range", ErrModelBenchmarkInvalidPlan)
+	}
 	if err := s.settings.SetModelBenchmarkSettings(ctx, input); err != nil {
 		return nil, err
+	}
+	if s.repo != nil {
+		if err := s.repo.ApplyPlanBudgetDefaults(ctx, input.SampleCount, input.MaxOutputTokens); err != nil {
+			return nil, err
+		}
 	}
 	return s.settings.GetModelBenchmarkSettings(ctx)
 }
@@ -114,14 +129,23 @@ func (s *ModelBenchmarkService) CreatePlan(ctx context.Context, input *ModelBenc
 	if err := s.validateBenchmarkModel(ctx, input.ModelID); err != nil {
 		return nil, err
 	}
-	if input.SampleCount <= 0 {
-		input.SampleCount = 1
-	}
-	if input.MaxOutputTokens <= 0 {
-		input.MaxOutputTokens = 2048
+	// 采样次数与单题输出预算由测评设置统一管理（计划内只读），创建时以设置值为准；
+	// 设置不可用或读取失败时沿用历史默认，不阻塞建计划。
+	input.SampleCount, input.MaxOutputTokens = 1, 8192
+	if s.settings != nil {
+		if settings, err := s.settings.GetModelBenchmarkSettings(ctx); err == nil {
+			input.SampleCount, input.MaxOutputTokens = settings.SampleCount, settings.MaxOutputTokens
+		}
 	}
 	if input.TimeoutSeconds <= 0 {
 		input.TimeoutSeconds = 90
+	}
+	if level := normalizeBenchmarkReasoningLevel(input.ReasoningEffort, input.ReasoningLevel); level != "" {
+		input.ReasoningEffort = level
+		input.ReasoningLevel = level
+	} else {
+		input.ReasoningEffort = ""
+		input.ReasoningLevel = ""
 	}
 	if input.MaxResults <= 0 {
 		input.MaxResults = 50
@@ -159,17 +183,20 @@ func (s *ModelBenchmarkService) UpdatePlan(ctx context.Context, id int64, input 
 	if input.ComparisonKey != "" {
 		existing.ComparisonKey = input.ComparisonKey
 	}
-	if input.SampleCount > 0 {
-		existing.SampleCount = input.SampleCount
-	}
-	if input.MaxOutputTokens > 0 {
-		existing.MaxOutputTokens = input.MaxOutputTokens
-	}
+	// 采样次数与单题输出预算由测评设置统一管理，不再接受计划级修改。
 	if input.TimeoutSeconds > 0 {
 		existing.TimeoutSeconds = input.TimeoutSeconds
 	}
 	if input.MaxResults > 0 {
 		existing.MaxResults = input.MaxResults
+	}
+	if strings.TrimSpace(input.ReasoningEffort) != "" || strings.TrimSpace(input.ReasoningLevel) != "" {
+		level := normalizeBenchmarkReasoningLevel(input.ReasoningEffort, input.ReasoningLevel)
+		if level == "" {
+			return nil, fmt.Errorf("%w: invalid reasoning effort", ErrModelBenchmarkInvalidPlan)
+		}
+		existing.ReasoningEffort = level
+		existing.ReasoningLevel = level
 	}
 	if _, err := computeNextRun(existing.CronExpression, time.Now()); err != nil {
 		return nil, fmt.Errorf("%w: invalid cron expression: %w", ErrModelBenchmarkInvalidPlan, err)
@@ -253,7 +280,7 @@ func (s *ModelBenchmarkService) ListHistory(ctx context.Context, filters ModelBe
 	}
 	if filters.ModelID == "" && filters.SuiteVersion == ModelBenchmarkSuiteVersion {
 		if filters.MaxOutputTokens <= 0 {
-			filters.MaxOutputTokens = 2048
+			filters.MaxOutputTokens = 8192
 		}
 		if filters.TimeoutSeconds <= 0 {
 			filters.TimeoutSeconds = 90
@@ -356,9 +383,40 @@ func (s *ModelBenchmarkService) ListRankingSuites(ctx context.Context) ([]*Model
 	return s.repo.ListRankingSuites(ctx)
 }
 
+func normalizeBenchmarkReasoningLevel(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		normalized := NormalizeMaxReasoningEffort(value)
+		if normalized != "" {
+			return normalized
+		}
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return ""
+		}
+	}
+	return ""
+}
+
 func validateModelBenchmarkPlanLimits(plan *ModelBenchmarkPlan) error {
 	if plan.ComparisonKey == "" {
 		plan.ComparisonKey = ModelBenchmarkDefaultComparisonKey
+	}
+	hasReasoning := strings.TrimSpace(plan.ReasoningEffort) != "" || strings.TrimSpace(plan.ReasoningLevel) != ""
+	if hasReasoning {
+		level := normalizeBenchmarkReasoningLevel(plan.ReasoningEffort, plan.ReasoningLevel)
+		if level == "" {
+			return fmt.Errorf("%w: invalid reasoning effort", ErrModelBenchmarkInvalidPlan)
+		}
+		plan.ReasoningEffort = level
+		plan.ReasoningLevel = level
+	} else {
+		plan.ReasoningEffort = ""
+		plan.ReasoningLevel = ""
 	}
 	if len(plan.ComparisonKey) > 64 {
 		return fmt.Errorf("%w: comparison_key exceeds 64 characters", ErrModelBenchmarkInvalidPlan)
@@ -369,8 +427,8 @@ func validateModelBenchmarkPlanLimits(plan *ModelBenchmarkPlan) error {
 		}
 	}
 	if plan.SampleCount < 1 || plan.SampleCount > 3 ||
-		plan.MaxOutputTokens < 128 || plan.MaxOutputTokens > 4096 ||
-		plan.TimeoutSeconds < 10 || plan.TimeoutSeconds > 600 ||
+		plan.MaxOutputTokens < 128 || plan.MaxOutputTokens > 32768 ||
+		plan.TimeoutSeconds < 10 || plan.TimeoutSeconds > 900 ||
 		plan.MaxResults < 1 || plan.MaxResults > 500 {
 		return fmt.Errorf("%w: sample_count, max_output_tokens, timeout_seconds or max_results is out of range", ErrModelBenchmarkInvalidPlan)
 	}
@@ -399,7 +457,7 @@ func (s *ModelBenchmarkService) ExecutePlan(ctx context.Context, plan *ModelBenc
 	// Generation and scoring use the built-in implementation, including for older plans.
 	// 网关回环模式：不绑定账号，由网关调度选号；upstream_model_id 以网关实际
 	// 服务模型为准（请求模型名兜底），在 executor 内按题捕获计费。
-	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 1 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: plan.ModelID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
+	run := &ModelBenchmarkRun{ComparisonKey: plan.ComparisonKey, MaxOutputTokens: plan.MaxOutputTokens, TimeoutSeconds: plan.TimeoutSeconds, ReasoningEffort: plan.ReasoningEffort, ReasoningLevel: plan.ReasoningLevel, SampleCount: plan.SampleCount, ItemCount: len(modelBenchmarkFamilies) * 1 * max(plan.SampleCount, 1), PlanID: plan.ID, SuiteID: ModelBenchmarkSuiteID, SuiteVersion: ModelBenchmarkSuiteVersion, ScoringVersion: ModelBenchmarkScoringVer, ModelID: plan.ModelID, UpstreamModelID: plan.ModelID, StartedAt: time.Now(), UsageSource: "missing", UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
 	if run.ComparisonKey == "" {
 		run.ComparisonKey = ModelBenchmarkDefaultComparisonKey
 	}
@@ -441,6 +499,37 @@ func (s *ModelBenchmarkService) ExecutePlan(ctx context.Context, plan *ModelBenc
 	return s.finishRun(ctx, plan, run, items, nil)
 }
 
+// padUnexecutedBenchmarkItems 为计划内未产生作答记录的题目合成 execution_failed
+// 计分行（不落库）：执行中断/超时的 run 按「未完成就不得分」以 0 分计入分母。
+// 作答行按生成顺序落库，缺失的必然是生成序列尾部的未执行题。
+func padUnexecutedBenchmarkItems(run *ModelBenchmarkRun, items []ModelBenchmarkRunItem) []ModelBenchmarkRunItem {
+	if len(items) >= run.ItemCount {
+		return items
+	}
+	padded := items
+	position := 0
+	for sample := 1; sample <= max(run.SampleCount, 1); sample++ {
+		for _, plannedItem := range GenerateModelBenchmarkComparisonItems(run.ComparisonKey, sample) {
+			if position >= run.ItemCount {
+				return padded
+			}
+			if position >= len(items) {
+				itemID := plannedItem.ID
+				if sample > 1 {
+					itemID = fmt.Sprintf("%s#%d", plannedItem.ID, sample)
+				}
+				padded = append(padded, ModelBenchmarkRunItem{
+					ItemID: itemID, Category: plannedItem.Category, Difficulty: plannedItem.Difficulty,
+					Status: "execution_failed", ErrorMessage: "not_executed",
+					PossiblePoints: modelBenchmarkItemWeight(plannedItem), UsageSource: "missing",
+				})
+			}
+			position++
+		}
+	}
+	return padded
+}
+
 func (s *ModelBenchmarkService) finishRun(ctx context.Context, plan *ModelBenchmarkPlan, run *ModelBenchmarkRun, items []ModelBenchmarkRunItem, execErr error) error {
 	ctx = context.WithoutCancel(ctx)
 	finishCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -448,13 +537,13 @@ func (s *ModelBenchmarkService) finishRun(ctx context.Context, plan *ModelBenchm
 	ctx = finishCtx
 	now := time.Now()
 	run.FinishedAt = &now
+	items = padUnexecutedBenchmarkItems(run, items)
 	AggregateModelBenchmarkRun(run, items)
 	if execErr != nil {
 		run.Status = "partial"
 		if run.AnsweredCount == 0 {
 			run.Status = "failed"
 		}
-		run.Quality.RankingEligible = false
 		run.ErrorMessage = execErr.Error()
 	}
 	aggregateModelBenchmarkUsage(run, items)

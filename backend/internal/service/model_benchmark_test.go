@@ -20,16 +20,17 @@ import (
 func TestModelBenchmarkSuiteGeneratesHardV1(t *testing.T) {
 	suite := GetModelBenchmarkSuite()
 	require.Equal(t, "hard-v1", suite.ID)
-	require.Equal(t, "3.0.0", suite.Version)
-	require.Equal(t, "3.0.0", suite.ScoringVersion)
-	require.Equal(t, 56, suite.ItemCount)
+	require.Equal(t, "7.0.0", suite.Version)
+	require.Equal(t, "7.0.0", suite.ScoringVersion)
+	require.Equal(t, len(modelBenchmarkFamilies), suite.ItemCount)
+	require.Equal(t, len(modelBenchmarkFamilies), suite.FamilyCount)
 	items := GenerateModelBenchmarkItems(1, 2)
-	require.Len(t, items, 56)
+	require.Len(t, items, len(modelBenchmarkFamilies))
 	seen := map[string]bool{}
 	for _, item := range items {
 		require.False(t, seen[item.ID], "duplicate item %s", item.ID)
 		seen[item.ID] = true
-		require.Condition(t, func() (success bool) { return item.Difficulty >= 3 && item.Difficulty <= 5 })
+		require.Condition(t, func() (success bool) { return item.Difficulty >= 3 && item.Difficulty <= 7 })
 		require.NotEmpty(t, item.Prompt)
 		require.Len(t, item.PromptHash, 64)
 		require.Contains(t, item.Prompt, `"answer"`)
@@ -159,6 +160,25 @@ func (s *modelBenchmarkSettingRepo) Set(_ context.Context, key, value string) er
 	return nil
 }
 
+// modelBenchmarkBudgetRepoStub 记录 ApplyPlanBudgetDefaults 的回填调用（嵌入接口兜底其余方法）。
+type modelBenchmarkBudgetRepoStub struct {
+	ModelBenchmarkRepository
+	calls           int
+	sampleCount     int
+	maxOutputTokens int
+}
+
+func (s *modelBenchmarkBudgetRepoStub) ApplyPlanBudgetDefaults(_ context.Context, sampleCount, maxOutputTokens int) error {
+	s.calls++
+	s.sampleCount = sampleCount
+	s.maxOutputTokens = maxOutputTokens
+	return nil
+}
+
+func (s *modelBenchmarkBudgetRepoStub) CreatePlan(_ context.Context, plan *ModelBenchmarkPlan) (*ModelBenchmarkPlan, error) {
+	return plan, nil
+}
+
 func TestModelBenchmarkSettingsValidation(t *testing.T) {
 	groupID := int64(7)
 	store := modelBenchmarkAPIKeyStoreStub{keys: map[int64]*APIKey{
@@ -167,12 +187,15 @@ func TestModelBenchmarkSettingsValidation(t *testing.T) {
 		3: {ID: 3, Key: "sk-nogroup", UserID: 2, GroupID: nil, Status: StatusActive},
 	}}
 	settings := NewSettingService(&modelBenchmarkSettingRepo{settingRepoStub: settingRepoStub{values: map[string]string{}}}, nil)
-	service := NewModelBenchmarkService(nil, store, settings, nil, nil)
+	repo := &modelBenchmarkBudgetRepoStub{}
+	service := NewModelBenchmarkService(repo, store, settings, nil, nil)
 
-	// 默认未配置
+	// 默认未配置；预算两项兜底为默认值
 	got, err := service.GetBenchmarkSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(0), got.APIKeyID)
+	require.Equal(t, 1, got.SampleCount)
+	require.Equal(t, 8192, got.MaxOutputTokens)
 
 	// 非法 Key 被拒绝
 	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 99})
@@ -182,18 +205,64 @@ func TestModelBenchmarkSettingsValidation(t *testing.T) {
 	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 3})
 	require.Error(t, err)
 
-	// 合法 Key 保存并可回读
+	// 预算超范围被拒绝
+	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{SampleCount: 5})
+	require.Error(t, err)
+	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{MaxOutputTokens: 100})
+	require.Error(t, err)
+	_, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{MaxOutputTokens: 40000})
+	require.Error(t, err)
+
+	// 合法 Key 保存并可回读；<=0 的预算项兜底为默认值，并回填到所有计划
 	got, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 1})
 	require.NoError(t, err)
 	require.Equal(t, int64(1), got.APIKeyID)
+	require.Equal(t, 1, got.SampleCount)
+	require.Equal(t, 8192, got.MaxOutputTokens)
+	require.Equal(t, 1, repo.calls)
+	require.Equal(t, 1, repo.sampleCount)
+	require.Equal(t, 8192, repo.maxOutputTokens)
 	got, err = service.GetBenchmarkSettings(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, int64(1), got.APIKeyID)
+	require.Equal(t, 1, got.SampleCount)
+	require.Equal(t, 8192, got.MaxOutputTokens)
+
+	// 自定义预算保存并回填
+	got, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 1, SampleCount: 3, MaxOutputTokens: 16384})
+	require.NoError(t, err)
+	require.Equal(t, 3, got.SampleCount)
+	require.Equal(t, 16384, got.MaxOutputTokens)
+	require.Equal(t, 2, repo.calls)
+	require.Equal(t, 3, repo.sampleCount)
+	require.Equal(t, 16384, repo.maxOutputTokens)
 
 	// KeyID=0 允许清除
 	got, err = service.UpdateBenchmarkSettings(context.Background(), &ModelBenchmarkSettings{APIKeyID: 0})
 	require.NoError(t, err)
 	require.Equal(t, int64(0), got.APIKeyID)
+}
+
+// 测评设置统一管理采样次数与单题输出预算：创建计划时以设置值为准，忽略请求传入值。
+func TestModelBenchmarkCreatePlanAppliesBudgetDefaults(t *testing.T) {
+	accounts := []Account{{ID: 1, Name: "openai-key", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: "active", Schedulable: true, Credentials: map[string]any{"api_key": "sk-test", "model_mapping": map[string]any{"model-a": "model-a"}}}}
+	settings := NewSettingService(&modelBenchmarkSettingRepo{settingRepoStub: settingRepoStub{values: map[string]string{}}}, nil)
+	repo := &modelBenchmarkBudgetRepoStub{}
+	service := NewModelBenchmarkService(repo, modelBenchmarkAPIKeyStoreStub{}, settings, NewModelManifestService(modelBenchmarkManifestAccountSource{accounts: accounts}), nil)
+	ctx := context.Background()
+	_, err := service.UpdateBenchmarkSettings(ctx, &ModelBenchmarkSettings{SampleCount: 2, MaxOutputTokens: 16384})
+	require.NoError(t, err)
+
+	plan, err := service.CreatePlan(ctx, &ModelBenchmarkPlan{Name: "p", ModelID: "model-a", CronExpression: "0 4 * * 1", SampleCount: 99, MaxOutputTokens: 99999})
+	require.NoError(t, err)
+	require.Equal(t, 2, plan.SampleCount)
+	require.Equal(t, 16384, plan.MaxOutputTokens)
+
+	// 请求不携带这两项时同样以设置值为准
+	plan, err = service.CreatePlan(ctx, &ModelBenchmarkPlan{Name: "p2", ModelID: "model-a", CronExpression: "0 4 * * 1"})
+	require.NoError(t, err)
+	require.Equal(t, 2, plan.SampleCount)
+	require.Equal(t, 16384, plan.MaxOutputTokens)
 }
 
 func TestModelBenchmarkScoreAnswerCheckers(t *testing.T) {
@@ -217,7 +286,7 @@ func TestModelBenchmarkScoreAnswerCheckers(t *testing.T) {
 	require.Zero(t, bad.Score)
 }
 
-func TestModelBenchmarkAggregateExecutionFailureDoesNotBecomeZeroIntelligence(t *testing.T) {
+func TestModelBenchmarkAggregateExecutionFailureCountsAsMissed(t *testing.T) {
 	run := &ModelBenchmarkRun{UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
 	items := []ModelBenchmarkRunItem{
 		{Status: "correct", Score: 1, EarnedPoints: 2, PossiblePoints: 2, ExpectedOutputTokens: 10, ExpectedLatencyMS: 100, OutputTokens: modelBenchmarkPtrInt64(10), LatencyMS: modelBenchmarkPtrInt64(100)},
@@ -225,7 +294,8 @@ func TestModelBenchmarkAggregateExecutionFailureDoesNotBecomeZeroIntelligence(t 
 	}
 	AggregateModelBenchmarkRun(run, items)
 	require.NotNil(t, run.IntelligenceScore)
-	require.Equal(t, 100.0, *run.IntelligenceScore)
+	// 最终计分原则：执行失败即未作对，必须以 0 分进入分母（2/5 = 40）。
+	require.Equal(t, 40.0, *run.IntelligenceScore)
 	require.Equal(t, 1, run.AnsweredCount)
 	require.Equal(t, "partial", run.Status)
 	require.Nil(t, run.EfficiencyScore, "usage-incomplete run must not produce comparable efficiency")

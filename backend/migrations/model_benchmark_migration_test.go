@@ -32,6 +32,17 @@ func TestModelBenchmarkManualTriggerMigrationIsIdempotent(t *testing.T) {
 	require.False(t, strings.Contains(strings.ToLower(sql), "drop table"), "benchmark migration must be forward-only and non-destructive")
 }
 
+// 249 放宽作答明细难度约束：243 写死的 3..5 会拒绝 D6/D7 作答行，
+// 导致测评在首个 D6 题中断、其余题按 0 分计入分母。
+func TestModelBenchmarkDifficultyRangeMigrationIsIdempotent(t *testing.T) {
+	content, err := FS.ReadFile("249_so_model_benchmark_difficulty_range.sql")
+	require.NoError(t, err)
+	sql := string(content)
+	require.Contains(t, sql, "DROP CONSTRAINT IF EXISTS model_benchmark_run_items_difficulty_check")
+	require.Contains(t, sql, "CHECK (difficulty BETWEEN 3 AND 7)")
+	require.False(t, strings.Contains(strings.ToLower(sql), "drop table"), "benchmark migration must be forward-only and non-destructive")
+}
+
 func TestModelBenchmarkComparisonMigrationIsNonDestructive(t *testing.T) {
 	raw, err := FS.ReadFile("245_so_model_benchmark_comparison.sql")
 	require.NoError(t, err)

@@ -32,11 +32,13 @@ type modelBenchmarkPlanRequest struct {
 	SampleCount     int    `json:"sample_count"`
 	MaxOutputTokens int    `json:"max_output_tokens"`
 	TimeoutSeconds  int    `json:"timeout_seconds"`
+	ReasoningEffort string `json:"reasoning_effort"`
+	ReasoningLevel  string `json:"reasoning_level"`
 	MaxResults      int    `json:"max_results"`
 }
 
 func (r modelBenchmarkPlanRequest) toPlan() *service.ModelBenchmarkPlan {
-	plan := &service.ModelBenchmarkPlan{ComparisonKey: r.ComparisonKey, Name: r.Name, SuiteID: r.SuiteID, ModelID: r.ModelID, CronExpression: r.CronExpression, SampleCount: r.SampleCount, MaxOutputTokens: r.MaxOutputTokens, TimeoutSeconds: r.TimeoutSeconds, MaxResults: r.MaxResults}
+	plan := &service.ModelBenchmarkPlan{ComparisonKey: r.ComparisonKey, Name: r.Name, SuiteID: r.SuiteID, ModelID: r.ModelID, CronExpression: r.CronExpression, SampleCount: r.SampleCount, MaxOutputTokens: r.MaxOutputTokens, TimeoutSeconds: r.TimeoutSeconds, ReasoningEffort: r.ReasoningEffort, ReasoningLevel: r.ReasoningLevel, MaxResults: r.MaxResults}
 	if r.Enabled != nil {
 		plan.Enabled = *r.Enabled
 	}

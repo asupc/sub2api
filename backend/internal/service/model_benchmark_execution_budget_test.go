@@ -63,7 +63,7 @@ func TestModelBenchmarkStreamingStopEvidence(t *testing.T) {
 }
 
 func TestModelBenchmarkProviderBudgetIsDiagnosticOnly(t *testing.T) {
-	run := &ModelBenchmarkRun{SuiteVersion: ModelBenchmarkSuiteVersion, ItemCount: 56, SampleCount: 1}
+	run := &ModelBenchmarkRun{SuiteVersion: ModelBenchmarkSuiteVersion, ItemCount: len(modelBenchmarkFamilies), SampleCount: 1}
 	items := []ModelBenchmarkRunItem{}
 	for _, item := range GenerateModelBenchmarkComparisonItems("provider", 1) {
 		raw, _ := json.Marshal(map[string]any{"answer": item.Expected})

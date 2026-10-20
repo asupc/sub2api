@@ -66,6 +66,9 @@ func (e *ModelBenchmarkExecutor) Execute(ctx context.Context, plan *ModelBenchma
 		// 网关两条转发路径自身会合成/透传 usage，显式声明可兼容更严格的上游。
 		"stream_options": map[string]any{"include_usage": true},
 	}
+	if level := planReasoningEffort(plan); level != "" {
+		payload["reasoning_effort"] = level
+	}
 	rawPayload, _ := json.Marshal(payload)
 	start := time.Now()
 	var responseBody []byte
@@ -399,6 +402,16 @@ func truncateModelBenchmarkText(value []byte, limit int) string {
 		return string(value)
 	}
 	return string(value[:limit]) + "..."
+}
+
+func planReasoningEffort(plan *ModelBenchmarkPlan) string {
+	if plan == nil {
+		return ""
+	}
+	if level := strings.TrimSpace(plan.ReasoningEffort); level != "" {
+		return level
+	}
+	return strings.TrimSpace(plan.ReasoningLevel)
 }
 
 func modelBenchmarkIncompleteReason(reason string) string {

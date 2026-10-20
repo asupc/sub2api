@@ -73,6 +73,17 @@ func benchmarkAuditInts(t *testing.T, pattern, text string) []int {
 	return values
 }
 
+// benchmarkAuditData parses the public JSON data block of a generated prompt.
+func benchmarkAuditData(t *testing.T, prompt string) map[string]any {
+	t.Helper()
+	marker := strings.Index(prompt, modelBenchmarkDataMarker)
+	require.NotEqual(t, -1, marker, "question has no data block")
+	tail := strings.SplitN(prompt[marker+len(modelBenchmarkDataMarker):], "\n", 2)[0]
+	var data map[string]any
+	require.NoError(t, json.Unmarshal([]byte(tail), &data))
+	return data
+}
+
 func benchmarkAuditArray(text string) []int {
 	tokens := regexp.MustCompile(`-?\d+`).FindAllString(text, -1)
 	values := make([]int, len(tokens))
@@ -120,33 +131,34 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		return ways[len(ways)-1]
 	case "shortest-path":
 		require.Contains(t, prompt, "字典序最小最短节点序列")
+		const nodes = 9
 		const infinity = 1000000
-		distance := [5][5]int{}
-		edges := [5][5]int{}
-		for i := 0; i < 5; i++ {
-			for j := 0; j < 5; j++ {
+		distance := [nodes][nodes]int{}
+		edges := [nodes][nodes]int{}
+		for i := 0; i < nodes; i++ {
+			for j := 0; j < nodes; j++ {
 				if i != j {
 					distance[i][j] = infinity
 				}
 			}
 		}
-		for _, edge := range regexp.MustCompile(`([A-E])-([A-E]):(\d+)`).FindAllStringSubmatch(prompt, -1) {
+		for _, edge := range regexp.MustCompile(`([A-I])-([A-I]):(\d+)`).FindAllStringSubmatch(prompt, -1) {
 			a, b := int(edge[1][0]-'A'), int(edge[2][0]-'A')
 			w, _ := strconv.Atoi(edge[3])
 			distance[a][b], distance[b][a], edges[a][b], edges[b][a] = w, w, w, w
 		}
-		for k := 0; k < 5; k++ {
-			for i := 0; i < 5; i++ {
-				for j := 0; j < 5; j++ {
+		for k := 0; k < nodes; k++ {
+			for i := 0; i < nodes; i++ {
+				for j := 0; j < nodes; j++ {
 					distance[i][j] = min(distance[i][j], distance[i][k]+distance[k][j])
 				}
 			}
 		}
 		path := []string{"A"}
-		for node := 0; node != 4; {
+		for node := 0; node != nodes-1; {
 			next := -1
-			for j := 0; j < 5; j++ {
-				if edges[node][j] > 0 && distance[node][4] == edges[node][j]+distance[j][4] {
+			for j := 0; j < nodes; j++ {
+				if edges[node][j] > 0 && distance[node][nodes-1] == edges[node][j]+distance[j][nodes-1] {
 					next = j
 					break
 				}
@@ -158,25 +170,34 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		return path
 	case "topological-order":
 		require.Contains(t, prompt, "小根堆版 Kahn")
-		edges := regexp.MustCompile(`([A-E])>([A-E])`).FindAllStringSubmatch(prompt, -1)
-		var best []int
-		benchmarkAuditPermutations(5, func(order []int) {
-			positions := [5]int{}
-			for i, node := range order {
-				positions[node] = i
-			}
-			for _, edge := range edges {
-				if positions[edge[1][0]-'A'] >= positions[edge[2][0]-'A'] {
-					return
+		edges := regexp.MustCompile(`([A-J])>([A-J])`).FindAllStringSubmatch(prompt, -1)
+		// 小根堆 Kahn：每步在入度为 0 的剩余节点中挑字母最小者，
+		// 与生成器实现不同（生成器用插入序扫描，这里用显式最小堆）。
+		indegree := map[byte]int{}
+		adjacency := map[byte][]byte{}
+		for c := byte('A'); c <= 'J'; c++ {
+			indegree[c] = 0
+		}
+		for _, edge := range edges {
+			from, to := edge[1][0], edge[2][0]
+			adjacency[from] = append(adjacency[from], to)
+			indegree[to]++
+		}
+		answer := []string{}
+		for i := 0; i < 10; i++ {
+			next := byte(0)
+			for c := byte('A'); c <= 'J'; c++ {
+				if indegree[c] == 0 {
+					next = c
+					break
 				}
 			}
-			if best == nil || benchmarkAuditLess(order, best) {
-				best = append([]int{}, order...)
+			require.NotZero(t, next)
+			answer = append(answer, string(next))
+			indegree[next] = -1
+			for _, to := range adjacency[next] {
+				indegree[to]--
 			}
-		})
-		answer := []string{}
-		for _, node := range best {
-			answer = append(answer, string(rune('A'+node)))
 		}
 		return answer
 	case "interval-dp":
@@ -212,23 +233,34 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		}
 		return map[string]any{"value": best, "first_merge_left_index": first}
 	case "cycle-detection":
-		reachable := [5][5]bool{}
-		for _, edge := range regexp.MustCompile(`([1-5])>([1-5])`).FindAllStringSubmatch(prompt, -1) {
-			reachable[edge[1][0]-'1'][edge[2][0]-'1'] = true
+		// 独立复算：枚举所有非空简单路径的起点/终点是否回到起点，用
+		// DFS 而非传递闭包判断节点是否属于环。
+		adjacency := map[int][]int{}
+		for _, edge := range regexp.MustCompile(`([1-8])>([1-8])`).FindAllStringSubmatch(prompt, -1) {
+			from, to := int(edge[1][0]-'0'), int(edge[2][0]-'0')
+			adjacency[from] = append(adjacency[from], to)
 		}
-		for k := 0; k < 5; k++ {
-			for i := 0; i < 5; i++ {
-				for j := 0; j < 5; j++ {
-					reachable[i][j] = reachable[i][j] || reachable[i][k] && reachable[k][j]
+		members := []int{}
+		for start := 1; start <= 8; start++ {
+			seen := map[int]bool{}
+			var walk func(node int) bool
+			walk = func(node int) bool {
+				if seen[node] {
+					return false
 				}
+				seen[node] = true
+				for _, next := range adjacency[node] {
+					if next == start || walk(next) {
+						return true
+					}
+				}
+				return false
+			}
+			if walk(start) {
+				members = append(members, start)
 			}
 		}
-		for i := 0; i < 5; i++ {
-			if reachable[i][i] {
-				return true
-			}
-		}
-		return false
+		return members
 	case "kmp-prefix":
 		word := benchmarkAuditMatch(t, `字符串 ([a-z]+) 的 KMP`, prompt)[0]
 		prefix := make([]int, len(word))
@@ -241,11 +273,11 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		}
 		return prefix
 	case "sparse-matrix":
-		offset := benchmarkAuditInts(t, `column \+ (\d+)\)`, prompt)[0]
+		v := benchmarkAuditInts(t, `\(row\*column \+ (\d+)\) mod 4 = 0 且 \(row \+ column \+ (\d+)\) mod 3 = 0`, prompt)
 		coordinates := []string{}
-		for row := 1; row <= 7; row++ {
-			for col := 1; col <= 7; col++ {
-				if row <= 4 && col >= 3 && col <= 6 && (row*col+offset)%4 == 0 {
+		for row := 2; row <= 12; row++ {
+			for col := 3; col <= 13; col++ {
+				if (row*col+v[0])%4 == 0 && (row+col+v[1])%3 == 0 {
 					coordinates = append(coordinates, fmt.Sprintf("%d,%d", row, col))
 				}
 			}
@@ -253,15 +285,19 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		return coordinates
 	case "token-bucket":
 		require.Contains(t, prompt, "不足则拒绝本次请求且令牌数不变")
-		v := benchmarkAuditInts(t, `初始有 (\d+) 个令牌，容量为 (\d+).*?补充 (\d+) 个令牌`, prompt)
-		requests := benchmarkAuditArray(benchmarkAuditMatch(t, `消耗令牌：(\[[^\]]+\])`, prompt)[0])
+		v := benchmarkAuditInts(t, `初始有 (\d+) 个令牌，容量为 (\d+)`, prompt)
+		actions := regexp.MustCompile(`t=(\d+) (请求|补充) (\d+)`).FindAllStringSubmatch(prompt, -1)
+		require.Len(t, actions, 14)
 		tokens, states := v[0], []int{}
-		for _, request := range requests {
-			if tokens >= request {
-				tokens -= request
+		for _, action := range actions {
+			n, _ := strconv.Atoi(action[3])
+			if action[2] == "请求" {
+				if tokens >= n {
+					tokens -= n
+				}
+			} else {
+				tokens = min(tokens+n, v[1])
 			}
-			states = append(states, tokens)
-			tokens = min(tokens+v[2], v[1])
 			states = append(states, tokens)
 		}
 		return states
@@ -275,11 +311,20 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		}
 		t.Fatal("no modular inverse")
 	case "markov-expected-steps":
-		text := benchmarkAuditMatch(t, `概率 (\d+\.\d+)`, prompt)[0]
-		probability, err := strconv.ParseFloat(text, 64)
+		// 独立复算：S2 期望是几何级数 1(1-p2)+p2+…；S1 期望再加上
+		// S1 自身的停留步数级数 1+p1+…。
+		probabilities := benchmarkAuditMatch(t, `在 S1 以概率 (\d+\.\d+).*?在 S2 以概率 (\d+\.\d+)`, prompt)
+		p1, err := strconv.ParseFloat(probabilities[0], 64)
 		require.NoError(t, err)
+		p2, err := strconv.ParseFloat(probabilities[1], 64)
+		require.NoError(t, err)
+		// 从 S1 出发的步数 = 在 S1 停留的 1/(1-p1) 步 + 进入 S2 后
+		// 在 S2 停留的 1/(1-p2) 步。
 		expectation := 0.0
-		for survival := 1.0; survival > 1e-15; survival *= probability {
+		for survival := 1.0; survival > 1e-15; survival *= p1 {
+			expectation += survival
+		}
+		for survival := 1.0; survival > 1e-15; survival *= p2 {
 			expectation += survival
 		}
 		return expectation
@@ -293,25 +338,36 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		}
 		return count
 	case "two-machine-schedule":
+		// 独立复算：DFS 逐作业决定归属（不枚举排列），只在完整分配时
+		// 比较 makespan 与字典序。
 		jobs := benchmarkAuditArray(benchmarkAuditMatch(t, `作业 (\[[^\]]+\])`, prompt)[0])
+		total := 0
+		for _, job := range jobs {
+			total += job
+		}
 		best, indices := math.MaxInt, []int(nil)
-		benchmarkAuditPermutations(len(jobs), func(order []int) {
-			for split := 0; split <= len(order); split++ {
-				a, b := 0, 0
-				for _, i := range order[:split] {
-					a += jobs[i]
+		assigned := make([]bool, len(jobs))
+		var walk func(index, load int)
+		walk = func(index, load int) {
+			if index == len(jobs) {
+				candidate := []int{}
+				for i := range assigned {
+					if assigned[i] {
+						candidate = append(candidate, i)
+					}
 				}
-				for _, i := range order[split:] {
-					b += jobs[i]
-				}
-				candidate := append([]int{}, order[:split]...)
-				sort.Ints(candidate)
-				cost := max(a, b)
+				cost := max(load, total-load)
 				if cost < best || cost == best && benchmarkAuditLess(candidate, indices) {
 					best, indices = cost, candidate
 				}
+				return
 			}
-		})
+			walk(index+1, load)
+			assigned[index] = true
+			walk(index+1, load+jobs[index])
+			assigned[index] = false
+		}
+		walk(0, 0)
 		return map[string]any{"makespan": best, "machine_a_indices": indices}
 	case "concurrent-race":
 
@@ -362,20 +418,51 @@ func benchmarkAuditAnswer(t *testing.T, family, prompt string) any {
 		}
 		return greedy - minimum[total]
 	case "truth-assignment":
-		require.Contains(t, prompt, "p XOR q 为 true")
-		antecedent := benchmarkAuditMatch(t, `([pq]) IMPLIES ([pq]) 为 false`, prompt)
-		var solutions []map[string]any
-		for _, p := range []bool{false, true} {
-			for _, q := range []bool{false, true} {
-				values := map[string]bool{"p": p, "q": q}
-				implication := !values[antecedent[0]] || values[antecedent[1]]
-				if p != q && !implication {
-					solutions = append(solutions, map[string]any{"p": p, "q": q})
+		// 独立复算：从结构化数据块按全部赋值枚举与子句校验的朴素方式求解，
+		// 不使用生成器的位掩码辅助函数。
+		data := benchmarkAuditData(t, prompt)
+		rawNames, ok := data["variables"].([]any)
+		require.True(t, ok)
+		names := make([]string, len(rawNames))
+		for i, raw := range rawNames {
+			names[i] = raw.(string)
+		}
+		require.NotEmpty(t, names)
+		var solution map[string]any
+		count := 0
+		for mask := 0; mask < 1<<len(names); mask++ {
+			values := map[string]bool{}
+			for i, name := range names {
+				values[name] = mask>>i&1 == 1
+			}
+			ok := true
+			for _, raw := range data["clauses"].([]any) {
+				clauseOK := false
+				for _, literal := range raw.([]any) {
+					text := literal.(string)
+					negated := strings.HasPrefix(text, "NOT ")
+					name := strings.TrimPrefix(text, "NOT ")
+					value := values[name]
+					if negated {
+						value = !value
+					}
+					clauseOK = clauseOK || value
+				}
+				if !clauseOK {
+					ok = false
+					break
+				}
+			}
+			if ok {
+				count++
+				solution = map[string]any{}
+				for name, value := range values {
+					solution[name] = value
 				}
 			}
 		}
-		require.Len(t, solutions, 1, prompt)
-		return solutions[0]
+		require.Equal(t, 1, count, prompt)
+		return solution
 	case "strict-schema":
 		literal := benchmarkAuditMatch(t, `精确返回 (\{[^\n]+\})。`, prompt)[0]
 		var envelope map[string]any

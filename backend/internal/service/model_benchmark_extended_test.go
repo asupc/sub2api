@@ -5,6 +5,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -727,7 +728,7 @@ func TestModelBenchmarkPublicFormsAndSampling(t *testing.T) {
 	a := GenerateModelBenchmarkComparisonItems("study-2026", 1)
 	b := GenerateModelBenchmarkComparisonItems("study-2026", 1)
 	require.Equal(t, a, b)
-	require.Len(t, a, 56)
+	require.Len(t, a, len(modelBenchmarkFamilies))
 	hashes := map[string]map[string]bool{}
 	for form := 1; form <= 32; form++ {
 		for _, item := range GenerateModelBenchmarkComparisonItems(fmt.Sprintf("form-%d", form), form%3+1) {
@@ -750,13 +751,14 @@ func TestModelBenchmarkPublicFormsAndSampling(t *testing.T) {
 }
 
 func TestModelBenchmarkCoverageUsesPlannedItems(t *testing.T) {
-	run := &ModelBenchmarkRun{ItemCount: 56, SampleCount: 1}
+	run := &ModelBenchmarkRun{ItemCount: len(modelBenchmarkFamilies), SampleCount: 1}
 	items := []ModelBenchmarkRunItem{{Category: "math", Status: "correct", Score: 1, EarnedPoints: 1, PossiblePoints: 1}}
 	AggregateModelBenchmarkRun(run, items)
-	require.Equal(t, 56, run.ItemCount)
+	require.Equal(t, len(modelBenchmarkFamilies), run.ItemCount)
 	require.Equal(t, "partial", run.Status)
-	require.InDelta(t, 100.0/56, run.Quality.CompletionRate, 1e-9)
-	require.False(t, run.Quality.RankingEligible)
+	require.InDelta(t, 100.0/float64(len(modelBenchmarkFamilies)), run.Quality.CompletionRate, 1e-9)
+	// 排名资格不再由完成率决定：任何完成率都参与排名。
+	require.True(t, run.Quality.RankingEligible)
 	all := []ModelBenchmarkRunItem{}
 	for _, item := range GenerateModelBenchmarkComparisonItems("coverage", 1) {
 		raw, _ := json.Marshal(map[string]any{"answer": item.Expected})
@@ -773,12 +775,53 @@ func TestModelBenchmarkCoverageUsesPlannedItems(t *testing.T) {
 	}
 	AggregateModelBenchmarkRun(run, all)
 	require.Greater(t, run.Quality.CompletionRate, 90.0)
-	require.False(t, run.Quality.RankingEligible, "one missing domain must prevent ranking even at high overall coverage")
+	// 覆盖不足不再取消排名资格，改为通过 0 分分母拉低成绩。
+	require.True(t, run.Quality.RankingEligible)
+	require.Less(t, *run.IntelligenceScore, 100.0)
+}
+
+func TestModelBenchmarkUnexecutedPlannedItemsScoreZero(t *testing.T) {
+	comparisonKey := ModelBenchmarkDefaultComparisonKey
+	planned := GenerateModelBenchmarkComparisonItems(comparisonKey, 1)
+	run := &ModelBenchmarkRun{ComparisonKey: comparisonKey, SampleCount: 1, ItemCount: len(planned), UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
+	// 只执行前两题（全部答对），模拟执行中断：其余计划题没有作答记录。
+	items := []ModelBenchmarkRunItem{}
+	totalWeight, earned := 0.0, 0.0
+	for i, item := range planned {
+		weight := modelBenchmarkItemWeight(item)
+		totalWeight += weight
+		if i < 2 {
+			raw, _ := json.Marshal(map[string]any{"answer": item.Expected})
+			result := ModelBenchmarkScoreAnswer(item, string(raw))
+			require.Equal(t, "correct", result.Status, item.ID)
+			earned += result.EarnedPoints
+			items = append(items, result)
+		}
+	}
+	items = padUnexecutedBenchmarkItems(run, items)
+	require.Len(t, items, len(planned))
+	AggregateModelBenchmarkRun(run, items)
+	// 未完成就不得分：分母按全部计划题权重计（聚合分会舍入到 1 位小数）。
+	require.NotNil(t, run.IntelligenceScore)
+	require.InDelta(t, math.Round(earned/totalWeight*1000)/10, *run.IntelligenceScore, 1e-9)
+	require.Equal(t, 2, run.AnsweredCount)
+	require.Equal(t, "partial", run.Status)
+	require.InDelta(t, 100.0*2/float64(len(planned)), run.Quality.CompletionRate, 1e-9)
+	require.True(t, run.Quality.RankingEligible, "任何完成率都参与排名")
+
+	// 全部未作答：能力分为 0，而不是没有分数；分母仍是全部计划题。
+	emptyRun := &ModelBenchmarkRun{ComparisonKey: comparisonKey, SampleCount: 1, ItemCount: len(planned), UsageFieldCoverage: map[string]bool{}, CategoryScores: map[string]float64{}}
+	padded := padUnexecutedBenchmarkItems(emptyRun, nil)
+	require.Len(t, padded, len(planned))
+	AggregateModelBenchmarkRun(emptyRun, padded)
+	require.NotNil(t, emptyRun.IntelligenceScore)
+	require.Equal(t, 0.0, *emptyRun.IntelligenceScore)
+	require.Equal(t, "failed", emptyRun.Status)
 }
 
 func TestModelBenchmarkBudgetIncludesAllSamples(t *testing.T) {
 	plan := &ModelBenchmarkPlan{SampleCount: 3, TimeoutSeconds: 600}
-	require.Greater(t, ModelBenchmarkRunBudget(plan), time.Duration(56*3*600)*time.Second)
+	require.Equal(t, time.Duration(len(modelBenchmarkFamilies)*3*600)*time.Second+2*time.Minute, ModelBenchmarkRunBudget(plan))
 }
 
 func TestModelBenchmarkEquivalentWitnesses(t *testing.T) {

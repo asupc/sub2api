@@ -26,6 +26,8 @@ type ModelBenchmarkPlan struct {
 	SampleCount     int        `json:"sample_count"`
 	MaxOutputTokens int        `json:"max_output_tokens"`
 	TimeoutSeconds  int        `json:"timeout_seconds"`
+	ReasoningEffort string     `json:"reasoning_effort"`
+	ReasoningLevel  string     `json:"reasoning_level"`
 	MaxResults      int        `json:"max_results"`
 	RunningStatus   string     `json:"running_status"`
 	ClaimExpiresAt  *time.Time `json:"claim_expires_at"`
@@ -43,6 +45,8 @@ type ModelBenchmarkRun struct {
 	ComparisonKey      string                `json:"comparison_key"`
 	MaxOutputTokens    int                   `json:"max_output_tokens"`
 	TimeoutSeconds     int                   `json:"timeout_seconds"`
+	ReasoningEffort    string                `json:"reasoning_effort"`
+	ReasoningLevel     string                `json:"reasoning_level"`
 	SampleCount        int                   `json:"sample_count"`
 	Quality            ModelBenchmarkQuality `json:"quality"`
 	ID                 int64                 `json:"id"`
@@ -136,6 +140,8 @@ type ModelBenchmarkRanking struct {
 	ComparisonKey     string             `json:"comparison_key"`
 	MaxOutputTokens   int                `json:"max_output_tokens"`
 	TimeoutSeconds    int                `json:"timeout_seconds"`
+	ReasoningEffort   string             `json:"reasoning_effort"`
+	ReasoningLevel    string             `json:"reasoning_level"`
 	SampleCount       int                `json:"sample_count"`
 	ModelID           string             `json:"model_id"`
 	SuiteID           string             `json:"suite_id"`
@@ -188,6 +194,8 @@ type ModelBenchmarkRepository interface {
 	GetPlan(ctx context.Context, id int64) (*ModelBenchmarkPlan, error)
 	ListPlans(ctx context.Context) ([]*ModelBenchmarkPlan, error)
 	UpdatePlan(ctx context.Context, plan *ModelBenchmarkPlan) (*ModelBenchmarkPlan, error)
+	// ApplyPlanBudgetDefaults 将全局统一的采样次数与单题输出预算回填到所有计划。
+	ApplyPlanBudgetDefaults(ctx context.Context, sampleCount, maxOutputTokens int) error
 	DeletePlan(ctx context.Context, id int64) error
 	ClaimDuePlans(ctx context.Context, now time.Time, lease time.Duration, limit int) ([]*ModelBenchmarkPlan, error)
 	CompletePlan(ctx context.Context, id int64, lastRunAt, nextRunAt time.Time) error
@@ -288,6 +296,10 @@ func modelBenchmarkDifficultyWeight(difficulty int) float64 {
 		return 1.5
 	case 5:
 		return 2.2
+	case 6:
+		return 3.0
+	case 7:
+		return 4.0
 	}
 	return 1
 }
@@ -411,6 +423,8 @@ func readModelBenchmarkStrictJSONValue(decoder *json.Decoder) (any, error) {
 
 func scoreModelBenchmarkAnswer(item ModelBenchmarkItem, answer any) (float64, string) {
 	switch item.Checker {
+	case "coding_patch", "coding_witness":
+		return scoreModelBenchmarkCoding(item, answer)
 	case "witness":
 		return scoreModelBenchmarkWitness(item, answer)
 	case "integer":
@@ -666,7 +680,8 @@ func modelBenchmarkDisplay(value any) string {
 	return string(raw)
 }
 
-// AggregateModelBenchmarkRun calculates scores while keeping unavailable execution evidence out of correctness.
+// AggregateModelBenchmarkRun 按最终计分原则聚合：只要未作对就不得分，执行失败
+// 同样以 0 分进入能力分/分类分分母；完成率与用量诊断仍只统计有效作答。
 func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRunItem) {
 	planned := run.ItemCount
 	if planned < len(items) {
@@ -699,11 +714,12 @@ func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRu
 		if item.Status != "execution_failed" && item.Status != "format_error" {
 			completedCategory[item.Category]++
 		}
+		// 最终计分原则：执行失败即未作对，以 0 分计入分母（EarnedPoints 为 0）。
+		totalWeight += item.PossiblePoints
+		categoryTotals[item.Category] += item.PossiblePoints
 		if item.Status == "execution_failed" {
 			continue
 		}
-		totalWeight += item.PossiblePoints
-		categoryTotals[item.Category] += item.PossiblePoints
 		usageComplete = usageComplete && item.UsageSource == "upstream"
 		answered++
 		earnedWeight += item.EarnedPoints
@@ -725,23 +741,22 @@ func AggregateModelBenchmarkRun(run *ModelBenchmarkRun, items []ModelBenchmarkRu
 		run.Quality.CompletionRate = 100 * float64(valid) / float64(planned)
 		run.Quality.FormatComplianceRate = 100 * float64(valid) / float64(max(answered, 1))
 	}
-	run.Quality.RankingEligible = planned == len(modelBenchmarkFamilies)*1*samples && run.Quality.CompletionRate >= 90
+	// 排名资格不看完成率/覆盖率：任何完成率都参与排名，残缺 run 依靠「未完成就
+	// 不得分」的 0 分分母拉低成绩；覆盖率仅作诊断展示，不再是门槛。
+	run.Quality.RankingEligible = planned == len(modelBenchmarkFamilies)*1*samples
+	if !run.Quality.RankingEligible {
+		run.Quality.RankingReason = "suite_mismatch"
+	}
 	for category, expected := range expectedCategory {
 		coverage := 100 * float64(completedCategory[category]) / float64(expected)
 		run.Quality.CategoryCoverage[category] = coverage
-		if coverage < 80 {
-			run.Quality.RankingEligible = false
-		}
-	}
-
-	if !run.Quality.RankingEligible {
-		run.Quality.RankingReason = "insufficient_coverage"
 	}
 	if run.SuiteVersion == ModelBenchmarkSuiteVersion && run.MaxOutputTokens <= 0 {
 		run.Quality.RankingEligible = false
 		run.Quality.RankingReason = "provider_managed_budget"
 	}
-	if totalWeight > 0 && answered > 0 {
+	// 任何原因未完成的题都已计入分母：全未作答时能力分为 0，而不是没有分数。
+	if totalWeight > 0 {
 		score := math.Round(earnedWeight/totalWeight*1000) / 10
 		run.IntelligenceScore = &score
 		run.CategoryScores = map[string]float64{}
