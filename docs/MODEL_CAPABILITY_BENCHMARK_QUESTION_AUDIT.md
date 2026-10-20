@@ -2,7 +2,7 @@
 
 - 核实日期：2026-10-16（Asia/Shanghai）。
 - 范围：`hard-v1` 全部 24 个题型 × 2 个变体 = 48 题，包含动态参数、题面、标准答案、输出约定、checker 与实际运行版本标签。
-- 修订版本：第 1-6 节记录历史题库 `1.3.0` / 评分 `1.1.0` 的修复；第 7-9 节记录当前 v2 题库 `2.0.0` / 评分 `2.0.0`。
+- 修订版本：第 1-6 节记录历史题库 `1.3.0` / 评分 `1.1.0` 的修复；第 7-9 节记录历史 v2 题库 `2.0.0` / 评分 `2.0.0`。当前 v4 题库及独立复算记录见 `MODEL_CAPABILITY_BENCHMARK_CODING_V4.md`，历史证据不替代 v4 验证。
 - 证据边界：代码与确定性测试核实；没有调用真实模型、修改历史 run 或验证生产部署。本轮核实前工作区已有的固定位置排列公式修复一并复核并保留。
 
 ## 1. 已复现的答案错误与歧义
@@ -171,3 +171,63 @@
 | 真实模型重跑 / 难度校准 / 生产部署 | 外部模型、真实账号、生产实例 | NOT_RUN |
 
 测试环境：后端容器 `sub2api-backend-dev`（Go 1.27.2）与隔离 `postgres:16-alpine` fixture；前端使用仓库 pnpm 依赖。真实模型分数、题目难度校准和生产迁移状态不能由上述本地测试推出。
+
+## 10. v4 编程与算法强化核实（2026-10-17）
+
+当前题库和评分为 `4.0.0`，80 个题型/单卷 80 题，其中编程 25 题、权重 40%，算法 15 题、权重 20%。新增 24 个题型的公开题面独立复算 6,144 个实例与变异负例通过；与既有 56 题型共 20,480 个独立复算实例通过，受限补丁语言 720 种组合、等价最短反例、全部领域权重和完整试卷预算均验证通过。
+
+后端相关四包专项测试、最终 `go build ./...`、四包 `go vet`、前端 8 项页面测试、2 项 i18n 测试、改动文件 ESLint、完整前端构建均通过。golangci-lint v2.13 已执行，但因 Go 导出数据版本不兼容未取得有效结论（BLOCKED）；完整命令、首次失败及闭环记录见 `MODEL_CAPABILITY_BENCHMARK_CODING_V4.md`。D5 仅为设计标签，真实模型难度校准、真实数据库与生产验收仍为 NOT_RUN。
+
+## 11. v7 难度强化核实（2026-10-17）
+
+当前题库与评分均为 `7.0.0`，单卷 106 题 / 9 个能力域，难度标签扩展至 D7（权重 4.0）。本轮按用户「两者都做」的要求同时执行两类改动，不新增依赖、不执行模型生成的代码、不回溯改历史 run 分数。
+
+### 11.1 现有题型硬化
+
+| 题型 | 改动 | 独立复算方式 |
+|---|---|---|
+| modular-exponentiation | 底数 9 位、指数 10 位、模数 9 位 | 逐位平方-乘快速幂，全程 int64 无溢出 |
+| constrained-permutations | n=12..15、固定 k=3..5 | 子集状态计数（与生成器公式不同） |
+| shortest-path | 9 节点 13 边、字典序最小最短路径 | Floyd-Warshall 距离 + 按距离还原字典序路径 |
+| topological-order | 10 节点分叉 DAG、小根堆 Kahn | 显式最小堆逐步出队 |
+| cycle-detection | 返回环成员数组（不再布尔盲猜），8 节点 | DFS 回边检测 |
+| kmp-prefix | 28..34 字符 | 逐前缀枚举最长真前后缀 |
+| sparse-matrix | 14×14、双模条件 | 直接枚举全矩阵 |
+| token-bucket | 14 个动作、可变补充量 | 按题面事件逐条模拟 |
+| interval-dp | n=11..14 | 合并状态记忆化枚举 |
+| pseudocode-trace | Collatz 起点 100000..400000 | 直接迭代 |
+| markov-expected-steps | 两状态链（S1→S2→T） | 几何级数求和 1/(1-p1)+1/(1-p2) |
+| greedy-counterexample | 四枚面额、金额 40..240 | 完全背包 DP + 贪心模拟 |
+| pareto-frontier | 14 个二元组 | 逐对支配检查 |
+| truth-assignment | 5 变量结构化子句（variables/clauses） | 32 种赋值全枚举 + 唯一性断言 |
+| two-machine-schedule | 14 个作业 | DFS 逐作业分配 |
+
+### 11.2 D6 扩规模
+
+TSP n=14（Held-Karp 2^14×14）、SAT 18 变量 72 子句、三维以上多维背包 24 项 5 维、LRU 120 次访问、冲突图 12 事务 80 操作、16 位寄存器 80 次运算、LIS 80 元素、拓扑计数 12 节点、区间 DP 16 堆、矩阵链 10 个矩阵、8 点时间窗路线、6..9 人公开信息谜题、Nim 4..6 堆。所有预期值仍由公开数据块独立复算得出。
+
+### 11.3 新增 D7 复合题型（8 个）
+
+| 题型 | 能力域 | 考察内容 |
+|---|---|---|
+| `d7-dfa-minimize` | algorithms | 18 状态随机 DFA：可达状态最小化后的状态数、最短接受/拒绝串长度 |
+| `d7-regex-complement` | algorithms | 正则语法树补集的最短字符串长度（嵌套 star/cat/alt） |
+| `d7-permanent-mod` | math | 9×9 矩阵积和式模 1e9+7（Ryser 公式） |
+| `d7-vector-clock` | code | 4 进程、64 事件（含 send/recv）的向量时钟展平序列 |
+| `d7-crdt-merge` | code | 4 副本 LWW 寄存器按 (counter, node) 合并 |
+| `d7-list-scheduling` | planning | 20 作业、3 台机器、优先级约束的列表调度 makespan |
+| `d7-datalog-fixpoint` | logic | 三条规则的 Datalog 最小不动点 T 关系 |
+| `d7-planning-min-steps` | planning | 12 谓词 STRIPS 规划的最少动作数 |
+
+新增判分器未引入：D7 全部复用既有 `exact` / `integer` / `sequence` / `set` checker，答案均为确定性唯一值。
+
+### 11.4 验证记录
+
+| 命令 | 结果 | 证据 |
+|---|---|---|
+| `go test -tags=unit ./internal/service -run 'TestModelBenchmark' -count=1 -timeout=25m` | PASS | 全部测评单测（含核心 24 题、扩展 32 题、编程 24 题、D6 18 题、D7 8 题独立复算） |
+| `pnpm exec vitest run src/views/admin/__tests__/ModelBenchmarkView.spec.ts src/views/admin/__tests__/ModelBenchmarkPlansView.spec.ts` | PASS，9 项 | 版本 7.0.0、106 题、28%/18% 权重、106×采样成本提示 |
+| `go build ./...` / `go vet -tags=unit ./internal/service` | PASS | 编译与 vet |
+| 真实模型难度校准、生产部署 | NOT_RUN | 本轮仅本地确定性题库与单测验收 |
+
+D7 的难度标签同样只是设计标签；真实区分度必须在真实 run 数据上校准（见 `MODEL_CAPABILITY_BENCHMARK_FAIRNESS_AND_CALIBRATION.md` 第 5 节）。

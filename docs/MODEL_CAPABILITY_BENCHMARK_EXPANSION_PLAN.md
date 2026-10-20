@@ -77,8 +77,8 @@
 | 核心题型实例变化 | PASS，32 个公共批次下每个 item 均出现多个 prompt hash；拓扑、KMP、区间、并发、逻辑、规划等结构变化 |
 | 公共试卷与预算隔离 | PASS，同 key/sample 同题；不同 key/sample 变化；run 保存比较键、预算、超时、采样数 |
 | witness 等价正确解 | PASS，资源子集、时间窗路线、最小不一致子集、程序反例按可行性/最优性验证 |
-| 覆盖率与排名门槛 | PASS，总有效完成率 >=90%、各能力域 >=80%、同比较条件且至少 3 次；低覆盖保留诊断分 |
-| 预算截断 / 内容过滤 | PASS，直连 `finish_reason` 与流式终态事件均分类为 execution_failed，不按答错计 |
+| 覆盖率与排名门槛 | PASS（2026-10-17 调整），任何完成率都参与排名；覆盖率仅作诊断展示，未执行题合成计分行按 0 分进分母 |
+| 预算截断 / 内容过滤 | PASS，直连 `finish_reason` 与流式终态事件均分类为 execution_failed，按 0 分计入能力分分母（2026-10-17 计分原则调整） |
 | 集成平台预算 | PASS（本地 fake/stream 测试），WorkBuddy/Qoder/Trae 传递计划预算；OpenAI OAuth 标记 provider-managed |
 | run/claim 时限 | PASS，112 × samples × timeout + 2 分钟；claim lease 覆盖完整预算 + 1 分钟；停机取消执行上下文 |
 | 迁移与仓储 | PASS，245 仅加列/索引/精度；旧 run 默认 legacy；隔离 PostgreSQL 验证迁移、排行、历史、长租约与精度 |

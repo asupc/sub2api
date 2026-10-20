@@ -359,3 +359,103 @@
   - `frontend/src/i18n/locales/zh/common.ts`（nav.modelCapabilityCenter）
   - `docs/model-capability-center-design.html`、`mockups/model-capability-center-ui.html`
 - **与上游合并影响**：纯前端信息架构重排；backend API/schema 不动；旧 URL 仍可通过 redirect 访问，影响只限前端 admin 视图测试/路由断言。
+
+## 模型能力测评新增推理级别（2026-10-17）
+
+- **功能描述**：测评计划支持用户自定义推理级别（reasoning_effort），执行时按配置注入请求；未设置则不传，保持上游默认。支持 `reasoning_effort` / `reasoning_level` 两种字段别名。
+- **改动文件/模块**：`backend/internal/service/model_benchmark_types.go`、`model_benchmark_service.go`、`model_benchmark_executor.go`；`backend/internal/handler/admin/model_benchmark_handler.go`；`backend/internal/repository/model_benchmark_repo.go`；`backend/migrations/247_so_model_benchmark_reasoning_level.sql`；`frontend/src/api/admin/modelBenchmarks.ts`、`frontend/src/views/admin/model-capability/tabs/PlansTab.vue`、`frontend/src/i18n/locales/zh/admin/modelBenchmark.ts`。
+- **与上游合并影响**：纯二开改动，不影响 UPSTREAM-BASE。
+
+## 模型能力测评 v4：编程与算法强化（2026-10-17）
+
+- **功能描述**：`hard-v1` 题库和评分均由 `3.0.0` 升级至 `4.0.0`，更换种子盐，单卷从 56 题型/56 题增至 80 题型/80 题。新增 16 个编程题型和 8 个算法题型，均为设计难度 D5，D5 总数增至 49；真实难度仍待真实模型校准。
+- **编程比重**：编程领域从 9 题/12% 评分权重提高至 25 题/40%；算法从 7 题/12% 提高至 15 题/20%。合计 40 题、60% 权重，其他七域继续保留且领域权重总和为 100%。
+- **测评内容**：增加 Go 切片别名/defer、事件循环、MVCC 写偏斜、冲突串行化、CAS 全调度计数、死锁传播、脏页 LRU、污点不动点、字节码、补码溢出、ABI 布局、二分及区间和补丁、最短反例、SQL NULL；算法增加负环影响、最大流最小割、最大匹配计数、SCC、加权编辑距离、LIS 计数、区间更新和带钥匙最短路。
+- **判分与展示**：新增受限 `coding_patch` 和 `coding_witness` 判分器，完整有限输入域验证补丁并接受任意等价最短反例，不执行任意模型代码。页面显示题库版本、实际编程/算法权重，成本提示按 80×采样数更新；新旧成绩沿用版本隔离，现有计划参数保留。
+- **改动文件/模块**：新增 `backend/internal/service/model_benchmark_coding_{suite,algorithms,checker}.go` 及对应独立 oracle/负例测试；更新 `model_benchmark_suite.go`、`model_benchmark_extended_suite.go`、`model_benchmark_types.go` 和题量/覆盖/预算测试；更新前端 `OverviewTab.vue`、`modelBenchmark.ts` 与两页面测试；更新 `docs/MODEL_CAPABILITY_BENCHMARK_{PLAN,QUESTION_AUDIT}.md`，新增 `MODEL_CAPABILITY_BENCHMARK_CODING_V4.md` 并在 `.gitignore` 放行该文档。
+- **兼容修复**：保留工作区已有推理级别改动，补齐 `model_benchmark_repo.go` 的 `UpdatePlan` 推理字段参数及 RETURNING 列；`model_benchmark_repo_test.go` 同步 22 列 fixture 并补更新回归，关闭相关包测试中发现的 20/22 列不匹配。
+- **验证**：新增 24 题型 × 128 seed × 2 变体 = 6,144 个公开题面独立复算实例及错误答案探针；受限补丁语言 720 种组合、等价最短反例、领域权重归一与 80 题预算专项通过。四包测评单测、go build、go vet、前端 8 项页面测试、2 项 i18n 测试、改动文件 ESLint 及前端构建通过。golangci-lint v2.13 因不兼容 Go 导出数据格式而 BLOCKED；完整证据见 v4 文档。真实模型校准与生产部署未执行。
+- **与上游合并影响**：纯二开题库、判分、管理页面及文档增量；不新增依赖或数据库迁移，`UPSTREAM-BASE` 不变，上游只读仓库不变。
+
+## 模型中心页面调整（2026-10-17）
+
+- **功能描述**：菜单名称"模型能力中心"改为"模型中心"；模型能力中心页面取消二级 Tab，改为一级 Tab：模型清单、模型排名、测评计划、测评流水；测评设置显示已配置 Key 的名称，并回显所选分组与 API Key。
+- **改动文件/模块**：`frontend/src/components/layout/AppSidebar.vue`（菜单 label）、`frontend/src/i18n/locales/zh/common.ts`、`frontend/src/i18n/locales/zh/admin/modelBenchmark.ts`、`frontend/src/router/index.ts`、`frontend/src/views/admin/model-capability/ModelCapabilityCenterView.vue`、`frontend/src/views/admin/model-capability/tabs/OverviewTab.vue`、`frontend/src/views/admin/model-capability/tabs/PlansTab.vue`、`frontend/src/views/admin/__tests__/ModelBenchmarkPlansView.spec.ts`。
+- **与上游合并影响**：纯前端二开改动，`UPSTREAM-BASE` 不变。
+
+## 模型中心字段展示补全（2026-10-17）
+
+- **功能描述**：测评计划列表展示编辑表单的全部字段（采样次数、输出预算、推理级别、超时、max_results 等）；模型排名与测评流水新增模型推理强度展示；后端排名查询与 DTO 同步返回 `reasoning_effort`/`reasoning_level`。
+- **改动文件/模块**：`backend/internal/service/model_benchmark_types.go`、`backend/internal/repository/model_benchmark_repo.go`、`frontend/src/api/admin/modelBenchmarks.ts`、`frontend/src/views/admin/model-capability/tabs/PlansTab.vue`、`frontend/src/views/admin/components/benchmark/ModelLeaderboard.vue`、`frontend/src/views/admin/components/benchmark/RunsTable.vue`。
+- **与上游合并影响**：纯二开改动，`UPSTREAM-BASE` 不变。
+
+## 模型能力测评升级（2026-10-17）
+
+- **功能**：hard-v1 题库从 v4.0.0（80 题型）升级到 v5.0.0（98 题型），新增 18 个 D6 难度题型（大图算法、长链模拟、SAT/约束、多步规划、博弈论），difficulty 扩展至 6；输出预算默认从 4096 放开到 32768。
+- **改动文件**：backend/internal/service/model_benchmark_d6_suite.go（新建）、model_benchmark_d6_test.go（新建）、model_benchmark_suite.go、model_benchmark_types.go、model_benchmark_extended_suite.go、model_benchmark_coding_algorithms.go、domain_constants.go、model_benchmark_service.go、frontend/src/views/admin/model-capability/tabs/PlansTab.vue
+- **与上游合并影响**：不涉及 UPSTREAM-BASE。
+
+## 测评设置统一管理采样次数与单题 max tokens（2026-10-17）
+
+- **功能描述**：采样次数（1-3）与单题 max tokens（128-32768）从计划级参数提升为「测评设置」全局统一配置：设置保存后回填所有测评计划（`ApplyPlanBudgetDefaults`），创建计划时以设置值为准（忽略请求传入值），编辑计划不再接受这两项修改。计划新建/编辑表单中两项改为只读回显（disabled），并在设置卡片新增两个数字输入与 API Key 一并保存；未重新选择 Key 时保存沿用已配置 Key（避免误清除）。执行链路零改动（run 仍从 plan 拷贝快照，`max_tokens` 仍取 `plan.MaxOutputTokens`）。手动执行确认与成本提示的采样数改读全局设置。
+- **改动文件/模块**：`backend/internal/service/settings_view.go`（`ModelBenchmarkSettings` 加 `sample_count`/`max_output_tokens`，默认 1/8192）、`setting_features.go`（读取兜底旧 JSON）、`model_benchmark_types.go`（仓储接口加 `ApplyPlanBudgetDefaults`）、`model_benchmark_service.go`（`UpdateBenchmarkSettings` 校验并回填、`CreatePlan` 套用设置值、`UpdatePlan` 移除两项合并）、`backend/internal/repository/model_benchmark_repo.go`（全表回填实现）；`frontend/src/api/admin/modelBenchmarks.ts`、`frontend/src/views/admin/model-capability/tabs/PlansTab.vue`、`frontend/src/i18n/locales/zh/admin/modelBenchmark.ts`；测试 `model_benchmark_test.go`（settings 校验/回填/CreatePlan 套用）、`ModelBenchmarkPlansView.spec.ts`（保存载荷与只读断言）。
+- **与上游合并影响**：纯二开改动（测评模块本身为二开），`UPSTREAM-BASE` 不变。
+
+## 修复测评设置保存 max_output_tokens=32768 时 500（2026-10-17）
+
+- **功能描述**：`PUT /admin/model-benchmarks/settings` 传入 `max_output_tokens=32768`（或计划写入 >4096）时触发 PostgreSQL `model_benchmark_plans_max_output_tokens_check`（上限 4096）/`model_benchmark_plans_timeout_seconds_check`（上限 600）违反，`ApplyPlanBudgetDefaults` 返回 500。新增迁移 `248_so_model_benchmark_budget_limits.sql` 将两约束放宽为服务层/前端允许的 128-32768 / 10-900，与 `ModelBenchmarkSettings` 校验及计划校验对齐，避免合法配置保存失败。
+- **改动文件/模块**：`backend/migrations/248_so_model_benchmark_budget_limits.sql`；`CHANGELOG-SO.md`。
+- **与上游合并影响**：纯二开改动（测评模块为二开），`UPSTREAM-BASE` 不变。
+
+
+## 模型能力测评 v6：难度强化（2026-10-17）
+
+- 套件版本 5.0.0 → 6.0.0，盐值更新；权重从 code 40% 调整为 28%，提升 logic/abstraction/understanding/planning 权重。
+- D6 与 coding 题型扩大数据规模（TSP、SAT、多维背包、LRU、冲突图、溢出、LIS、矩阵链等），减少可直接模拟/记忆的题目。
+- 修复数据泄露：epistemic 题不再公开 keys，改为公开 seen_counts 推理；Nim 题不再直接暴露 XOR 公式，要求返回最优首着。
+- 评分严格化：任何不匹配的正确答案均不得分；witness 题仍接受等价最优解，但增加规模与约束。
+- 改动文件：backend/internal/service/model_benchmark_suite.go、model_benchmark_d6_suite.go、model_benchmark_coding_suite.go、model_benchmark_d6_test.go、model_benchmark_coding_test.go、model_benchmark_test.go；前端测试同步版本/权重。
+- 是否影响与上游合并：否，纯二开测评模块。
+
+## 测评计分最终原则：执行失败计 0 分进入分母（2026-10-17）
+
+- **功能描述**：确立「只要未作对就不得分」为测评计分最终原则：`execution_failed` 题（网络/上游/沙箱失败、预算截断、内容过滤）不再被排除在能力分之外，而是以 0 分计入能力分与分类分分母（`AggregateModelBenchmarkRun` 中分母累加移到执行失败跳过之前）。完成率、格式合规率、能力域覆盖率、`AnsweredCount`、用量诊断（`usageComplete`）仍只统计有效作答——残缺 run 的排名资格门槛（完成率 ≥90%、各域覆盖 ≥80%）不变。背景：生产 Run #149 两题 execution_failed 能力分仍 100，暴露旧规则（CHANGELOG 前文「上游失败不计为答错」「执行失败不计入能力分分母」）与用户预期不符，经确认废除旧规则。
+- **改动文件/模块**：`backend/internal/service/model_benchmark_types.go`（聚合函数注释与分母逻辑）、`backend/internal/service/model_benchmark_test.go`（`TestModelBenchmarkAggregateExecutionFailureDoesNotBecomeZeroIntelligence` 重写为 `...CountsAsMissed`，断言 2/5=40）、`docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md`（2 处计分规则）、`docs/MODEL_CAPABILITY_BENCHMARK_EXPANSION_PLAN.md`（1 处验收描述）。
+- **与上游合并影响**：纯二开改动（测评模块为二开），`UPSTREAM-BASE` 不变。
+
+## 测评排名完全开放：任何完成率都参与排名、未执行题计 0 分（2026-10-17）
+
+- **功能描述**：落实计分最终原则的第二步——「任何完成率都参与排名，未完成就不得分」：①`AggregateModelBenchmarkRun` 移除完成率 ≥90% 与能力域覆盖 ≥80% 两道排名资格门禁（覆盖率仅作诊断展示），原 `insufficient_coverage` 原因废弃，套件规模不匹配改标 `suite_mismatch`（仅剩它与 provider-managed budget 两个资格门槛）；②`finishRun` 收尾聚合前新增 `padUnexecutedBenchmarkItems`：执行中断/超时导致计划内未产生作答记录的题合成 `execution_failed` 计分行（`not_executed`，不落库），以 0 分计入能力分/分类分分母；③`finishRun` 不再因执行出错直接取消排名资格——残缺 run 的成绩由 0 分分母自然拉低。完成率、格式合规率、`AnsweredCount` 语义不变（仍只统计有效作答）；同时拆除能力分计算的 `answered > 0` 门槛——全未作答的 run 能力分记 0（而非空值），分母恒为全部计划题权重，任何原因未完成的题都不会把分母缩小为 0 或缺失。
+- **改动文件/模块**：`backend/internal/service/model_benchmark_types.go`（排名资格逻辑）、`backend/internal/service/model_benchmark_service.go`（pad 函数 + finishRun 调用与 execErr 分支）、`backend/internal/service/model_benchmark_extended_test.go`（覆盖测试断言改为资格开放/分数拉低，新增 `TestModelBenchmarkUnexecutedPlannedItemsScoreZero`）、`docs/MODEL_CAPABILITY_BENCHMARK_PLAN.md`、`docs/MODEL_CAPABILITY_BENCHMARK_EXPANSION_PLAN.md`。
+- **与上游合并影响**：纯二开改动（测评模块为二开），`UPSTREAM-BASE` 不变。
+
+## 模型能力测评 v7：核心题硬化 + D6 扩规模 + D7 复合题型（2026-10-17）
+
+- **功能描述**：`hard-v1` 题库与评分从 `6.0.0` 升级到 `7.0.0`（新种子盐），单卷从 98 题增至 106 题，难度标签扩展到 D7（权重 4.0）。两类改动同时执行：
+  1. **现有题型硬化**：`modular-exponentiation`（9~10 位参数）、`constrained-permutations`（n=12..15）、`shortest-path`（9 节点 13 边）、`topological-order`（10 节点小根堆 Kahn）、`cycle-detection`（改为返回环成员数组，消除布尔盲猜）、`kmp-prefix`（28..34 字符）、`sparse-matrix`（14×14 双模条件）、`token-bucket`（14 动作）、`interval-dp`（n=11..14）、`pseudocode-trace`（Collatz 起点 10 万级）、`markov-expected-steps`（两状态链）、`greedy-counterexample`（四枚面额+DP）、`pareto-frontier`（14 项）、`truth-assignment`（5 变量结构化子句数据块）、`two-machine-schedule`（14 作业）。
+  2. **D6 扩规模**：TSP n=14、SAT 18 变量 72 子句、多维背包 24 项 5 维、LRU 120 次访问、冲突图 12 事务 80 操作、16 位寄存器 80 次运算、LIS 80 元素、拓扑计数 12 节点、区间 DP 16 堆、矩阵链 10 矩阵、8 点时间窗路线等。
+  3. **新增 8 个 D7 复合题型**：`d7-dfa-minimize`、`d7-regex-complement`（algorithms）、`d7-permanent-mod`（math）、`d7-vector-clock`、`d7-crdt-merge`（code）、`d7-list-scheduling`、`d7-planning-min-steps`（planning）、`d7-datalog-fixpoint`（logic）。全部复用既有 checker，不执行模型生成的代码。
+- **判分与兼容**：能力域权重沿用 v6（code 28%、algorithms 18% 等）；`d7-datalog-fixpoint` 归入 logic、`d7-permanent-mod` 归入 math，其余 D7 题型计入对应既有能力域。旧 run 按版本隔离，不回溯改分。
+- **改动文件/模块**：`backend/internal/service/model_benchmark_suite.go`（版本/盐/核心题型硬化）、`model_benchmark_d7_suite.go`（新建）、`model_benchmark_d7_test.go`（新建）、`model_benchmark_d6_suite.go`（分发到 D7）、`model_benchmark_types.go`（D7 难度权重）、`model_benchmark_audit_test.go`（核心题独立 oracle 同步）、`model_benchmark_test.go`、`model_benchmark_extended_test.go`、`model_benchmark_coding_test.go`；前端 `ModelBenchmarkView.spec.ts`、`ModelBenchmarkPlansView.spec.ts`（版本/题量/权重/成本提示断言）；文档 `MODEL_CAPABILITY_BENCHMARK_PLAN.md`、`MODEL_CAPABILITY_BENCHMARK_QUESTION_AUDIT.md`（新增第 11 节）。
+- **验证**：`go test -tags=unit ./internal/service -run TestModelBenchmark -count=1 -timeout=25m` PASS；`go build ./...`、`go vet -tags=unit ./internal/service` PASS；前端 2 个测评页面 Vitest 共 9 项 PASS。真实模型难度校准与生产部署 NOT_RUN。
+- **与上游合并影响**：纯二开题库、判分与文档变更；不新增依赖、不新增数据库迁移，`UPSTREAM-BASE` 不变。
+
+## 模型能力测评：修复 D6/D7 作答行被难度约束拒绝导致测评中断（2026-10-17）
+
+- **问题现象**：测评页面「题目作答明细与思维链」显示 15 / 15 全部正确，但 Run 能力分只有 13.1 分（有效完成率 14.2%）。
+- **根因**：`243_so_model_capability_benchmark.sql` 建表时题库仅到 D5，`model_benchmark_run_items.difficulty` 的 CHECK 写死为 `BETWEEN 3 AND 5`；v5.0.0 起新增 D6、v7.0.0 起新增 D7 题型后约束未同步放宽。题目按 ID 字典序执行，前 15 题（a*~c* 的 D3-D5）正常落库，第 16 题（d6-*，难度 6）INSERT 时触发 `model_benchmark_run_items_difficulty_check` 违反，`ExecutePlan` 中断；`finishRun` 的 `padUnexecutedBenchmarkItems` 把剩余 91 题按「未执行=0 分」计入分母，故 15 题全对仍只有 13.1 分。历史 run #156/#154/#137 同样触发该错误（此前「未完成按 0 分」逻辑未上线时分母仅含已答题，故显示 100 分，属虚高）。
+- **修复**：新增迁移 `249_so_model_benchmark_difficulty_range.sql`，DROP 并重建约束为 `CHECK (difficulty BETWEEN 3 AND 7)`（不改 243，迁移有 checksum 校验）；`RunDetailModal.vue` 徽标由「筛选条数 / 已落库条数」改为「已作答 X / 共 Y 题」，并在存在未作答题时显示「N 题未作答 · 按 0 分计入」提示，避免把 15/15 误读为全卷全对。
+- **改动文件/模块**：`backend/migrations/249_so_model_benchmark_difficulty_range.sql`（新建）、`backend/migrations/model_benchmark_migration_test.go`、`frontend/src/views/admin/components/benchmark/RunDetailModal.vue`、`frontend/src/i18n/locales/zh/admin/modelBenchmark.ts`。
+- **验证**：`go test -tags=unit ./migrations/ -run 'TestModel.*Migration'` PASS；`go test -tags=unit ./internal/service/ -run 'TestModelBenchmark'` PASS；前端 `vue-tsc --noEmit`、ESLint（改动文件）、`vitest ModelBenchmarkView/ModelBenchmarkPlansView` 共 9 项 PASS。生产环境需部署新二进制（迁移随启动执行）后重跑测评才能得到真实分数；历史 run 的分数不回溯。
+- **与上游合并影响**：纯二开改动（测评模块为二开），`UPSTREAM-BASE` 不变。
+
+## Antigravity 用量查询改为 retrieveUserQuotaSummary（2026-10-17）
+
+- **问题现象**：账号列表里 Antigravity 账号的用量长期显示 0%（进度条永远满格/空白），刷新后仍是错误数据。
+- **根因（真实账号实测）**：旧实现调用 `v1internal:fetchAvailableModels` 读取每个模型的 `quotaInfo.remainingFraction`。该接口对全部 34 个模型恒返回 `remainingFraction: 1`（即使账号实际已消耗额度），且它返回的是模型目录能力信息，不是账号用量。真实用量在 `v1internal:retrieveUserQuotaSummary`：按额度组（`Gemini Models` / `Claude and GPT models`）返回 `buckets[]`，每组包含 `5h` 与 `weekly` 两个窗口，各自带 `remainingFraction` 与 `resetTime`。CLIProxyAPI 生态（CPA-Manager-Plus 管理面板、lamplighter 插件）均以该接口为额度来源。
+- **修复**：新增 `antigravity.Client.RetrieveUserQuotaSummary`（prod → daily URL 回退、403 归类为 ForbiddenError、1 MiB 读取上限）；`AntigravityQuotaFetcher.FetchQuota` 改走该接口，`UsageInfo` 新增 `antigravity_quota_groups`（组 key：`gemini` / `claude-gpt`，每桶含 window/utilization/reset_time）；`FiveHour` 兼容字段取首个 5h 桶。`fetchAvailableModels` 保留给模型目录同步（`upstream_models.go`），`antigravity_quota` 旧字段保留但注释标明不可作为用量来源。使用率由截断改为四舍五入（避免 `1-0.8` 算成 19%）。403 错误文案通过新增的 `ForbiddenError.Operation` 保持旧输出兼容。
+- **前端**：Antigravity 单元格改为按额度组渲染 `Gemini 5h/7d`、`Claude 5h/7d` 四条进度条（`label-width="auto"`，5h 在前），保留旧 `antigravity_quota` 回退分支；刷新按钮由 `justify-end` 改为 `justify-start`（靠左）；新增 i18n key `usageWindow.gemini`。
+- **渠道监控**：`usageQuotaTiers` 优先消费 `AntigravityQuotaGroups`（Window=5h/weekly，Label=组 key），旧 per-model `total/*` tier 仅保留给历史数据。
+- **改动文件/模块**：`backend/internal/pkg/antigravity/client.go`、`backend/internal/service/antigravity_quota_fetcher.go`、`account_usage_service.go`、`channel_monitor_quota_fetcher.go`、`antigravity_quota_fetcher_test.go`、`channel_monitor_quota_fetcher_test.go`；`frontend/src/types/index.ts`、`components/account/AccountUsageCell.vue`、`components/account/__tests__/AccountUsageCell.spec.ts`、`i18n/locales/zh/admin/accounts.ts`。
+- **验证**：真实账号直连 prod 端点跑通新链路（Gemini weekly 剩余 0.9387 → 6%，5h 0%，Claude 组独立）；`go build ./...`、`go test -tags=unit ./internal/service ./internal/pkg/antigravity` 相关用例 PASS；前端 `vue-tsc --noEmit`、ESLint、`vitest AccountUsageCell/UsageProgressBar` 72 项 PASS。
+- **与上游合并影响**：涉及上游同名文件 `antigravity_quota_fetcher.go` / `account_usage_service.go` / `channel_monitor_quota_fetcher.go` / `pkg/antigravity/client.go`，下次上游同步需按二开语义手工合并；`UPSTREAM-BASE` 不变。
