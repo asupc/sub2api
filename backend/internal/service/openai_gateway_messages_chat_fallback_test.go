@@ -76,7 +76,7 @@ func TestForwardAsAnthropic_ForceChatCompletionsPreservesFinalModelReasoningEffo
 			model:      "gpt-5.5",
 			mapped:     "gpt-5.5",
 			effortJSON: `,"output_config":{"effort":"max"}`,
-			wantEffort: "xhigh",
+			wantEffort: "max",
 		},
 		{
 			name:       "high remains high",

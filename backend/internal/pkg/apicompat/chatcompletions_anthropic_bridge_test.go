@@ -314,7 +314,7 @@ func TestAnthropicToChatCompletionsRequest_ReasoningEffortMapping(t *testing.T) 
 
 	out, err := AnthropicToChatCompletionsRequest(req)
 	require.NoError(t, err)
-	require.Equal(t, "xhigh", out.ReasoningEffort)
+	require.Equal(t, "max", out.ReasoningEffort)
 }
 
 func TestAnthropicToChatCompletionsRequest_ReasoningEffortDefaultMedium(t *testing.T) {

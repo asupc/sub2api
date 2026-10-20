@@ -94,7 +94,7 @@ func TestExtractCCReasoningEffortFromBody(t *testing.T) {
 	t.Run("legacy model max", func(t *testing.T) {
 		got := extractCCReasoningEffortFromBody([]byte(`{"model":"gpt-5.5","reasoning_effort":"max"}`))
 		require.NotNil(t, got)
-		require.Equal(t, "xhigh", *got)
+		require.Equal(t, "max", *got)
 	})
 
 	t.Run("missing effort", func(t *testing.T) {

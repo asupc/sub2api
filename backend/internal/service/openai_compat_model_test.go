@@ -266,12 +266,12 @@ func TestForwardAsAnthropic_PreservesMaxForFinalGPT56ResponsesModel(t *testing.T
 			wantEffort:    "max",
 		},
 		{
-			name:       "old model still maps max to xhigh",
+			name:       "old model also preserves max",
 			account:    rawGPT56ResponsesAPIKeyAccount("gpt-5.5", "gpt-5.5"),
 			model:      "gpt-5.5",
 			effort:     "max",
 			wantModel:  "gpt-5.5",
-			wantEffort: "xhigh",
+			wantEffort: "max",
 		},
 		{
 			name:       "GPT56 default remains medium",

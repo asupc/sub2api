@@ -1751,9 +1751,8 @@ func explicitRequestedReasoningEffortFromBody(body []byte) string {
 }
 
 // CanonicalRequestedReasoningEffort extracts the client-requested effort before
-// group policy rewriting and before model-family remapping (max -> xhigh).
-// Empty or unknown values return nil. "max" is preserved even for models that
-// later persist "xhigh".
+// any group policy rewriting. Empty or unknown values return nil. The value is
+// forwarded unchanged by the gateway (no max -> xhigh model-family remapping).
 func CanonicalRequestedReasoningEffort(body []byte, modelCandidates ...string) *string {
 	if raw := explicitRequestedReasoningEffortFromBody(body); raw != "" {
 		canonical := NormalizeMaxReasoningEffort(raw)
@@ -2559,9 +2558,9 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 	value = strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
 
 	switch value {
-	case "none", "minimal", "low", "medium", "high":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
 		return value
-	case "xhigh", "extrahigh", "max":
+	case "extrahigh":
 		return "xhigh"
 	default:
 		// Only store known effort levels for now to keep UI consistent.
@@ -2569,38 +2568,12 @@ func normalizeOpenAIReasoningEffort(raw string) string {
 	}
 }
 
-func normalizeOpenAIReasoningEffortForModel(raw, model string) string {
-	if strings.EqualFold(strings.TrimSpace(raw), "none") && openai.IsGPT6SolOrLunaModelSpelling(model) {
-		return "none"
-	}
-	if strings.EqualFold(strings.TrimSpace(raw), "max") && supportsOpenAIReasoningEffortMax(model) {
-		return "max"
-	}
+// normalizeOpenAIReasoningEffortForModel validates the client's effort and
+// forwards it unchanged. Model capabilities are not used to silently lower the
+// requested level; an upstream that rejects a level surfaces that error
+// directly instead of the gateway downgrading on the client's behalf.
+func normalizeOpenAIReasoningEffortForModel(raw, _ string) string {
 	return normalizeOpenAIReasoningEffort(raw)
-}
-
-// supportsOpenAIReasoningEffortMax reports model families whose upstream scale
-// has a distinct max level. Other models keep the legacy max -> xhigh behavior.
-func supportsOpenAIReasoningEffortMax(model string) bool {
-	if isOpenAIGPT6Model(model) || isOpenAIGPT56Model(model) {
-		return true
-	}
-
-	normalized := strings.ToLower(lastOpenAIModelSegment(model))
-	normalized = strings.ReplaceAll(normalized, "_", "-")
-	switch {
-	case strings.HasPrefix(normalized, "deepseek-v4"), strings.HasPrefix(normalized, "deepseek-flash"):
-		// deepseek-flash（= DeepSeek-V4.1-Flash）与 v4 系同为 low/high/max 档位。
-		return true
-	case strings.HasPrefix(normalized, "glm-"):
-		return true
-	case strings.HasPrefix(normalized, "kimi-"), strings.HasPrefix(normalized, "moonshot-"):
-		return true
-	case normalized == "k3" || strings.HasPrefix(normalized, "k3-"):
-		return true
-	default:
-		return false
-	}
 }
 
 // validateGPT61SolCompatRequest runs after model mapping, before conversion can

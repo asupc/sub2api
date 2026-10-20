@@ -236,7 +236,7 @@ func TestExtractResponsesReasoningEffortFromBody(t *testing.T) {
 
 	legacyMax := ExtractResponsesReasoningEffortFromBody([]byte(`{"model":"gpt-5.5","reasoning":{"effort":"max"}}`))
 	require.NotNil(t, legacyMax)
-	require.Equal(t, "xhigh", *legacyMax)
+	require.Equal(t, "max", *legacyMax)
 
 	require.Nil(t, ExtractResponsesReasoningEffortFromBody([]byte(`{"model":"claude-sonnet-4.5"}`)))
 }

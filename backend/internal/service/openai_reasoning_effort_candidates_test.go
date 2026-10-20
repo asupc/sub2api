@@ -43,10 +43,10 @@ func TestExtractOpenAIReasoningEffortFromBodyModelCandidates(t *testing.T) {
 			want:       "max",
 		},
 		{
-			name:       "显式 max 非 5.6 首候选仍折叠为 xhigh",
+			name:       "显式 max 非 5.6 首候选同样透传",
 			body:       bodyWithMax,
 			candidates: []string{"gpt-5.4", "sol"},
-			want:       "xhigh",
+			want:       "max",
 		},
 		{
 			name:       "所有候选均无后缀时返回 nil",

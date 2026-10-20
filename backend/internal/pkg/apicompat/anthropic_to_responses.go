@@ -445,13 +445,11 @@ func anthropicReasoningEffort(req *AnthropicRequest) string {
 	return mapAnthropicEffortToResponses(effort)
 }
 
-// mapAnthropicEffortToResponses maps shared effort levels directly and maps
-// Anthropic's max to OpenAI's xhigh.
+// mapAnthropicEffortToResponses passes the client's effort through unchanged.
+// Upstreams that only accept a subset of levels are expected to normalize it
+// themselves; the gateway must not silently lower the requested effort.
 func mapAnthropicEffortToResponses(effort string) string {
-	if effort == "max" {
-		return "xhigh"
-	}
-	return effort // low→low, medium→medium, high→high, unknown→passthrough
+	return effort
 }
 
 // convertAnthropicToolsToResponses maps Anthropic tool definitions to

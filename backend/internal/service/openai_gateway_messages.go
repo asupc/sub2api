@@ -170,9 +170,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	}
 
 	responsesReq.Model = upstreamModel
-	if responsesReq.Reasoning != nil {
-		responsesReq.Reasoning.Effort = openAICompatAnthropicReasoningEffort(&anthropicReq, upstreamModel, responsesReq.Reasoning.Effort)
-	}
 	if previousResponseID != "" {
 		responsesReq.PreviousResponseID = previousResponseID
 		trimAnthropicCompatResponsesInputToLatestTurn(responsesReq)

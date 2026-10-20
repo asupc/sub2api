@@ -989,11 +989,11 @@ func TestExtractOpenAIReasoningEffortFromBody(t *testing.T) {
 			wantValue: "max",
 		},
 		{
-			name:      "旧模型仍将 max 归一化为 xhigh",
+			name:      "旧模型同样透传 max",
 			body:      []byte(`{"reasoning_effort":"max"}`),
 			model:     "gpt-5.5",
 			wantNil:   false,
-			wantValue: "xhigh",
+			wantValue: "max",
 		},
 		{
 			name:      "minimal 保留用于计费",
