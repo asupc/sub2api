@@ -2,9 +2,12 @@
 # =============================================================================
 # Sub2API Multi-Stage Dockerfile (bundle build 分支副本)
 # =============================================================================
-# ⚠️ 本文件是根目录 Dockerfile 的分支副本，差异共两处：
+# ⚠️ 本文件是根目录 Dockerfile 的分支副本，差异共三处：
 #   L42 corepack prepare pnpm@9 -> pnpm@11.9.0
 #   L47 COPY 增加 frontend/pnpm-workspace.yaml（二开 allowBuilds 构建脚本审批）
+#   末段 RUN chmod +x -> chmod 755：NAS 工作区源码文件 mode 恒为 000，COPY 进
+#   镜像后 chmod +x 只得 111（无读位），/bin/sh 无法打开入口脚本导致容器循环重启
+#   （2026-10-20 部署事故，已回滚验证）。chmod 755 与源文件 mode 无关，恒可读可执行。
 # 原因：so 仓库 frontend/pnpm-lock.yaml 由宿主机 pnpm 11.9.0 维护（package.json 的
 # pnpm.overrides 在 pnpm 10+ 为死配置、不写入 lockfile），容器内 pnpm@9 校验
 # frozen-lockfile 时会报 ERR_PNPM_LOCKFILE_CONFIG_MISMATCH；而 lockfile 的格式要求
@@ -162,7 +165,7 @@ RUN mkdir -p /app/data && chown sub2api:sub2api /app/data
 
 # Copy entrypoint script (fixes volume permissions then drops to sub2api)
 COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+RUN chmod 755 /app/docker-entrypoint.sh
 
 # Expose port (can be overridden by SERVER_PORT env var)
 EXPOSE 8080
