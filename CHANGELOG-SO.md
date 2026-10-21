@@ -23,6 +23,7 @@
 - **来源**：qoder2api-hub `5acef5e..91f17c2`（多提交）；trae-workbuddy-switch `8edb86d..cbd2bf9`（多提交）；workbuddy 无更新。
 - **已移植（第一批）**：Qoder 风控身份形态对齐（issue #61/#64）——`fingerprint.DeriveID` 改为带连字符 UUID 形状（版本位 4/变体位 a，`QD_DEVICE_ID_LEGACY=1` 可保留旧 32-hex），`GenerateRequestID` 改为每请求纯随机 32-hex，新增 `DeriveMachineHostname`；`sign.CosySession` 新增 `MachineHostname`，SSE 路径在 `QD_COSY_OS_HEADERS` 默认开启时补发 `cosy-machineos` / `cosy-machinehostname`。对应黄金向量与测试已更新。
 - **已移植（第二批）**：Qoder 出站体 #59/#60/#63 相关——`normalizeTools` 丢弃 `namespace`/`web_search` 工具类型；`BuildAgentChatBody` 不再重复下发 `image_urls`/`chat_context.imageUrls` 的整份 Base64；新增 `QD_MAX_BODY_MB`（默认 29MB）超限返回 `ErrPayloadTooLarge`。对应测试已更新。
+- **已移植（第三批）**：Qoder 共享组织配额（issue #39/#67）——`QuotaUsage` 解析 `orgResourcePackage/sharedQuota/...`，新增 `Shared*` 与 `EffectiveRemain`（remain + 可用共享 remain，无限池不计入占位 remaining）；`QoderQuotaSnapshot` 新增共享字段并将 `Remain` 设为有效余额。对应测试 PASS。
 - **改动文件**：`backend/internal/pkg/qoder/fingerprint.go`、`fingerprint_test.go`、`sign.go`、`sign_test.go`、`accounts_test.go`。
 - **评估未移植/待后续批次**：Qoder 共享组织配额、工具调用/桥接稳定性、队列/冷却/4xx、模型目录与缓存、运营/UI 增强；Trae OAuth 区域与无客户端部署、Max Mode/上下文窗口、积分到期候选字段等仍待实施。PORTER-BASE 暂不推进，待全部选定项有明确结论后再更新。
 

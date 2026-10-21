@@ -334,12 +334,20 @@ const (
 
 // QoderQuotaSnapshot 额度快照（extra["qd_quota"] 的形状）。
 type QoderQuotaSnapshot struct {
-	Remain    int    `json:"remain"`
-	Used      int    `json:"used"`
-	Total     int    `json:"total"`
-	Exceeded  bool   `json:"exceeded,omitempty"`
-	Plan      string `json:"plan,omitempty"`
-	UpdatedAt string `json:"updated_at"`
+	Remain           int    `json:"remain"`
+	Used             int    `json:"used"`
+	Total            int    `json:"total"`
+	Exceeded         bool   `json:"exceeded,omitempty"`
+	Plan             string `json:"plan,omitempty"`
+	UpdatedAt        string `json:"updated_at"`
+	// issue #39/#67：共享组织配额（有效余额已计入 Remain）。
+	SharedRemain     int    `json:"shared_remain,omitempty"`
+	SharedUsed       int    `json:"shared_used,omitempty"`
+	SharedSize       int    `json:"shared_size,omitempty"`
+	SharedAvailable  bool   `json:"shared_available,omitempty"`
+	SharedUnlimited  bool   `json:"shared_unlimited,omitempty"`
+	SharedSource     string `json:"shared_source,omitempty"`
+	EffectiveRemain  int    `json:"effective_remain,omitempty"`
 }
 
 // QueryAccountQuota 查询账号剩余积分：落 extra["qd_quota"] 快照并做 qd_no_credit
@@ -382,11 +390,18 @@ func (s *QoderOAuthService) ProbeQoderQuota(ctx context.Context, account *Accoun
 		return nil, infraerrors.Newf(http.StatusBadGateway, "QODER_QUOTA_UPSTREAM_FAILED", "查询 Qoder 额度失败: %v", err)
 	}
 	snapshot := &QoderQuotaSnapshot{
-		Remain:    quota.Remain,
-		Used:      quota.Used,
-		Total:     quota.Size,
-		Exceeded:  quota.Exceeded,
-		UpdatedAt: time.Now().Format(time.RFC3339),
+		Remain:           quota.EffectiveRemain,
+		Used:             quota.Used,
+		Total:            quota.Size,
+		Exceeded:         quota.Exceeded,
+		UpdatedAt:        time.Now().Format(time.RFC3339),
+		SharedRemain:     quota.SharedRemain,
+		SharedUsed:       quota.SharedUsed,
+		SharedSize:       quota.SharedSize,
+		SharedAvailable:  quota.SharedAvailable,
+		SharedUnlimited:  quota.SharedUnlimited,
+		SharedSource:     quota.SharedSource,
+		EffectiveRemain:  quota.EffectiveRemain,
 	}
 	// 套餐名尽力而为（拉取失败不影响额度快照）。
 	if plan, perr := client.UserPlan(ctx, creds); perr == nil && plan != "" {

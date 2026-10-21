@@ -288,13 +288,21 @@ type QuotaPackage struct {
 
 // QuotaUsage /api/v2/quota/usage 聚合结果（fetch_credits L2316-2385）。
 type QuotaUsage struct {
-	Remain    int            `json:"remain"`
-	Used      int            `json:"used"`
-	Size      int            `json:"size"`
-	Exceeded  bool           `json:"exceeded"`
-	UsagePct  any            `json:"usage_pct"`
-	ExpiresAt int64          `json:"expires_at"`
-	Packages  []QuotaPackage `json:"packages"`
+	Remain           int            `json:"remain"`
+	Used             int            `json:"used"`
+	Size             int            `json:"size"`
+	Exceeded         bool           `json:"exceeded"`
+	UsagePct         any            `json:"usage_pct"`
+	ExpiresAt        int64          `json:"expires_at"`
+	Packages         []QuotaPackage `json:"packages"`
+	// issue #39/#67：共享组织配额（orgResourcePackage 等）。
+	SharedRemain     int    `json:"shared_remain,omitempty"`
+	SharedUsed       int    `json:"shared_used,omitempty"`
+	SharedSize       int    `json:"shared_size,omitempty"`
+	SharedAvailable  bool   `json:"shared_available,omitempty"`
+	SharedUnlimited  bool   `json:"shared_unlimited,omitempty"`
+	SharedSource     string `json:"shared_source,omitempty"`
+	EffectiveRemain  int    `json:"effective_remain"`
 }
 
 type quotaUsageRaw struct {
@@ -303,6 +311,12 @@ type quotaUsageRaw struct {
 	IsQuotaExceeded      bool           `json:"isQuotaExceeded"`
 	TotalUsagePercentage any            `json:"totalUsagePercentage"`
 	ExpiresAt            any            `json:"expiresAt"`
+	OrgResourcePackage   any            `json:"orgResourcePackage"`
+	SharedQuota          any            `json:"sharedQuota"`
+	TeamQuota            any            `json:"teamQuota"`
+	PoolQuota            any            `json:"poolQuota"`
+	SharedCredits        any            `json:"sharedCredits"`
+	SharedCredit         any            `json:"sharedCredit"`
 }
 
 // QuotaUsage 拉取并聚合额度（GET /api/v2/quota/usage：基础 + 赠送/签到）。
@@ -328,17 +342,107 @@ func (c *Client) QuotaUsage(ctx context.Context, creds Credentials) (*QuotaUsage
 		}
 	}
 	uq, aq := raw.UserQuota, raw.AddOnQuota
+	remain := int(num(uq, "remaining") + num(aq, "remaining"))
+	used := int(num(uq, "used") + num(aq, "used"))
+	size := int(num(uq, "total") + num(aq, "total"))
+
+	// issue #39/#67：解析共享组织配额（orgResourcePackage 等）。
+	var sharedSrc map[string]any
+	var sharedAny any
+	var sharedKey string
+	for _, cand := range []struct {
+		key string
+		val any
+	}{
+		{"orgResourcePackage", raw.OrgResourcePackage},
+		{"sharedQuota", raw.SharedQuota},
+		{"teamQuota", raw.TeamQuota},
+		{"poolQuota", raw.PoolQuota},
+		{"sharedCredits", raw.SharedCredits},
+		{"sharedCredit", raw.SharedCredit},
+	} {
+		if m, ok := cand.val.(map[string]any); ok {
+			sharedSrc = m
+			sharedAny = cand.val
+			sharedKey = cand.key
+			break
+		}
+		if n, ok := cand.val.(float64); ok {
+			// 数值形态：视为 remain/size
+			sharedSrc = map[string]any{"remaining": n, "used": float64(0), "cap": n}
+			sharedAny = sharedSrc
+			sharedKey = cand.key
+			break
+		}
+	}
+	sharedRemain, sharedUsed, sharedSize := 0, 0, 0
+	sharedAvailable := false
+	sharedUnlimited := false
+	if sharedSrc != nil {
+		sharedRemain = int(num(sharedSrc, "remaining"))
+		sharedUsed = int(num(sharedSrc, "used"))
+		// cap 优先，其次 total
+		if capv := num(sharedSrc, "cap"); capv != 0 {
+			sharedSize = int(capv)
+		} else {
+			sharedSize = int(num(sharedSrc, "total"))
+		}
+		// available：缺键视为 true；显式 false/0/null 视为 false
+		if v, ok := sharedSrc["available"]; ok {
+			switch t := v.(type) {
+			case bool:
+				sharedAvailable = t
+			case float64:
+				sharedAvailable = t != 0
+			case nil:
+				sharedAvailable = false
+			default:
+				sharedAvailable = true
+			}
+		} else {
+			sharedAvailable = true
+		}
+		if sharedSize < 0 {
+			sharedUnlimited = true
+		}
+	}
+	_ = sharedAny
+
+	// 有效余额 = 套餐 remain + 可用的共享 remain（无限池不计入占位 remaining）。
+	sharedAvailRemain := 0
+	if sharedSrc != nil && sharedAvailable && !sharedUnlimited {
+		sharedAvailRemain = sharedRemain
+	}
+	effectiveRemain := remain + sharedAvailRemain
+
+	packages := []QuotaPackage{
+		{Name: "基础额度", Remain: int(num(uq, "remaining")), Used: int(num(uq, "used")), Size: int(num(uq, "total"))},
+		{Name: "赠送/签到额度", Remain: int(num(aq, "remaining")), Used: int(num(aq, "used")), Size: int(num(aq, "total"))},
+	}
+	if sharedSrc != nil {
+		packages = append(packages, QuotaPackage{
+			Name:   "共享额度",
+			Remain: sharedRemain,
+			Used:   sharedUsed,
+			Size:   sharedSize,
+		})
+	}
+
 	out := &QuotaUsage{
-		Remain:    int(num(uq, "remaining") + num(aq, "remaining")),
-		Used:      int(num(uq, "used") + num(aq, "used")),
-		Size:      int(num(uq, "total") + num(aq, "total")),
-		Exceeded:  raw.IsQuotaExceeded,
-		UsagePct:  raw.TotalUsagePercentage,
-		ExpiresAt: normalizeEpoch(raw.ExpiresAt),
-		Packages: []QuotaPackage{
-			{Name: "基础额度", Remain: int(num(uq, "remaining")), Used: int(num(uq, "used")), Size: int(num(uq, "total"))},
-			{Name: "赠送/签到额度", Remain: int(num(aq, "remaining")), Used: int(num(aq, "used")), Size: int(num(aq, "total"))},
-		},
+		Remain:           remain,
+		Used:             used,
+		Size:             size,
+		Exceeded:         raw.IsQuotaExceeded,
+		UsagePct:         raw.TotalUsagePercentage,
+		ExpiresAt:        normalizeEpoch(raw.ExpiresAt),
+		Packages:         packages,
+		SharedRemain:     sharedRemain,
+		SharedUsed:       sharedUsed,
+		SharedSize:       sharedSize,
+		SharedAvailable:  sharedAvailable,
+		SharedUnlimited:  sharedUnlimited,
+		SharedSource:     sharedKey,
+		EffectiveRemain:  effectiveRemain,
 	}
 	return out, nil
 }
