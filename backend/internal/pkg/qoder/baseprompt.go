@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -721,6 +722,22 @@ func findCatalogEntry(realm, modelKey string) CatalogEntry {
 // maxInputTokensDefault 目录缺省上下文（build_qoder_body L3618）。
 const maxInputTokensDefault = 180000
 
+// maxBodyMB 默认 29MB（issue #59 QD_MAX_BODY_MB）。
+func maxBodyBytes() int {
+	raw := strings.TrimSpace(os.Getenv("QD_MAX_BODY_MB"))
+	if raw == "" {
+		raw = "29"
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		n = 29
+	}
+	return n * 1024 * 1024
+}
+
+// ErrPayloadTooLarge 编码后请求体超过 QD_MAX_BODY_MB（issue #59）。
+var ErrPayloadTooLarge = fmt.Errorf("qoder: payload too large")
+
 // anyOrDefault 值缺失（nil）时给默认值（Python `v or default` 的常规输入域
 // 语义——非 nil 原样保留，工具名/描述/参数只可能是 string/object/缺失）。
 func anyOrDefault(v, def any) any {
@@ -741,6 +758,11 @@ func normalizeTools(tools []any) []any {
 	for _, t := range tools {
 		m, ok := t.(map[string]any)
 		if !ok {
+			continue
+		}
+		// issue #63：上游不支持的工具类型（namespace / web_search）在出站前丢弃，
+		// 避免 400。其余非 function 工具原样透传（与 Python 侧一致）。
+		if typ, _ := m["type"].(string); typ == "namespace" || typ == "web_search" {
 			continue
 		}
 		if hasKey(m, "name") && !hasKey(m, "function") && m["type"] == "function" {
@@ -890,10 +912,11 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	extra["originalContent"] = oc
 	extra["modelConfig"] = copyShallow(mc)
 	cc["extra"] = extra
-	if len(res.images) > 0 {
-		cc["imageUrls"] = res.images
-		body["image_urls"] = res.images
-	}
+	// issue #59：上游只读 messages parts 里的图片，body.image_urls / chat_context.imageUrls
+	// 的整份 Base64 重复不再下发（避免 payload 膨胀与 413）。
+	delete(cc, "imageUrls")
+	delete(body, "image_urls")
+	_ = res.images
 	body["chat_context"] = cc
 
 	// parameters：max_tokens / reasoning_effort
@@ -940,6 +963,9 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	body["business"] = biz
 
 	encoded := QoderEncode([]byte(marshalNoEscape(body)))
+	if len(encoded) > maxBodyBytes() {
+		return "", ErrPayloadTooLarge
+	}
 	return encoded, nil
 }
 

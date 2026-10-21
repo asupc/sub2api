@@ -415,13 +415,13 @@ func TestBuildAgentChatBodyImagesAndVisionParts(t *testing.T) {
 	if userMsg["content"] != "看图" {
 		t.Fatalf("flattened content = %v", userMsg["content"])
 	}
+	// issue #59：上游只读 messages parts，image_urls / chat_context.imageUrls 不再重复下发。
 	cc, _ := body["chat_context"].(map[string]any)
-	urls, _ := cc["imageUrls"].([]any)
-	if len(urls) != 1 || urls[0] != "https://x/img.png" {
-		t.Fatalf("imageUrls = %v", urls)
+	if _, ok := cc["imageUrls"]; ok {
+		t.Fatalf("imageUrls must not be duplicated: %v", cc["imageUrls"])
 	}
-	if body["image_urls"] == nil {
-		t.Fatal("top-level image_urls must be set")
+	if _, ok := body["image_urls"]; ok {
+		t.Fatal("top-level image_urls must not be duplicated")
 	}
 }
 
