@@ -486,3 +486,14 @@
 - **部署验证**：新镜像先以生产环境变量 + 数据目录副本做独立容器冒烟（连真实库启动至 healthy、迁移校验通过、无错误日志），再 `docker compose up -d --force-recreate` 替换；正式容器 healthy、`/health` ok、版本 `0.2.17 (commit 18e0078, built 2026-10-20T05:04:44Z)`。回滚备份镜像：`sub2api:0.2.17-pre-effort-20261020`（原始）、`…-effort-broken-20261020`（入口权限故障）、`…-effort-broken2-20261020`（checksum 故障）。
 - **改动文件/模块**：`backend/internal/repository/migrations_runner.go`（245 兼容规则）、`deploy/Dockerfile.bundle`（chmod 755 + 头注释）。
 - **与上游合并影响**：`migrations_runner.go` 与根 `Dockerfile` 均为上游同名文件/副本，下次同步需保留二开语义；`UPSTREAM-BASE` 不变。
+
+## 2026-10-21 构建链修复：根 Dockerfile 在 NAS 全新缓存下的四处失败（含 qoder 第三批部署）
+
+- **事故背景**：在 fnOS NAS 上构建 `sub2api:0.2.17-so-20261021`（含 qoder 风控身份形态对齐、出站体对齐、共享组织配额三批移植）时，node 基础镜像更新导致前端层缓存全失效，暴露出 10-13「开源」提交引入的构建矛盾——此前所有"成功"构建均依赖 Docker 缓存掩盖，CI 全新环境同样会失败。
+- **修复一（pnpm workspace）**：`frontend/pnpm-workspace.yaml` 只有 pnpm 10 语法的 `allowBuilds:` 缺 `packages:` 字段，pnpm 9.15.9 直接报 `packages field missing or empty`；补 `packages: ['.']`（单项目声明为根，语义不变，pnpm 10 下 allowBuilds 继续生效）。
+- **修复二（lockfile 与 overrides 失配）**：`package.json` 的 `pnpm.overrides`（10-13 引入）从未回写进 lockfile，`--frozen-lockfile` 报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`；在容器内以 pnpm 9.15.9 重新生成 `pnpm-lock.yaml`（settings 段补录 overrides，postcss 收敛至 8.5.29，37 增 52 删的最小 diff）。
+- **修复三（执行位丢失）**：`backend/scripts/resolve-version.sh` 在二开 git init 时丢了执行位（git 100644，上游 100755），`./scripts/resolve-version.sh` 报 Permission denied；`git update-index --chmod=+x` 恢复。注意 fnOS fs mode 恒为 000，本地构建仍须传 `--build-arg VERSION=…` 绕过该脚本，git 修复仅惠及 CI/正常机器。
+- **修复四（resources 000 权限）**：根 `Dockerfile` 的 `COPY … /app/resources` 继承 fnOS fs 的 000 mode，镜像内非 root 用户读取报 permission denied（启动日志 `[Pricing] Fallback merge skipped`；与 10-20 `Dockerfile.bundle` entrypoint 修复同一性质），补 `RUN chmod -R a+rX /app/resources`。
+- **部署验证**：新镜像 `sub2api:0.2.17-so-20261021`（VERSION=0.2.17 / commit ed3b52a）经 `/vol2/1000/docker/sub2api/docker-compose.yml` 部署，容器 healthy、`/health` 200、Pricing 257 模型加载、TraeOps/WorkbuddyOps/QoderOps 运营任务全部拉起；回滚镜像 `sub2api:0.2.17` 保留。
+- **改动文件/模块**：`frontend/pnpm-workspace.yaml`、`frontend/pnpm-lock.yaml`、`backend/scripts/resolve-version.sh`（仅 git mode）、根 `Dockerfile`。
+- **与上游合并影响**：`pnpm-workspace.yaml` 为二开独有文件；`pnpm-lock.yaml` 与根 `Dockerfile` 为上游同名文件，下次同步需保留 chmod 二开语义；`UPSTREAM-BASE` 不变。

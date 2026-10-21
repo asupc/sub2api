@@ -141,6 +141,10 @@ WORKDIR /app
 # Copy binary/resources with ownership to avoid extra full-layer chown copy
 COPY --from=backend-builder --chown=sub2api:sub2api /app/sub2api /app/sub2api
 COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/resources /app/resources
+# fnOS 工作区源码 mode 恒为 000，COPY 进来的 resources 无法被非 root 的
+# sub2api 用户读取（曾致 model-pricing fallback 加载 permission denied），
+# 与 Dockerfile.bundle 的 entrypoint chmod 同理，读取位必须显式恢复
+RUN chmod -R a+rX /app/resources
 
 # Create data directory
 RUN mkdir -p /app/data && chown sub2api:sub2api /app/data

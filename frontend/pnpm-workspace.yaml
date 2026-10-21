@@ -1,3 +1,6 @@
+# pnpm 9 要求 workspace 文件必须含 packages 字段（单项目声明为根即可）
+packages:
+  - .
 allowBuilds:
   esbuild: true
   vue-demi: true
