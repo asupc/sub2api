@@ -177,11 +177,12 @@ type Identity struct {
 // machine 系列字段按账号 UID 稳定派生（同一账号永远来自同一台虚拟设备）；
 // tempKey/cosyKey/info 在会话创建时生成，access token 轮换后整体重建。
 type CosySession struct {
-	UID          string
-	MachineID    string
-	MachineToken string
-	MachineType  string
-	AccessToken  string
+	UID             string
+	MachineID       string
+	MachineToken    string
+	MachineType     string
+	MachineHostname string
+	AccessToken     string
 	// UserType 透传给上游请求体的 aliyun_user_type（build_qoder_body）。
 	UserType string
 
@@ -206,12 +207,13 @@ func NewCosySession(id Identity) (*CosySession, error) {
 		userType = DefaultUserType
 	}
 	s := &CosySession{
-		UID:          uid,
-		MachineID:    DeriveID(uid, "machine"),
-		MachineToken: DeriveMachineToken(uid),
-		MachineType:  DeriveMachineType(uid),
-		AccessToken:  id.AccessToken,
-		UserType:     userType,
+		UID:             uid,
+		MachineID:       DeriveID(uid, "machine"),
+		MachineToken:    DeriveMachineToken(uid),
+		MachineType:     DeriveMachineType(uid),
+		MachineHostname: DeriveMachineHostname(uid),
+		AccessToken:     id.AccessToken,
+		UserType:        userType,
 	}
 	// 对齐 qoder_sign.py L555 uuid4().hex[:16] 的形态：16 个十六进制字符。
 	buf := make([]byte, 8)
@@ -308,6 +310,10 @@ func (s *CosySession) Headers(body, rawURL, modelKey string, sse bool, accept st
 	h.Set("user-agent", "Go-http-client/2.0")
 	if sse {
 		h.Set("cache-control", "no-cache")
+		if cosyOSHeadersEnabled() {
+			h.Set("cosy-machineos", cosyMachineOS())
+			h.Set("cosy-machinehostname", s.MachineHostname)
+		}
 	}
 	if modelKey != "" {
 		h.Set("x-model-key", modelKey)

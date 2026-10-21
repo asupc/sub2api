@@ -15,12 +15,12 @@ func TestDeriveGolden(t *testing.T) {
 		want string
 		desc string
 	}{
-		{DeriveID(uid, "machine"), "e3fac2ea4adabb7c875c420475b06bd1", "derive_id(machine)"},
-		{DeriveID(uid, "session"), "3cadbc91dfaa734ce8bd057c4953aaa8", "derive_id(session)"},
-		{DeriveID(uid, "machinecode"), "e5e70733d1f2d4ae022701bce309e443", "derive_id(machinecode)"},
-		{DeriveMachineType(uid), "a522ea2c0d7b4a2601", "derive_machine_type"},
+		{DeriveID(uid, "machine"), "e3fac2ea-4ada-4b7c-a75c-420475b06bd1", "derive_id(machine)"},
+		{DeriveID(uid, "session"), "3cadbc91-dfaa-434c-a8bd-057c4953aaa8", "derive_id(session)"},
+		{DeriveID(uid, "machinecode"), "e5e70733-d1f2-44ae-a227-01bce309e443", "derive_id(machinecode)"},
+		{DeriveMachineType(uid), "a522ea2c0d7b4a26a1", "derive_machine_type"},
 		{DeriveMachineToken(uid), "O2hPgJNw30x4jQ99Kb5_EdYW76MQKF5Ns5FXTr2mtNt", "derive_machine_token"},
-		{DeriveID("", "machine"), "fc1f3f603c8bcdc0783942ea0169ab1e", "empty uid -> anonymous"},
+		{DeriveID("", "machine"), "fc1f3f60-3c8b-4dc0-a839-42ea0169ab1e", "empty uid -> anonymous"},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -48,8 +48,8 @@ func TestDeriveStability(t *testing.T) {
 
 // TestDeriveShapes 输出形状（长度/字符集）与源实现一致。
 func TestDeriveShapes(t *testing.T) {
-	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
-	if !hex32.MatchString(DeriveID("x", "machine")) {
+	uuidShape := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	if !uuidShape.MatchString(DeriveID("x", "machine")) {
 		t.Fatalf("derive_id shape: %q", DeriveID("x", "machine"))
 	}
 	hex18 := regexp.MustCompile(`^[0-9a-f]{18}$`)
@@ -61,7 +61,7 @@ func TestDeriveShapes(t *testing.T) {
 		t.Fatalf("machine_token shape: %q", DeriveMachineToken("x"))
 	}
 	rid := GenerateRequestID("x")
-	if !regexp.MustCompile(`^[0-9a-f]{32}-\d{6}$`).MatchString(rid) {
+	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(rid) {
 		t.Fatalf("request id shape: %q", rid)
 	}
 }

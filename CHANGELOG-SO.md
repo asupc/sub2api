@@ -18,6 +18,13 @@
 - **基准推进**：PORTER-BASE 的 qoder 行更新至 `5acef5e…`、trae 行更新至 `8edb86d…`（workbuddy 不变）。
 - **与上游合并影响**：不涉及 sub2api-upstream-sync 的 UPSTREAM-BASE。
 
+## 平台移植源同步（PORTER-BASE 2026-10-21，部分执行）
+
+- **来源**：qoder2api-hub `5acef5e..91f17c2`（多提交）；trae-workbuddy-switch `8edb86d..cbd2bf9`（多提交）；workbuddy 无更新。
+- **已移植（第一批）**：Qoder 风控身份形态对齐（issue #61/#64）——`fingerprint.DeriveID` 改为带连字符 UUID 形状（版本位 4/变体位 a，`QD_DEVICE_ID_LEGACY=1` 可保留旧 32-hex），`GenerateRequestID` 改为每请求纯随机 32-hex，新增 `DeriveMachineHostname`；`sign.CosySession` 新增 `MachineHostname`，SSE 路径在 `QD_COSY_OS_HEADERS` 默认开启时补发 `cosy-machineos` / `cosy-machinehostname`。对应黄金向量与测试已更新。
+- **改动文件**：`backend/internal/pkg/qoder/fingerprint.go`、`fingerprint_test.go`、`sign.go`、`sign_test.go`、`accounts_test.go`。
+- **评估未移植/待后续批次**：Qoder 共享组织配额、工具调用/桥接稳定性、队列/冷却/4xx、模型目录与缓存、运营/UI 增强；Trae OAuth 区域与无客户端部署、Max Mode/上下文窗口、积分到期候选字段等仍待实施。PORTER-BASE 暂不推进，待全部选定项有明确结论后再更新。
+
 ## 当前状态（2026-10-13 核实）`
 
 | 项 | 状态 |

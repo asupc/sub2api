@@ -150,10 +150,10 @@ func TestNewCosySessionGolden(t *testing.T) {
 		t.Fatalf("info mismatch:\n got %s\nwant %s", s.Info, goldInfo)
 	}
 	// 指纹派生形状
-	if s.MachineID != "e3fac2ea4adabb7c875c420475b06bd1" {
+	if s.MachineID != "e3fac2ea-4ada-4b7c-a75c-420475b06bd1" {
 		t.Fatalf("machine id = %s", s.MachineID)
 	}
-	if s.MachineType != "a522ea2c0d7b4a2601" {
+	if s.MachineType != "a522ea2c0d7b4a26a1" {
 		t.Fatalf("machine type = %s", s.MachineType)
 	}
 	if s.MachineToken != "O2hPgJNw30x4jQ99Kb5_EdYW76MQKF5Ns5FXTr2mtNt" {

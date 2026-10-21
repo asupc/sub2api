@@ -78,8 +78,13 @@ func TestOpenAPIHeaders(t *testing.T) {
 	}
 	// X-Request-ID：稳定前缀 + 6 位微秒后缀
 	rid := h.Get("X-Request-ID")
-	if !strings.HasPrefix(rid, DeriveID("u-42", "req")+"-") || len(rid) != len(DeriveID("u-42", "req"))+7 {
+	if len(rid) != 32 {
 		t.Fatalf("request id = %q", rid)
+	}
+	for _, c := range rid {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			t.Fatalf("request id not hex: %q", rid)
+		}
 	}
 	if h.Get("Origin") != "https://qoder.com.cn" || h.Get("Referer") != "https://qoder.com.cn/" {
 		t.Fatalf("origin/referer: %q %q", h.Get("Origin"), h.Get("Referer"))
