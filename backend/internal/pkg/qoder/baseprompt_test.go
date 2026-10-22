@@ -3,6 +3,7 @@
 package qoder
 
 import (
+	"time"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -216,8 +217,12 @@ func TestStructuredToolHistoryGate(t *testing.T) {
 	if !StructuredToolHistoryEnabled("cn", "qwen3.7-plus", "gm51model", msgs) {
 		t.Fatal("auto/cn/key-prefix gm5 must enable")
 	}
-	if StructuredToolHistoryEnabled("cn", "deepseek-v4-pro", "dmodel", msgs) {
-		t.Fatal("auto/cn/deepseek must not enable")
+	// issue #60 follow-up：DeepSeek 族纳入白名单（deepseek 前缀 + 上游 key dfmodel）。
+	if !StructuredToolHistoryEnabled("cn", "deepseek-v4-pro", "dmodel", msgs) {
+		t.Fatal("auto/cn/deepseek must enable")
+	}
+	if !StructuredToolHistoryEnabled("cn", "DeepSeek-V4-Flash", "dfmodel", msgs) {
+		t.Fatal("auto/cn/dfmodel key must enable")
 	}
 	if StructuredToolHistoryEnabled("cn", "kimi-k2.8", "kmodel", msgs) {
 		t.Fatal("auto/cn/kimi must not enable")
@@ -412,8 +417,19 @@ func TestBuildAgentChatBodyImagesAndVisionParts(t *testing.T) {
 		t.Fatalf("first message must be template system: %+v", msgs[0])
 	}
 	userMsg, _ := msgs[1].(map[string]any)
-	if userMsg["content"] != "看图" {
-		t.Fatalf("flattened content = %v", userMsg["content"])
+	// 多模态（#36/#72 收口）：带图消息 content 保留结构化 parts，图片真正
+	// 传上游（旧语义是丢弃图片只留文本）。
+	parts, ok := userMsg["content"].([]any)
+	if !ok || len(parts) != 2 {
+		t.Fatalf("flattened content must be multimodal parts, got %v", userMsg["content"])
+	}
+	p0, _ := parts[0].(map[string]any)
+	if p0["type"] != "text" || p0["text"] != "看图" {
+		t.Fatalf("text part = %v", parts[0])
+	}
+	p1, _ := parts[1].(map[string]any)
+	if p1["type"] != "image_url" {
+		t.Fatalf("image part = %v", parts[1])
 	}
 	// issue #59：上游只读 messages parts，image_urls / chat_context.imageUrls 不再重复下发。
 	cc, _ := body["chat_context"].(map[string]any)
@@ -631,3 +647,87 @@ func TestBuildAgentChatBodyNormalizesFlatTools(t *testing.T) {
 		t.Fatalf("bare parameters must default to empty object: %+v", bareFn)
 	}
 }
+
+func TestStructuredRejectMemory(t *testing.T) {
+	structuredRejectMu.Lock()
+	saved := structuredRejectMem
+	structuredRejectMem = map[string]time.Time{}
+	structuredRejectMu.Unlock()
+	t.Cleanup(func() {
+		structuredRejectMu.Lock()
+		structuredRejectMem = saved
+		structuredRejectMu.Unlock()
+	})
+
+	msgs := toolHistoryMessages()
+	// 命中记忆前：结构化启用；记入后同模型立即回文本模式，区域隔离不连累。
+	if !StructuredToolHistoryEnabled("cn", "deepseek-v4-flash", "dfmodel", msgs) {
+		t.Fatal("deepseek must enable before memory")
+	}
+	NoteStructuredRejected("cn", "dfmodel")
+	if StructuredToolHistoryEnabled("cn", "deepseek-v4-flash", "dfmodel", msgs) {
+		t.Fatal("rejected model must fall back to text mode")
+	}
+	if StructuredToolHistoryEnabled("intl", "deepseek-v4-flash", "dfmodel", msgs) {
+		t.Fatal("intl must never enable (realm gate)")
+	}
+	// 显式 on 压过记忆（用户手动强制时承担 400）。
+	t.Setenv(structuredToolHistoryEnv, "on")
+	if !StructuredToolHistoryEnabled("cn", "deepseek-v4-flash", "dfmodel", msgs) {
+		t.Fatal("on mode must override memory")
+	}
+	// 过期即忘。
+	structuredRejectMu.Lock()
+	structuredRejectMem["cn|dfmodel"] = time.Now().Add(-structuredRejectTTL - time.Second)
+	structuredRejectMu.Unlock()
+	t.Setenv(structuredToolHistoryEnv, "")
+	if !StructuredToolHistoryEnabled("cn", "deepseek-v4-flash", "dfmodel", msgs) {
+		t.Fatal("expired memory must be forgotten")
+	}
+}
+
+func TestCleanupOrphanToolHistory(t *testing.T) {
+	batch := func(ids ...string) []any {
+		out := []any{}
+		for _, id := range ids {
+			out = append(out, map[string]any{"id": id, "type": "function",
+				"function": map[string]any{"name": "t", "arguments": "{}"}})
+		}
+		return out
+	}
+	toolMsg := func(id string) map[string]any {
+		return map[string]any{"role": "tool", "tool_call_id": id, "content": "r"}
+	}
+	msgs := []any{
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "assistant", "tool_calls": batch("a", "b")},
+		toolMsg("a"),
+		map[string]any{"role": "assistant", "tool_calls": batch("c")},
+		map[string]any{"role": "assistant", "content": "done"},
+	}
+	out := CleanupOrphanToolHistory(msgs)
+	// b 无结果 → 第一批整批删除（连 a 一起，防悬空）；c 无结果 → 删。
+	got := 0
+	for _, m := range out {
+		mm := m.(map[string]any)
+		if _, has := mm["tool_calls"]; has {
+			t.Fatalf("orphan batch must be dropped, got %+v", mm)
+		}
+		if mm["role"] == "tool" {
+			t.Fatalf("tool result of dropped batch must go too, got %+v", mm)
+		}
+		got++
+	}
+	if got != 4 {
+		t.Fatalf("expect user + 3 assistants, got %d", got)
+	}
+	// 配对完整时原样保留。
+	full := []any{
+		map[string]any{"role": "assistant", "tool_calls": batch("x")},
+		toolMsg("x"),
+	}
+	if out := CleanupOrphanToolHistory(full); len(out) != 2 {
+		t.Fatalf("complete pairs must survive, got %d", len(out))
+	}
+}
+

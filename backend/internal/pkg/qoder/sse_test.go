@@ -859,3 +859,42 @@ func TestStripDataPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestLeakMarkerVariants(t *testing.T) {
+	// issue #60 follow-up：marker 的括号变体（尖括号 / 缺尾括号 / 多括号）
+	// 必须与规范形同样被识别、归一与回读。
+	names := map[string]bool{"t": true}
+	variants := []string{
+		"[<assistant 请求调用工具\n" + `[{"name":"t","arguments":{"a":1}}]`,
+		"[assistant 请求调用工具\n" + `[{"name":"t","arguments":{"a":1}}]`,
+		"<assistant 请求调用工具>\n" + `[{"name":"t","arguments":{"a":1}}]`,
+		"[<assistant  请求调用工具]\n" + `[{"name":"t","arguments":{"a":1}}]`,
+		"</tool_callsDSML>\n[assistant 请求调用工具]\n" + `[{"name":"t","arguments":{"a":1}}]`,
+		// 报告者原文形态：散文前缀 + 尖括号 marker + 数组（#60 实测真机形态）。
+		"歪比巴布，先回答你。[<assistant 请求调用工具] " + `[{"name":"t","arguments":"{}"}]`,
+	}
+	for _, v := range variants {
+		if c, _ := ParseLeakedToolCalls(v, names); c == nil {
+			t.Fatalf("variant must recover tool_calls: %q", v)
+		}
+	}
+	// 变体裸 marker / 截断前缀的守卫语义。
+	if !leakedPartialDroppable("[<assistant 请求调用工具", names) {
+		t.Fatal("angle-bracket bare marker must be droppable")
+	}
+	if state, _ := leakBodyOffset("[<assista"); state != "pre" {
+		t.Fatalf("in-flight variant prefix must hold, got %q", state)
+	}
+	// 变体归一：尾括号形态统一，不补不缺；多余闭括号视为正文杂字保留。
+	if got := normalizeLeakMarker("[<assistant 请求调用工具{\"a\":1}"); got != "[assistant 请求调用工具{\"a\":1}" {
+		t.Fatalf("normalize no-close must not invent one: %q", got)
+	}
+	if got := normalizeLeakMarker("<assistant 请求调用工具>{\"a\":1}"); got != "[assistant 请求调用工具]{\"a\":1}" {
+		t.Fatalf("normalize close: %q", got)
+	}
+	// 散文 + marker 同帧：marker 之前先放行，marker 起进入 hold。
+	emit, hold := findMarkerSplit("好的，马上[<assistant 请求调用工具]"+`[{"name":"t"`, true)
+	if emit != "好的，马上" || !strings.HasPrefix(hold, "[<assistant 请求调用工具]") {
+		t.Fatalf("prose+marker same frame: emit=%q hold=%q", emit, hold)
+	}
+}

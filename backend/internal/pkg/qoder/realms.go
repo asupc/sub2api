@@ -1,6 +1,9 @@
 package qoder
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 // 双区域常量（qoder_accounts.py L39-80 REALM_CONFIGS 直译，逆向自官方
 // 桌面/CLI 客户端）。has_checkin 等提示位不再作为门控（能力改为运行时探测），
@@ -9,7 +12,7 @@ type RealmConfig struct {
 	Name string
 	// OpenAPI 业务域基址（纯 Bearer，无 COSY 签名）。
 	OpenAPI string
-	// Gateway 推理主机（intl 主选 api1，api2/api3 为官方故障切换域名）。
+	// Gateway 推理主选主机（intl 为 api3，备选见 GatewayFallbacks）。
 	Gateway          string
 	GatewayFallbacks []string
 	Website          string
@@ -36,7 +39,7 @@ var RealmConfigs = map[string]*RealmConfig{
 		ClientID:        "1c5e33e1-364d-4ce6-b02c-acaa81274a5c",
 		RedirectURI:     "qoder-work-cn://",
 		Domain:          "qoder.com.cn",
-		UA:              "QoderWork/1.1.64",
+		UA:              "QoderWork/1.1.75",
 		SendClientID:    true,
 		SendRedirectURI: true,
 		NonceDashed:     true,
@@ -44,19 +47,29 @@ var RealmConfigs = map[string]*RealmConfig{
 	"intl": {
 		Name:    "国际版 (Global)",
 		OpenAPI: "https://openapi.qoder.sh",
-		Gateway: "https://api1.qoder.sh",
-		// 推理主机取自 0.4.3 客户端的 endpoint 缓存/内置候选：
-		// api1 主选，api2/api3 为官方故障切换域名，连不上时按顺序切换。
-		GatewayFallbacks: []string{"https://api2.qoder.sh", "https://api3.qoder.sh"},
+		// 推理主机拆成两个集群——inference=api3、securityInference=api2；api1
+		// 已不在官方候选首位（本机实测也常年超时）。按官方端点缓存顺序对齐：
+		// api3 主、api2/api1 备（issue #61 时代的 api1 主选已过时）。
+		// QD_INTL_GATEWAY 可覆盖主选。
+		Gateway:         intlGateway(),
+		GatewayFallbacks: []string{"https://api2.qoder.sh", "https://api1.qoder.sh"},
 		Website:          "https://qoder.com",
 		ClientID:         "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
 		RedirectURI:      "qoder://aicoding.aicoding-agent/login-success",
 		Domain:           "qoder.com",
-		UA:               "Qoder/1.1.64",
+		UA:               "Qoder/1.1.75",
 		SendClientID:     true,
 		SendRedirectURI:  false,
 		NonceDashed:      false,
 	},
+}
+
+// intlGateway intl 推理主选（QD_INTL_GATEWAY 覆盖，默认 api3）。
+func intlGateway() string {
+	if v := strings.TrimSpace(os.Getenv("QD_INTL_GATEWAY")); v != "" {
+		return v
+	}
+	return "https://api3.qoder.sh"
 }
 
 // Realm 取区域配置；未知区域回落 cn（qoder_accounts.py L806-807）。
@@ -148,11 +161,20 @@ const LoginTTLSeconds = 600
 // 桌面端专用请求头常量（qoder_accounts.py L110-114：活动平台必需；
 // CLI=5 / QoderWork=6 / 桌面端=10）。
 const (
-	DesktopClientType    = "10"
-	DesktopClientVersion = "0.4.3"
-	MachineOS            = "x86_64_win32"
-	MachineHostname      = "DESKTOP-QODER"
+	DesktopClientType = "10"
+	// DesktopClientVersion 官方桌面端版本（desktop 链路 cosy-version 用；
+	// 0.4.8 对齐 #75 实测的官方主进程，QD_DESKTOP_VERSION 经
+	// desktopClientVersion() 覆盖）。
+	DesktopClientVersion = "0.4.8"
 )
+
+// desktopClientVersion 桌面端版本（QD_DESKTOP_VERSION 可覆盖，空值回落内置）。
+func desktopClientVersion() string {
+	if v := strings.TrimSpace(os.Getenv("QD_DESKTOP_VERSION")); v != "" {
+		return v
+	}
+	return DesktopClientVersion
+}
 
 // sessionDeadMarkers 会话死亡标记（qoder_accounts.py L798）：上游主动吊销
 // 离线会话，刷新已无意义，需要重新登录。

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -163,13 +164,19 @@ func (c Credentials) Identity() Identity {
 // 出站头
 // ---------------------------------------------------------------------------
 
-// OpenAPIHeaders openapi 域纯 Bearer 出站头（qoder_accounts.py L1646-1658）。
+// OpenAPIHeaders openapi 域纯 Bearer 出站头（qoder_accounts.py headers()）。
+// UA 必须与所属区域的官方客户端一致（CN: QoderWork/…，INTL: Qoder/…）——
+// Go 语言 HTTP 客户端的默认 UA 等于在每个 openapi 请求上自报「我是脚本」。
 func (c Credentials) OpenAPIHeaders() http.Header {
 	cfg := Realm(c.NormalizedRealm())
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "application/json, text/plain, */*")
-	h.Set("User-Agent", ClientUA)
+	ua := cfg.UA
+	if ua == "" {
+		ua = ClientUA
+	}
+	h.Set("User-Agent", ua)
 	h.Set("Authorization", "Bearer "+c.AccessToken)
 	h.Set("X-Request-ID", GenerateRequestID(c.UID))
 	h.Set("X-Machine-ID", DeriveID(c.UID, "machine"))
@@ -201,13 +208,26 @@ const (
 	MachineIdentityOmitted  = "omitted"
 )
 
+// desktopBaseHeaders 桌面端基础头（desktop_headers 的非机器头部分，对齐
+// 官方桌面端 0.4.8 主进程 createRequestHeaders + createAuthorizedHeaders，
+// 不多不少）：Accept: application/json、User-Agent: Qoder、Authorization、
+// Cosy-ClientType: 10、Cosy-Version: <桌面端版本>。没有 Content-Type /
+// X-Request-ID / X-Machine-ID / X-Session-ID / Origin / Referer；带请求体的
+// 调用（claim）由调用方自行补 Content-Type。
+func (c Credentials) desktopBaseHeaders() http.Header {
+	h := http.Header{}
+	h.Set("Accept", "application/json")
+	h.Set("User-Agent", "Qoder")
+	h.Set("Authorization", "Bearer "+c.AccessToken)
+	h.Set("cosy-clienttype", DesktopClientType)
+	h.Set("cosy-version", desktopClientVersion())
+	return h
+}
+
 // DesktopHeadersIdentity 桌面端出站头 + 本次机器头身份来源（native 优先，
 // 凭证导入次之，无真身份不发机器头）。
 func (c Credentials) DesktopHeadersIdentity() (http.Header, string) {
-	h := c.OpenAPIHeaders()
-	h.Set("User-Agent", "Qoder")
-	h.Set("cosy-clienttype", DesktopClientType)
-	h.Set("cosy-version", DesktopClientVersion)
+	h := c.desktopBaseHeaders()
 	if ident := NativeMachineIdentity(c.NormalizedRealm(), c.UID); ident.valid() {
 		c.applyMachineHeaders(h, ident.MachineToken, ident.MachineType, ident.MachineCode)
 		return h, MachineIdentityNative
@@ -222,17 +242,37 @@ func (c Credentials) DesktopHeadersIdentity() (http.Header, string) {
 // desktopHeadersWithIdentity 用指定身份构造桌面端头（自愈重试用：新身份
 // 直接注入，不再过缓存）。
 func (c Credentials) desktopHeadersWithIdentity(ident MachineIdentity) http.Header {
-	h := c.OpenAPIHeaders()
-	h.Set("User-Agent", "Qoder")
-	h.Set("cosy-clienttype", DesktopClientType)
-	h.Set("cosy-version", DesktopClientVersion)
+	h := c.desktopBaseHeaders()
 	c.applyMachineHeaders(h, ident.MachineToken, ident.MachineType, ident.MachineCode)
 	return h
 }
 
+// desktopHeadersMinimal 最小机器头形态（v1.6.9）：基础头 + 仅 machineos +
+// machinehostname。仅 showCampaign=false 且本次未发机器头时用一次。
+func (c Credentials) desktopHeadersMinimal() http.Header {
+	h := c.desktopBaseHeaders()
+	h.Set("cosy-machineos", cosyMachineOS())
+	if hn := machineHostname(); hn != "" {
+		h.Set("cosy-machinehostname", hn)
+	}
+	return h
+}
+
+// machineMinimalDisabled 最小机器头兜底开关（QD_INTL_MACHINE_FALLBACK，
+// v1.6.9 默认开）。
+func machineMinimalDisabled() bool {
+	raw := strings.ToLower(strings.TrimSpace(os.Getenv("QD_INTL_MACHINE_FALLBACK")))
+	switch raw {
+	case "0", "off", "false", "no", "disable", "disabled":
+		return true
+	}
+	return false
+}
+
 // applyMachineHeaders 注入全套 cosy-machine* 六头。machineid 按账号派生
 // （Python 同款：即便原生身份，machineid 也用 derive_id）；token/type/code
-// 用真值（原生身份或导入 token 时由调用方决定）。
+// 用真值（原生身份或导入 token 时由调用方决定）。machineos 与推理链路
+// 共用同一取值（cosyMachineOS）；machinehostname 用本机主机名（空则不发）。
 func (c Credentials) applyMachineHeaders(h http.Header, token, machineType, machineCode string) {
 	machineID := c.MachineID
 	if machineID == "" {
@@ -242,8 +282,10 @@ func (c Credentials) applyMachineHeaders(h http.Header, token, machineType, mach
 	h.Set("cosy-machinetoken", token)
 	h.Set("cosy-machinetype", machineType)
 	h.Set("cosy-machinecode", machineCode)
-	h.Set("cosy-machineos", MachineOS)
-	h.Set("cosy-machinehostname", MachineHostname)
+	h.Set("cosy-machineos", cosyMachineOS())
+	if hn := machineHostname(); hn != "" {
+		h.Set("cosy-machinehostname", hn)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +765,21 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 	var q campaignsPayload
 	if err := json.Unmarshal(raw, &q); err != nil {
 		return &CampaignsStatus{Available: true, Error: err.Error()}, nil
+	}
+	// v1.6.9 intl 兜底：列表被隐藏且本次未发机器头（无原生身份/导入 token）时，
+	// 用「最小机器头」（只发 machineos + machinehostname）再试一次——实测该
+	// 组合仍被服务端视为官方客户端（六头全发才会被过滤）；QD_INTL_MACHINE_FALLBACK
+	// 可关。属于「让列表回来」的最小代价。
+	if !q.ShowCampaign && source == MachineIdentityOmitted && !machineMinimalDisabled() {
+		var retryRaw json.RawMessage
+		if rerr := c.doJSON(ctx, http.MethodGet, url, nil,
+			creds.desktopHeadersMinimal(), &retryRaw); rerr == nil {
+			var rq campaignsPayload
+			if jerr := json.Unmarshal(retryRaw, &rq); jerr == nil && rq.ShowCampaign {
+				raw = retryRaw
+				q = rq
+			}
+		}
 	}
 	// 身份被拒自愈：原生身份 + showCampaign=false（服务端不认当前身份）→
 	// 清组件种子强制换新身份重试一次；重试仍不认则如实返回（等下次再试）。

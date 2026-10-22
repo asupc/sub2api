@@ -6,9 +6,11 @@ package qoder
 // （/sash/api/v1/me/campaigns）按**真实机器身份**过滤活动列表——派生的
 // cosy-machine* 假头会被服务端判定为非官方客户端，把 CLAIMABLE 的
 // 「每日领取 100 Credits」整条过滤；不发机器头时国际版活动可能整列不可见。
-// 官方桌面端通过原生组件取真身份：
+// 官方桌面端通过原生组件取真身份（调用契约对齐官方桌面端 0.4.8 /
+// qodercli 1.1.75，见 runtimeInfoEnv）：
 //
-//	runtime-info prod --account-stdin   stdin: {"account":"<uid>"}
+//	runtime-info <env>                                                # linux
+//	printf '{"account":"<uid>"}\n' | runtime-info <env> --account-stdin  # darwin/win32
 //	stdout: {"machineToken","machineType","machineCode","vmInfo",...}
 //
 // 组件来源（部署侧准备，代码只负责发现与调用）：
@@ -129,19 +131,41 @@ func umidWarnOnce(category, message string) {
 // runRuntimeInfoFn 组件调用入口（包级变量：单测注入 stub，Windows 环境无法
 // 伪造 ELF 组件）。
 var runRuntimeInfoFn = runRuntimeInfo
+// runtimeInfoEnv 传给 runtime-info 的环境码：国内版 0、国际版 3（官方桌面端
+// 0.4.8 主进程 `region === "global" ? 3 : 0`）；QD_RUNTIME_INFO_ENV 可覆盖。
+// 这份身份只用于活动平台头，与推理链路无关。
+func runtimeInfoEnv(realm string) string {
+	def := "0"
+	if realm == "intl" {
+		def = "3"
+	}
+	if v := strings.TrimSpace(os.Getenv("QD_RUNTIME_INFO_ENV")); v != "" {
+		return v
+	}
+	return def
+}
 
 // runRuntimeInfo 调一次组件并解析输出（Python run_runtime_info）。任何失败
 // 返回零值；「组件不存在」静默，「组件在但跑不起来/输出异常」按类别提示一次。
-func runRuntimeInfo(uid string) MachineIdentity {
+func runRuntimeInfo(realm, uid string) MachineIdentity {
 	exe := runtimeInfoPath()
 	if exe == "" {
 		return MachineIdentity{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), runtimeInfoTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, exe, "prod", "--account-stdin")
+	args := []string{runtimeInfoEnv(realm)}
+	var stdin *strings.Reader
+	if runtime.GOOS == "darwin" || runtime.GOOS == "windows" {
+		args = append(args, "--account-stdin")
+		// stdin 以换行结尾（官方契约；旧形态的尾随空格已废弃）。
+		stdin = strings.NewReader(fmt.Sprintf("{\"account\":%q}\n", uid))
+	}
+	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.Dir = filepath.Dir(exe)
-	cmd.Stdin = strings.NewReader(fmt.Sprintf(`{"account":%q} `, uid))
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		umidWarnOnce("exec", fmt.Sprintf("无法执行 %s: %v（组件存在但跑不起来；alpine 需 gcompat/libstdc++ 兼容层）", exe, err))
@@ -186,7 +210,10 @@ type umidDiskEntry struct {
 	MachineToken string    `json:"machineToken"`
 	MachineType  string    `json:"machineType"`
 	MachineCode  string    `json:"machineCode"`
-	CachedAt     time.Time `json:"cached_at"`
+	// Environment 采样时传给组件的环境码（cn=0 / intl=3）。旧缓存缺失或与
+	// 当前期望不匹配时失效重取——不同环境码下组件可能返回不同身份。
+	Environment string    `json:"environment,omitempty"`
+	CachedAt    time.Time `json:"cached_at"`
 }
 
 func umidCachePath() string {
@@ -209,6 +236,11 @@ func loadUmidDisk(realm string) (MachineIdentity, bool) {
 	}
 	entry, ok := doc.Realms[realm]
 	if !ok {
+		return MachineIdentity{}, false
+	}
+	// 环境码不匹配（含旧缓存无该字段）视为失效，重取组件采样；内存缓存
+	// 不做该校验，避免组件失败回退旧缓存后反复拉起组件。
+	if entry.Environment != runtimeInfoEnv(realm) {
 		return MachineIdentity{}, false
 	}
 	ident := MachineIdentity{
@@ -234,6 +266,7 @@ func saveUmidDisk(realm string, ident MachineIdentity) {
 		MachineToken: ident.MachineToken,
 		MachineType:  ident.MachineType,
 		MachineCode:  ident.MachineCode,
+		Environment:  runtimeInfoEnv(realm),
 		CachedAt:     time.Now(),
 	}
 	blob, merr := json.MarshalIndent(doc, "", "  ")
@@ -264,7 +297,7 @@ func NativeMachineIdentity(realm, uid string) MachineIdentity {
 		umidMu.Unlock()
 		return ident
 	}
-	if ident := runRuntimeInfoFn(uid); ident.valid() {
+	if ident := runRuntimeInfoFn(realm, uid); ident.valid() {
 		saveUmidDisk(realm, ident)
 		umidMu.Lock()
 		umidMemCache[realm] = umidCacheEntry{At: time.Now(), ident: ident}
@@ -294,7 +327,7 @@ func RefreshNativeIdentity(realm, uid string) MachineIdentity {
 	if seed := identitySeedPath(); seed != "" {
 		_ = os.Remove(seed)
 	}
-	ident := runRuntimeInfoFn(uid)
+	ident := runRuntimeInfoFn(realm, uid)
 	if !ident.valid() {
 		return MachineIdentity{}
 	}

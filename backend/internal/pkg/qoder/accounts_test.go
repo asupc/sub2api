@@ -69,7 +69,7 @@ func TestOpenAPIHeaders(t *testing.T) {
 	if h.Get("Authorization") != "Bearer dt-x" {
 		t.Fatalf("auth = %q", h.Get("Authorization"))
 	}
-	if h.Get("User-Agent") != ClientUA {
+	if h.Get("User-Agent") != RealmConfigs["cn"].UA {
 		t.Fatalf("ua = %q", h.Get("User-Agent"))
 	}
 	if h.Get("X-Machine-ID") != DeriveID("u-42", "machine") ||
@@ -98,7 +98,7 @@ func TestDesktopHeaders(t *testing.T) {
 	if h.Get("User-Agent") != "Qoder" {
 		t.Fatalf("ua = %q", h.Get("User-Agent"))
 	}
-	if h.Get("cosy-clienttype") != "10" || h.Get("cosy-version") != "0.4.3" {
+	if h.Get("cosy-clienttype") != "10" || h.Get("cosy-version") != desktopClientVersion() {
 		t.Fatalf("desktop headers: %q %q", h.Get("cosy-clienttype"), h.Get("cosy-version"))
 	}
 	for _, k := range []string{"cosy-machineid", "cosy-machinetoken", "cosy-machinetype",
@@ -114,8 +114,8 @@ func TestDesktopHeaders(t *testing.T) {
 	if h2.Get("cosy-machineid") != "native-mid" || h2.Get("cosy-machinetoken") != "real-native-token" {
 		t.Fatalf("native machine headers: %q %q", h2.Get("cosy-machineid"), h2.Get("cosy-machinetoken"))
 	}
-	if h2.Get("cosy-machineos") != "x86_64_win32" || h2.Get("cosy-machinehostname") != "DESKTOP-QODER" {
-		t.Fatal("machine os/hostname")
+	if h2.Get("cosy-machineos") != cosyMachineOS() || h2.Get("cosy-machinehostname") != machineHostname() {
+		t.Fatalf("machine os/hostname: %q %q", h2.Get("cosy-machineos"), h2.Get("cosy-machinehostname"))
 	}
 }
 
@@ -635,5 +635,69 @@ func TestNextCheckinWindow(t *testing.T) {
 	ts3, _ := nextCheckinWindow(after)
 	if want := time.Date(2026, 10, 15, 10, 0, 0, 0, loc).Unix(); ts3 != want {
 		t.Fatalf("after 10:00 must give tomorrow: %d != %d", ts3, want)
+	}
+}
+
+func TestCampaignsMinimalMachineHeaderFallback(t *testing.T) {
+	// v1.6.9 intl 兜底：无真身份（omitted）且 showCampaign=false 时，用最小
+	// 机器头（仅 machineos + hostname）重试一次，列表恢复即采纳。
+	calls := 0
+	var retryHeaders http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != PathCampaigns {
+			t.Errorf("path %s", r.URL.Path)
+			return
+		}
+		calls++
+		if calls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"showCampaign": false})
+			return
+		}
+		retryHeaders = r.Header.Clone()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"showCampaign": true,
+			"campaigns":    []any{},
+		})
+	}))
+	defer srv.Close()
+	withRealm(t, "intl", srv.URL)
+	client := NewClient(nil)
+	creds := Credentials{AccessToken: "at", Realm: "intl", UID: "u1"}
+	st, err := client.Campaigns(context.Background(), creds)
+	if err != nil {
+		t.Fatalf("Campaigns: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected minimal-header retry, calls=%d", calls)
+	}
+	if !st.ShowCampaign {
+		t.Fatal("retry result must be adopted")
+	}
+	if retryHeaders.Get("cosy-machineos") == "" || retryHeaders.Get("cosy-machinehostname") == "" {
+		t.Fatal("retry must carry minimal machine headers")
+	}
+	if retryHeaders.Get("cosy-machinetoken") != "" || retryHeaders.Get("cosy-machineid") != "" {
+		t.Fatal("retry must not carry the full machine header set")
+	}
+}
+
+func TestCampaignsMinimalFallbackDisabled(t *testing.T) {
+	// QD_INTL_MACHINE_FALLBACK=off 时不做降档重试。
+	t.Setenv("QD_INTL_MACHINE_FALLBACK", "off")
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"showCampaign": false})
+	}))
+	defer srv.Close()
+	withRealm(t, "intl", srv.URL)
+	client := NewClient(nil)
+	creds := Credentials{AccessToken: "at", Realm: "intl", UID: "u1"}
+	st, err := client.Campaigns(context.Background(), creds)
+	if err != nil {
+		t.Fatalf("Campaigns: %v", err)
+	}
+	if calls != 1 || st.ShowCampaign {
+		t.Fatalf("fallback must be disabled, calls=%d show=%v", calls, st.ShowCampaign)
 	}
 }

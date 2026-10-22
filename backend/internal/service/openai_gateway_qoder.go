@@ -658,6 +658,24 @@ func (s *OpenAIGatewayService) handleQoderUpstreamError(
 
 	case qoder.IsContentPolicy(detail) || qoder.IsClientFault(detail):
 		// 内容审核 / 客户端参数错：确定性拒绝，透传原文不计 strike（不换号）。
+		// issue #72 降级记忆：参数类拒绝（400/422）且模型命中结构化白名单时，
+		// 记下「该区域+模型的结构化历史被拒」——下一次请求直接文本模式
+		// （StructuredToolHistoryEnabled 的运行时记忆），不再每次先撞一次 400。
+		// 参数错与账号无关：不冷却、不罚号；同账号文本重发在 CC pipeline 的
+		// 换号循环之外，代价高于每 TTL 一次的 400 体验，不做本次重发。
+		if code == http.StatusBadRequest || code == http.StatusUnprocessableEntity {
+			realm := qoderAccountRealm(account)
+			if qoder.StructuredToolHistoryWhitelistHit(realm, upstreamModel) &&
+				!qoder.StructuredRejected(realm, upstreamModel) {
+				qoder.NoteStructuredRejected(realm, upstreamModel)
+				logger.L().Warn("qoder structured tool history rejected by upstream; text mode for this model until TTL",
+					zap.Int64("account_id", account.ID),
+					zap.String("model", upstreamModel),
+					zap.String("realm", realm),
+					zap.Int("status", code),
+				)
+			}
+		}
 		logger.L().Warn("qoder client-fault (pass-through)",
 			zap.Int64("account_id", account.ID),
 			zap.Int("status", code),

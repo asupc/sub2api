@@ -17,6 +17,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,10 +28,18 @@ import (
 // randomReader 包内随机源，默认 crypto/rand；测试注入确定性Reader做黄金向量。
 var randomReader io.Reader = rand.Reader
 
-// COSY 协议版本（qoder_sign.py L522-526）：官方 0.4.3 客户端
-// （qoder-agent-sdk / qoder-cn-agent-sdk）内置常量 "1.1.64"，
-// cosy-version 头与签名 payload 共用。
-const COSYVersion = "1.1.64"
+// COSY 协议版本（qoder_sign.py L522-526）：对齐官方 qodercli 1.1.75
+// （cosy-version 头与签名 payload 共用）；QD_COSY_VERSION 可覆盖。
+var COSYVersion = func() string {
+	if v := strings.TrimSpace(os.Getenv("QD_COSY_VERSION")); v != "" {
+		return v
+	}
+	return "1.1.75"
+}()
+
+// cosyUserAgent 官方 CLI 的推理/模型请求不设 User-Agent：签名 WASM 的头表
+// 里没有它，请求经打包的 undici fetch 发出，由 undici 补默认值 "undici"。
+const cosyUserAgent = "undici"
 
 // DefaultUserType 身份体缺省用户类型（qoder_sign.py L526）。
 const DefaultUserType = "personal_professional_trial"
@@ -284,36 +293,43 @@ func (s *CosySession) Sign(body, path, date, requestID string) (payloadB64, bear
 	return payloadB64, "Bearer COSY." + payloadB64 + "." + sig
 }
 
-// Headers 构造一次推理/模型接口的完整 COSY 签名头（qoder_sign.py L596-623）。
-// accept 传空串时默认 "text/event-stream"。
+// Headers 构造一次推理/模型接口的完整 COSY 签名头（qoder_sign.py L645-680，
+// 对齐 qodercli 1.1.75）。accept 传空串时默认 "text/event-stream"。
 func (s *CosySession) Headers(body, rawURL, modelKey string, sse bool, accept string) http.Header {
 	if accept == "" {
 		accept = "text/event-stream"
 	}
 	_, date, bearer := s.Bearer(body, rawURL)
 	h := http.Header{}
-	h.Set("cosy-data-policy", "AGREE")
+	h.Set("cosy-data-policy", "agree")
 	h.Set("content-type", "application/json")
-	h.Set("cosy-machinetype", s.MachineType)
+	h.Set("cosy-business-product", "cli")
+	h.Set("cosy-business-type", "agent")
+	h.Set("cosy-scene", "assistant")
 	h.Set("cosy-clienttype", "5")
 	h.Set("cosy-date", date)
 	h.Set("cosy-user", s.UID)
 	h.Set("cosy-key", s.CosyKey)
 	h.Set("accept", accept)
-	h.Set("cosy-clientip", "169.254.198.161")
 	h.Set("authorization", bearer)
 	h.Set("accept-encoding", "identity")
 	h.Set("cosy-version", COSYVersion)
 	h.Set("cosy-machineid", s.MachineID)
 	h.Set("cosy-machinetoken", s.MachineToken)
+	h.Set("cosy-machinetype", s.MachineType)
+	h.Set("cosy-clientip", "169.254.198.161")
 	h.Set("login-version", "v2")
-	h.Set("user-agent", "Go-http-client/2.0")
-	if sse {
-		h.Set("cache-control", "no-cache")
-		if cosyOSHeadersEnabled() {
-			h.Set("cosy-machineos", cosyMachineOS())
+	h.Set("user-agent", cosyUserAgent)
+	// issue #64：官方请求层对所有请求注入 Cosy-MachineOS，
+	// MachineHostname 只在 infer-sse 场景带；QD_COSY_OS_HEADERS=0 可关。
+	if cosyOSHeadersEnabled() {
+		h.Set("cosy-machineos", cosyMachineOS())
+		if sse {
 			h.Set("cosy-machinehostname", s.MachineHostname)
 		}
+	}
+	if sse {
+		h.Set("cache-control", "no-cache")
 	}
 	if modelKey != "" {
 		h.Set("x-model-key", modelKey)

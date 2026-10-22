@@ -2,11 +2,13 @@ package qoder
 
 import (
 	"crypto/md5"
+	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -45,15 +47,91 @@ func cosyOSHeadersEnabled() bool {
 	return true
 }
 
-// cosyMachineOS 返回 cosy-machineos 取值（QD_COSY_MACHINE_OS 或按平台默认）。
+// detectMachineOS 按当前运行系统与架构返回官方同款 {arch}_{platform}
+// （共 6 种组合；_detect_machine_os）。
+func detectMachineOS() string {
+	arch := "x86_64"
+	if runtime.GOARCH == "arm64" {
+		arch = "aarch64"
+	}
+	plat := "linux"
+	switch runtime.GOOS {
+	case "windows":
+		plat = "win32"
+	case "darwin":
+		plat = "darwin"
+	}
+	return arch + "_" + plat
+}
+
+// cosyMachineOS 返回 cosy-machineos 取值：QD_COSY_MACHINE_OS 直接指定
+// （auto 按当前系统与架构识别）；默认 Windows=x86_64_win32、其余=x86_64_linux
+// （避免 ARM/macOS 存量账号升级后设备指纹漂移；_resolve_machine_os）。
 func cosyMachineOS() string {
-	if v := strings.TrimSpace(os.Getenv("QD_COSY_MACHINE_OS")); v != "" {
-		return v
+	raw := strings.TrimSpace(os.Getenv("QD_COSY_MACHINE_OS"))
+	if strings.EqualFold(raw, "auto") {
+		return detectMachineOS()
+	}
+	if raw != "" {
+		return raw
 	}
 	if runtime.GOOS == "windows" {
 		return "x86_64_win32"
 	}
 	return "x86_64_linux"
+}
+
+// 桌面端活动链路的 Cosy-MachineHostname 用本机真实主机名（按官方规则规整，
+// _header_safe_hostname）；推理 SSE 头仍用账号派生的 DeriveMachineHostname。
+// Docker 每次重建容器主机名都会变，想固定可用 `docker run --hostname` /
+// compose 的 hostname:。
+const (
+	hostnameCapLen  = 96
+	hostnameHashLen = 8
+)
+
+var headerSafeRe = regexp.MustCompile(`^[!-~]+$`)
+var hostnameDashesRe = regexp.MustCompile(`-{2,}`)
+var hostnameUnprintableRe = regexp.MustCompile(`[^\x21-\x7e]+`)
+
+// machineHostname 本机主机名规整成可放进请求头的值；空主机名返回空串
+// （此时不发该头）。ASCII 可见字符直用；超长截断并缀 sha256 前 8 位；
+// 非 ASCII / 含控制字符压成 slug 兜底（Go 无 idna 编码器，非 ASCII 一律
+// 走 slug 分支，与源的 UnicodeError 分支等价）。
+func machineHostname() string {
+	name, _ := os.Hostname()
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if headerSafeRe.MatchString(name) {
+		return capHostname(name)
+	}
+	slug := strings.Trim(hostnameDashesRe.ReplaceAllString(
+		hostnameUnprintableRe.ReplaceAllString(name, "-"), "-"), "-")
+	if slug == "" {
+		slug = "unknown"
+	}
+	return capHostname(slug + "-" + hostnameHash(name))
+}
+
+// hostnameHash 主机名指纹后缀（sha256 前 8 位，_hostname_hash）。
+func hostnameHash(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])[:hostnameHashLen]
+}
+
+// capHostname 长度 ≤96 直用；超长截到 87 字符（去尾部横线/空白）并缀
+// hash 后缀，总长不超 96（_cap_hostname）。
+func capHostname(text string) string {
+	if len(text) <= hostnameCapLen {
+		return text
+	}
+	head := strings.TrimRight(text[:hostnameCapLen-hostnameHashLen-1], "- \t")
+	if head == "" {
+		head = "unknown"
+	}
+	return head + "-" + hostnameHash(text)
 }
 
 // DeriveID 由 uid + salt 稳定派生设备/会话标识（qoder_fingerprint.py L20-33）。

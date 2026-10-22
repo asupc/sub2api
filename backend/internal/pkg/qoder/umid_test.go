@@ -19,7 +19,7 @@ import (
 )
 
 // resetUmidState 清空进程内身份缓存并注入组件 stub；返回还原函数。
-func resetUmidState(t *testing.T, sample func(uid string) MachineIdentity) {
+func resetUmidState(t *testing.T, sample func(realm, uid string) MachineIdentity) {
 	t.Helper()
 	umidMu.Lock()
 	saved := umidMemCache
@@ -41,7 +41,8 @@ func seedUmidDiskCache(t *testing.T, realm string, ident MachineIdentity) {
 	t.Helper()
 	doc := umidDiskDoc{Version: 1, Realms: map[string]umidDiskEntry{
 		realm: {MachineToken: ident.MachineToken, MachineType: ident.MachineType,
-			MachineCode: ident.MachineCode, CachedAt: time.Now()},
+			MachineCode: ident.MachineCode, Environment: runtimeInfoEnv(realm),
+			CachedAt: time.Now()},
 	}}
 	blob, err := json.Marshal(doc)
 	if err != nil {
@@ -55,7 +56,7 @@ func seedUmidDiskCache(t *testing.T, realm string, ident MachineIdentity) {
 func TestNativeMachineIdentityCacheFirst(t *testing.T) {
 	calls := 0
 	ident := MachineIdentity{MachineToken: "mt-1", MachineType: "KVM", MachineCode: "mc-1"}
-	resetUmidState(t, func(string) MachineIdentity {
+	resetUmidState(t, func(_, _ string) MachineIdentity {
 		calls++
 		return ident
 	})
@@ -74,7 +75,7 @@ func TestNativeMachineIdentityCacheFirst(t *testing.T) {
 
 func TestNativeMachineIdentityDiskCacheHitsWithoutComponent(t *testing.T) {
 	ident := MachineIdentity{MachineToken: "mt-disk", MachineType: "Docker", MachineCode: "mc-disk"}
-	resetUmidState(t, func(string) MachineIdentity {
+	resetUmidState(t, func(_, _ string) MachineIdentity {
 		t.Fatal("落盘缓存命中时不应调用组件")
 		return MachineIdentity{}
 	})
@@ -87,7 +88,7 @@ func TestNativeMachineIdentityDiskCacheHitsWithoutComponent(t *testing.T) {
 func TestNativeMachineIdentityFallsBackToExpiredDiskCache(t *testing.T) {
 	// 组件彻底失败（返回空）→ 回退落盘缓存（哪怕过期）。
 	ident := MachineIdentity{MachineToken: "mt-old", MachineType: "KVM", MachineCode: "mc-old"}
-	resetUmidState(t, func(string) MachineIdentity { return MachineIdentity{} })
+	resetUmidState(t, func(_, _ string) MachineIdentity { return MachineIdentity{} })
 	seedUmidDiskCache(t, "cn", ident)
 	if got := NativeMachineIdentity("cn", "u1"); got != ident {
 		t.Fatalf("fallback ident = %+v", got)
@@ -97,7 +98,7 @@ func TestNativeMachineIdentityFallsBackToExpiredDiskCache(t *testing.T) {
 func TestDesktopHeadersIdentitySources(t *testing.T) {
 	t.Run("native 优先且注入真值", func(t *testing.T) {
 		ident := MachineIdentity{MachineToken: "mt-native", MachineType: "KVM", MachineCode: "mc-native"}
-		resetUmidState(t, func(string) MachineIdentity { return ident })
+		resetUmidState(t, func(_, _ string) MachineIdentity { return ident })
 		creds := Credentials{Realm: "intl", UID: "u-h", AccessToken: "t",
 			MachineToken: "mt-imported"}
 		h, source := creds.DesktopHeadersIdentity()
@@ -118,7 +119,7 @@ func TestDesktopHeadersIdentitySources(t *testing.T) {
 		}
 	})
 	t.Run("无原生回退导入凭证", func(t *testing.T) {
-		resetUmidState(t, func(string) MachineIdentity { return MachineIdentity{} })
+		resetUmidState(t, func(_, _ string) MachineIdentity { return MachineIdentity{} })
 		creds := Credentials{Realm: "cn", UID: "u-h", AccessToken: "t",
 			MachineToken: "mt-imported"}
 		h, source := creds.DesktopHeadersIdentity()
@@ -133,7 +134,7 @@ func TestDesktopHeadersIdentitySources(t *testing.T) {
 		}
 	})
 	t.Run("都无则一个机器头都不发", func(t *testing.T) {
-		resetUmidState(t, func(string) MachineIdentity { return MachineIdentity{} })
+		resetUmidState(t, func(_, _ string) MachineIdentity { return MachineIdentity{} })
 		creds := Credentials{Realm: "cn", UID: "u-h", AccessToken: "t"}
 		h, source := creds.DesktopHeadersIdentity()
 		if source != MachineIdentityOmitted {
@@ -161,7 +162,7 @@ func TestCampaignsIdentitySelfHeal(t *testing.T) {
 	fresh := MachineIdentity{MachineToken: "mt-fresh", MachineType: "KVM", MachineCode: "mc-fresh"}
 	var mu sync.Mutex
 	componentCalls := 0
-	resetUmidState(t, func(string) MachineIdentity {
+	resetUmidState(t, func(_, _ string) MachineIdentity {
 		mu.Lock()
 		defer mu.Unlock()
 		// 模拟真实组件：同种子返回同一身份；自愈删种子后的再次调用必换新。

@@ -211,6 +211,35 @@ func sanitizeMessages(messages []any) []any {
 // 消息压平（flatten_messages L3435-3534）
 // ---------------------------------------------------------------------------
 
+// partImageURL 从单个 content part 提取图片 URL（image_url 字典 / url 字段 /
+// data+mimeType → data: URL）；非图片 part 或提取不到返回空串。
+func partImageURL(p map[string]any) string {
+	var u any
+	if p["image_url"] != nil {
+		u = p["image_url"]
+	} else if p["url"] != nil {
+		u = p["url"]
+	}
+	if um, ok := u.(map[string]any); ok {
+		u = um["url"]
+	}
+	if u == nil && p["data"] != nil {
+		mime := "image/png"
+		if m, ok := p["mimeType"].(string); ok && m != "" {
+			mime = m
+		} else if m, ok := p["mime_type"].(string); ok && m != "" {
+			mime = m
+		}
+		if d, ok := p["data"].(string); ok {
+			u = "data:" + mime + ";base64," + d
+		}
+	}
+	if us, ok := u.(string); ok {
+		return us
+	}
+	return ""
+}
+
 // flattenContentText 把 OpenAI content（str 或 parts 列表）压成纯文本；
 // 图片另行收集（_flatten_content_text L3248-3275）。
 func flattenContentText(content any) (string, []string) {
@@ -236,27 +265,7 @@ func flattenContentText(content any) (string, []string) {
 					t, _ := p["text"].(string)
 					texts = append(texts, t)
 				case ptype == "image_url" || ptype == "image" || ptype == "input_image" || hasKey(p, "image_url"):
-					var u any
-					if p["image_url"] != nil {
-						u = p["image_url"]
-					} else if p["url"] != nil {
-						u = p["url"]
-					}
-					if um, ok := u.(map[string]any); ok {
-						u = um["url"]
-					}
-					if u == nil && p["data"] != nil {
-						mime := "image/png"
-						if m, ok := p["mimeType"].(string); ok && m != "" {
-							mime = m
-						} else if m, ok := p["mime_type"].(string); ok && m != "" {
-							mime = m
-						}
-						if d, ok := p["data"].(string); ok {
-							u = "data:" + mime + ";base64," + d
-						}
-					}
-					if us, ok := u.(string); ok && us != "" {
+					if us := partImageURL(p); us != "" {
 						images = append(images, us)
 					}
 				}
@@ -272,6 +281,81 @@ func flattenContentText(content any) (string, []string) {
 	default:
 		return fmt.Sprintf("%v", content), nil
 	}
+}
+
+// flattenContentParts 把 OpenAI content 拆成多模态 parts（文本 + 图片）。
+// 含图片 part 时返回结构化 parts（上游只读消息 content 里的结构化
+// image_url parts——真机实测：顶层 image_urls / chat_context.imageUrls 填了
+// 模型仍回「我没有收到图片」）；纯文本返回 nil（调用方回落纯文本字符串）。
+// text 为文本部分的拼接（与 flattenContentText 同口径），images 为图片 URL。
+func flattenContentParts(content any) (parts []any, text string, images []string) {
+	switch v := content.(type) {
+	case nil:
+		return nil, "", nil
+	case string:
+		return nil, v, nil
+	case map[string]any:
+		return flattenContentParts([]any{v})
+	case []any:
+		texts, imgs := []string{}, []string{}
+		out := []any{}
+		hasImage := false
+		for _, piece := range v {
+			switch p := piece.(type) {
+			case string:
+				if p != "" {
+					out = append(out, map[string]any{"type": "text", "text": p})
+				}
+				texts = append(texts, p)
+			case map[string]any:
+				ptype, _ := p["type"].(string)
+				switch {
+				case ptype == "text" || ptype == "input_text" || ptype == "output_text" || ptype == "summary_text":
+					t, _ := p["text"].(string)
+					out = append(out, map[string]any{"type": "text", "text": t})
+					texts = append(texts, t)
+				case ptype == "image_url" || ptype == "image" || ptype == "input_image" || hasKey(p, "image_url"):
+					if us := partImageURL(p); us != "" {
+						out = append(out, map[string]any{
+							"type":      "image_url",
+							"image_url": map[string]any{"url": us},
+						})
+						imgs = append(imgs, us)
+						hasImage = true
+					}
+				}
+			}
+		}
+		nonEmpty := make([]string, 0, len(texts))
+		for _, t := range texts {
+			if t != "" {
+				nonEmpty = append(nonEmpty, t)
+			}
+		}
+		if !hasImage {
+			return nil, strings.Join(nonEmpty, "\n"), imgs
+		}
+		return out, strings.Join(nonEmpty, "\n"), imgs
+	default:
+		return nil, fmt.Sprintf("%v", content), nil
+	}
+}
+
+// sanitizeContentParts 对多模态 parts 的文本项做脱敏（图片 URL 原样保留——
+// data: URL 的 Base64 不可动）。
+func sanitizeContentParts(parts []any) []any {
+	out := make([]any, 0, len(parts))
+	for _, p := range parts {
+		if pm, ok := p.(map[string]any); ok {
+			if t, _ := pm["type"].(string); t == "text" {
+				if s, _ := pm["text"].(string); s != "" {
+					pm["text"] = SanitizeText(s)
+				}
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 func hasKey(m map[string]any, k string) bool {
@@ -374,7 +458,7 @@ func flattenMessages(messages []any, keepReasoning, structured bool) flattenResu
 			continue
 		}
 		role, _ := mm["role"].(string)
-		text, imgs := flattenContentText(mm["content"])
+		parts, text, imgs := flattenContentParts(mm["content"])
 		text = SanitizeText(text)
 		images = append(images, imgs...)
 		switch role {
@@ -464,9 +548,18 @@ func flattenMessages(messages []any, keepReasoning, structured bool) flattenResu
 				rc, _ := mm["reasoning_content"].(string)
 				item["reasoning_content"] = rc
 			}
+			if parts != nil {
+				// 多模态：纯 content 的 assistant 消息同样保留 parts 形态
+				//（带 tool_calls 的分支恒文本，与上游工具调用装订格式互斥）。
+				item["content"] = sanitizeContentParts(parts)
+			}
 			flat = append(flat, item)
 		case "user":
-			flat = append(flat, map[string]any{"role": "user", "content": text})
+			if parts != nil {
+				flat = append(flat, map[string]any{"role": "user", "content": sanitizeContentParts(parts)})
+			} else {
+				flat = append(flat, map[string]any{"role": "user", "content": text})
+			}
 		default:
 			if role != "" {
 				flat = append(flat, map[string]any{"role": "user", "content": text})
@@ -514,8 +607,10 @@ var deepseekModelKeys = map[string]bool{"dmodel": true, "dfmodel": true}
 // ---------------------------------------------------------------------------
 
 // structuredToolHistoryWhitelist 结构化直传的模型名前缀白名单
-// （STRUCTURED_TOOL_HISTORY_WHITELIST L3371；前缀匹配、大小写不敏感）。
-var structuredToolHistoryWhitelist = []string{"qwen", "glm", "gm4", "gm5"}
+// （STRUCTURED_TOOL_HISTORY_WHITELIST L4878；前缀匹配、大小写不敏感）。
+// issue #60 follow-up：DeepSeek 的上游 key 是 dfmodel（显示名 DeepSeek-V4-Flash），
+// 只写 "deepseek" 匹配不到 → auto 一直文本化，模型照抄伪协议，两个都保留。
+var structuredToolHistoryWhitelist = []string{"qwen", "glm", "gm4", "gm5", "deepseek", "dfmodel"}
 
 // structuredToolHistoryEnv 结构化直传开关的三态环境变量名（L3377）。
 const structuredToolHistoryEnv = "QD_STRUCTURED_TOOL_HISTORY"
@@ -565,13 +660,34 @@ func toolIDsOK(messages []any) bool {
 	return true
 }
 
+// StructuredToolHistoryWhitelistHit 报告 model（显示名或上游 key）是否命中
+// auto 模式的白名单前缀（不含 toolIDsOK / 运行时记忆判定）。错误路径的
+// 降级记忆判定用——建体时的完整判定见 StructuredToolHistoryEnabled。
+func StructuredToolHistoryWhitelistHit(realm, model string) bool {
+	if realm != "cn" {
+		return false
+	}
+	low := strings.ToLower(pyStrip(model))
+	if low == "" {
+		return false
+	}
+	for _, prefix := range structuredToolHistoryWhitelist {
+		if strings.HasPrefix(low, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // StructuredToolHistoryEnabled 本次请求是否走结构化工具历史直传
 // （structured_tool_history_enabled L3404-3432）。判定顺序不可换：
 //  1. toolIDsOK 不满足 → false（任何模式都不可覆盖，fail-safe 回退文本化）；
 //  2. off → false（一键回退）；
 //  3. on → true（显式强制：DeepSeek / Kimi / INTL 补验证用）；
 //  4. auto：realm 必须为 cn（INTL 未实测，故 auto 不启用）；
-//  5. auto：候选 (modelKey, model) 依次小写前缀命中白名单 → true。
+//  5. auto：候选 (modelKey, model) 依次小写前缀命中白名单 → true；
+//  6. auto：命中 StructuredRejected 运行时记忆（该区域+模型的结构化已被
+//     上游按参数错拒过）→ false。
 func StructuredToolHistoryEnabled(realm, model, modelKey string, messages []any) bool {
 	if !toolIDsOK(messages) {
 		return false
@@ -583,18 +699,9 @@ func StructuredToolHistoryEnabled(realm, model, modelKey string, messages []any)
 	if mode == "on" {
 		return true
 	}
-	if realm != "cn" {
-		return false
-	}
 	for _, cand := range []string{modelKey, model} {
-		low := strings.ToLower(pyStrip(cand))
-		if low == "" {
-			continue
-		}
-		for _, prefix := range structuredToolHistoryWhitelist {
-			if strings.HasPrefix(low, prefix) {
-				return true
-			}
+		if StructuredToolHistoryWhitelistHit(realm, cand) {
+			return !StructuredRejected(realm, strings.ToLower(pyStrip(cand)))
 		}
 	}
 	return false
@@ -816,6 +923,12 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	// assistant.tool_calls 结构化透传，不再产生 LeakMarker 文本；否则维持
 	// fail-safe 文本化（qoder_proxy.py L3551-3563 的形态决策单点）。
 	structured := StructuredToolHistoryEnabled(realm, model, modelKey, messages)
+	if structured {
+		// issue #72：配对不完整的孤儿历史直接发出去会 400
+		// （tool_call_sequence_broken）——先按保留集清洗；退化成文本模式
+		// 反而会把整段历史变成伪格式，故只清洗不降级。
+		messages = CleanupOrphanToolHistory(messages)
+	}
 	res := flattenMessages(messages, IsDeepSeekModel(model, modelKey), structured)
 
 	// 模板只保留 system 基座（自带示例 user 轮是样例内容，必须丢弃）
@@ -1005,4 +1118,165 @@ func setDefault(m map[string]any, key string, value any) {
 	if _, ok := m[key]; !ok {
 		m[key] = value
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 结构化工具历史的运行时降级记忆（issue #72 / qoder degrade.rs）。
+// ---------------------------------------------------------------------------
+
+// 「上游是否接受结构化工具历史」是运行时事实，不是编译期常量：模型清单会
+// 变、上游契约会变，静态白名单只是猜。猜错的代价原本是「用户整轮 400
+// 报障」，现在变成「一次内部重试 + 一条记忆」：结构化请求被上游按参数错
+// 拒（400/422）时，网关用同一账号、文本模式重发一次；重发成功才记下
+// (区域, 模型)，命中记忆的模型在 TTL 内直接走文本模式。进程内、不落盘：
+// 落盘要处理并发写/版本/清理，收益只是「重启后少撞一次 400」。与
+// QD_STRUCTURED_TOOL_HISTORY 的分工：env 是用户的手动开关（全局），本记忆
+// 是自动学到的结论（按区域 + 模型）；两者都只把请求往文本模式推，猜错的
+// 方向永远是安全的那侧。
+
+// structuredRejectTTL 记忆存活时间：到期后重新试一次结构化（上游可能已修）。
+const structuredRejectTTL = 6 * time.Hour
+
+var (
+	structuredRejectMu  sync.Mutex
+	structuredRejectMem = map[string]time.Time{}
+)
+
+// structuredRejectKey 键 = 区域|模型 key 归一（模型 key 是判据本身：同一
+// 区域里不同模型的上游通道不同）。
+func structuredRejectKey(realm, model string) string {
+	return realm + "|" + strings.ToLower(strings.TrimSpace(model))
+}
+
+// NoteStructuredRejected 记下「该 (区域, 模型) 的结构化历史被上游拒了」；
+// 空 key 不记（会命中一大片无关模型）。
+func NoteStructuredRejected(realm, model string) {
+	key := structuredRejectKey(realm, model)
+	if strings.HasSuffix(key, "|") {
+		return
+	}
+	structuredRejectMu.Lock()
+	defer structuredRejectMu.Unlock()
+	structuredRejectMem[key] = time.Now()
+}
+
+// StructuredRejected 该 (区域, 模型) 是否在 TTL 内已知「结构化不被接受」；
+// 过期即忘（下次请求重新试结构化，失败再记）。
+func StructuredRejected(realm, model string) bool {
+	key := structuredRejectKey(realm, model)
+	structuredRejectMu.Lock()
+	defer structuredRejectMu.Unlock()
+	at, ok := structuredRejectMem[key]
+	if !ok {
+		return false
+	}
+	if time.Since(at) < structuredRejectTTL {
+		return true
+	}
+	delete(structuredRejectMem, key)
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// 出站清洗孤儿工具历史（issue #72 / cleanup_orphan_tool_history）。
+// ---------------------------------------------------------------------------
+
+// CleanupOrphanToolHistory 结构化模式下，配对不完整的工具历史会变成畸形
+// 请求发出去（上游 400 tool_call_sequence_broken）。清洗保住配对完整的
+// 结构化历史：
+//   - 保留集 = assistant.tool_calls 的 id ∩ tool 消息的 tool_call_id；
+//   - 第一趟：assistant 批次里任一 id 是孤儿 → 删该批次的 tool_calls 字段
+//     （消息本体保留）；全存活批次记入 surviving；
+//   - 第二趟：tool 消息只认存活批次（批次 [A,B] 中 B 是孤儿时整批删除，
+//     A 的结果若放行反而悬空——删除与放行必须以同一套 id 为准）。
+//
+// 无工具流量时不做任何改动；返回原切片（元素原地修改）。
+func CleanupOrphanToolHistory(messages []any) []any {
+	callIDs := map[string]bool{}
+	resultIDs := map[string]bool{}
+	for _, m := range messages {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := mm["role"].(string); role == "tool" {
+			if id, ok := mm["tool_call_id"].(string); ok {
+				resultIDs[id] = true
+			}
+		}
+		if calls, ok := mm["tool_calls"].([]any); ok {
+			for _, c := range calls {
+				cm, ok := c.(map[string]any)
+				if !ok {
+					continue
+				}
+				if id, ok := cm["id"].(string); ok {
+					callIDs[id] = true
+				}
+			}
+		}
+	}
+	if len(callIDs) == 0 && len(resultIDs) == 0 {
+		return messages
+	}
+	keep := map[string]bool{}
+	for id := range callIDs {
+		if resultIDs[id] {
+			keep[id] = true
+		}
+	}
+	// 第一趟：裁决每个 assistant 批次，记录真正存活下来的 tool_call id。
+	surviving := map[string]bool{}
+	for _, m := range messages {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		calls, has := mm["tool_calls"].([]any)
+		if !has || len(calls) == 0 {
+			continue
+		}
+		orphan := false
+		for _, c := range calls {
+			cm, ok := c.(map[string]any)
+			if !ok {
+				orphan = true
+				break
+			}
+			id, _ := cm["id"].(string)
+			if !keep[id] {
+				orphan = true
+				break
+			}
+		}
+		if orphan {
+			delete(mm, "tool_calls")
+			continue
+		}
+		for _, c := range calls {
+			if cm, ok := c.(map[string]any); ok {
+				if id, _ := cm["id"].(string); id != "" {
+					surviving[id] = true
+				}
+			}
+		}
+	}
+	// 第二趟：工具结果只认存活批次。
+	out := make([]any, 0, len(messages))
+	for _, m := range messages {
+		mm, ok := m.(map[string]any)
+		if !ok {
+			out = append(out, m)
+			continue
+		}
+		if role, _ := mm["role"].(string); role != "tool" {
+			out = append(out, m)
+			continue
+		}
+		id, _ := mm["tool_call_id"].(string)
+		if surviving[id] {
+			out = append(out, m)
+		}
+	}
+	return out
 }

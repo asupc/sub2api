@@ -19,7 +19,7 @@ func TestRealmConfigsGolden(t *testing.T) {
 	if cn.RedirectURI != "qoder-work-cn://" || cn.Domain != "qoder.com.cn" {
 		t.Fatalf("cn redirect/domain: %+v", cn)
 	}
-	if cn.UA != "QoderWork/1.1.64" {
+	if cn.UA != "QoderWork/1.1.75" {
 		t.Fatalf("cn ua: %s", cn.UA)
 	}
 	if !cn.SendClientID || !cn.SendRedirectURI || !cn.NonceDashed {
@@ -27,12 +27,12 @@ func TestRealmConfigsGolden(t *testing.T) {
 	}
 
 	intl := RealmConfigs["intl"]
-	if intl.OpenAPI != "https://openapi.qoder.sh" || intl.Gateway != "https://api1.qoder.sh" {
+	if intl.OpenAPI != "https://openapi.qoder.sh" || intl.Gateway != "https://api3.qoder.sh" {
 		t.Fatalf("intl endpoints: %+v", intl)
 	}
 	if len(intl.GatewayFallbacks) != 2 ||
 		intl.GatewayFallbacks[0] != "https://api2.qoder.sh" ||
-		intl.GatewayFallbacks[1] != "https://api3.qoder.sh" {
+		intl.GatewayFallbacks[1] != "https://api1.qoder.sh" {
 		t.Fatalf("intl fallbacks: %+v", intl.GatewayFallbacks)
 	}
 	if intl.ClientID != "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb" {
@@ -41,7 +41,7 @@ func TestRealmConfigsGolden(t *testing.T) {
 	if intl.RedirectURI != "qoder://aicoding.aicoding-agent/login-success" {
 		t.Fatalf("intl redirect uri: %s", intl.RedirectURI)
 	}
-	if intl.UA != "Qoder/1.1.64" || intl.Domain != "qoder.com" {
+	if intl.UA != "Qoder/1.1.75" || intl.Domain != "qoder.com" {
 		t.Fatalf("intl ua/domain: %+v", intl)
 	}
 	if !intl.SendClientID || intl.SendRedirectURI || intl.NonceDashed {
@@ -56,7 +56,7 @@ func TestRealmFallbacks(t *testing.T) {
 	if !ValidRealm("intl") || ValidRealm("us") {
 		t.Fatal("ValidRealm")
 	}
-	if got := GatewayCandidates("intl"); len(got) != 3 || got[0] != "https://api1.qoder.sh" {
+	if got := GatewayCandidates("intl"); len(got) != 3 || got[0] != "https://api3.qoder.sh" {
 		t.Fatalf("intl candidates: %+v", got)
 	}
 	if got := GatewayCandidates("cn"); len(got) != 1 {
@@ -128,8 +128,10 @@ func TestEndpointConstants(t *testing.T) {
 		t.Fatal("campaign paths")
 	}
 	if ClientUA != "Go-http-client/2.0" || DesktopClientType != "10" ||
-		DesktopClientVersion != "0.4.3" || MachineOS != "x86_64_win32" ||
-		MachineHostname != "DESKTOP-QODER" || LoginTTLSeconds != 600 {
+		DesktopClientVersion != "0.4.8" || LoginTTLSeconds != 600 {
 		t.Fatal("client constants drift")
+	}
+	if cosyMachineOS() == "" || machineHostname() == "" {
+		t.Fatal("machine os/hostname resolver must be non-empty on this host")
 	}
 }

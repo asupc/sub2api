@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"math"
 	"io"
 	"net/http"
 	"sort"
@@ -48,6 +49,12 @@ type CatalogEntry struct {
 	IsVL           bool            `json:"is_vl"`
 	IsReasoning    bool            `json:"is_reasoning"`
 	Thinking       *ThinkingConfig `json:"thinking_config"`
+	// IsFree / 峰谷价（官方 promotion）：运营展示用元数据，不参与网关计费
+	//（so 计费走自身价目表）。动态目录刷新时覆盖，静态快照缺省。
+	IsFree            *bool    `json:"is_free,omitempty"`
+	PriceFactor       *float64 `json:"price_factor,omitempty"`
+	PriceFactorPeak   *float64 `json:"price_factor_peak,omitempty"`
+	PriceFactorValley *float64 `json:"price_factor_valley,omitempty"`
 }
 
 // DisplayID 对外展示 id：「上游 key (官方模型名)」（qoder_catalog.py L1573-1579）。
@@ -515,6 +522,36 @@ type dynamicEntryFields struct {
 	IsVL           *bool           `json:"is_vl"`
 	IsReasoning    *bool           `json:"is_reasoning"`
 	Thinking       *ThinkingConfig `json:"thinking_config"`
+	IsFree         *bool           `json:"is_free"`
+	PriceFactor    *float64        `json:"price_factor"`
+	// OriginalPriceFactor 峰值回落口径之一（promotion 缺失时）。
+	OriginalPriceFactor *float64         `json:"original_price_factor"`
+	Promotion           *promotionFields `json:"promotion"`
+}
+
+// promotionFields 官方 promotion（峰谷价窗口与折扣；model_entry 峰谷价同款）。
+type promotionFields struct {
+	BeforePriceFactor *float64 `json:"before_promotion_price_factor"`
+	DiscountFactor    *float64 `json:"discount_factor"`
+}
+
+// valleyPrice 低谷价 = 峰值 × 折扣（官方 promotion 的定义，与快照抓取时刻
+// 无关）；缺折扣或折扣非法（<=0 / >1）时回落当前价——旧实现直接把当前
+// price_factor 当低谷价，快照在非低谷时段抓取时报出的低谷价会等于峰价。
+func valleyPrice(peak *float64, promo *promotionFields, now *float64) *float64 {
+	if peak == nil {
+		return nil
+	}
+	if promo != nil && promo.DiscountFactor != nil {
+		if d := *promo.DiscountFactor; d > 0 && d <= 1 {
+			v := math.Round(*peak*d*10000) / 10000
+			return &v
+		}
+	}
+	if now != nil {
+		return now
+	}
+	return nil
 }
 
 // dropNulls 递归剔除 null 值字段（动态接口对部分条目返回 null，如
@@ -602,6 +639,24 @@ func overlayEntry(base CatalogEntry, raw map[string]any) CatalogEntry {
 	}
 	if f.Thinking != nil {
 		out.Thinking = f.Thinking
+	}
+	if f.IsFree != nil {
+		out.IsFree = f.IsFree
+	}
+	if f.PriceFactor != nil {
+		out.PriceFactor = f.PriceFactor
+	}
+	// 峰谷价：peak = promotion.before_promotion_price_factor（缺失回落
+	// original_price_factor）；valley = peak × discount。
+	peak := f.OriginalPriceFactor
+	if f.Promotion != nil && f.Promotion.BeforePriceFactor != nil {
+		peak = f.Promotion.BeforePriceFactor
+	}
+	if peak != nil {
+		out.PriceFactorPeak = peak
+		if v := valleyPrice(peak, f.Promotion, f.PriceFactor); v != nil {
+			out.PriceFactorValley = v
+		}
 	}
 	return out
 }

@@ -321,16 +321,149 @@ const (
 	holdMaxFrames = 200
 )
 
+// ---------------------------------------------------------------------------
+// marker 变体识别（issue #60 follow-up：模型可能把 marker 写成
+// [<assistant …] / 尾括号缺失 / 多括号 / 前导尖括号等形态，逐字前缀匹配
+// 会整族漏识别——一律经正则与归一化处理）。
+// ---------------------------------------------------------------------------
+
+// leakMarkerOpenRe marker 开头（前导括号族 + assistant + 文案，不含尾括号）。
+var leakMarkerOpenRe = regexp.MustCompile(`^[\[<(]*\s*assistant\s*请求调用工具`)
+
+// leakMarkerRe marker 变体全文匹配（开头分支另配 ^，此处用于扫描与 span）。
+var leakMarkerRe = regexp.MustCompile(`[\[<(]*\s*assistant\s*请求调用工具\s*[\]>)]?`)
+
+// dsmlCloseRe 流中 DSML 闭合标签（issue #51：泄漏块可能以闭标签开头）。
+var dsmlCloseRe = regexp.MustCompile(`^(?:\s*</[^>]*DSML[^>]*>)+`)
+
+// leakMarkerCore marker 去空白主体（markerKey 的比对基准）。
+const leakMarkerCore = "assistant请求调用工具"
+
+// leakMarkerOpenCanonical 规范 marker 开头（归一化目标形，不含尾括号）。
+const leakMarkerOpenCanonical = "[assistant 请求调用工具"
+
+// markerKey 去掉空白后的 marker 主体（半角与全角空格）。
+func markerKey(text string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(text, " ", ""), "\u3000", "")
+}
+// markerPrefixOK text 是否是某个 marker 变体的**前半截**（跨帧/截断用）。
+func markerPrefixOK(text string) bool {
+	raw := pyLStrip(text)
+	body := strings.TrimLeft(raw, "[<")
+	key := markerKey(body)
+	if key == "" {
+		switch strings.TrimSpace(raw) {
+		case "", "[", "<", "[<":
+			return true
+		}
+		return false
+	}
+	return strings.HasPrefix(leakMarkerCore, key)
+}
+
+// markerPrefixLen 文本尾部是 marker 变体真前缀的最长码点数；0 = 无。
+// 窗口上限覆盖变体最长形态（前导括号族 + assistant + 文案 + 空白）。
+func markerPrefixLen(text string) int {
+	r := []rune(text)
+	maxN := min(len(r), markerHoldWindow+6)
+	for n := maxN; n > 0; n-- {
+		if markerPrefixOK(string(r[len(r)-n:])) {
+			return n
+		}
+	}
+	return 0
+}
+
+// matchLeakMarker 在 s 开头匹配一个 marker 变体（含尾随空白与可选尾括号），
+// 返回匹配结束位置与是否带尾括号；不匹配返回 -1。> / ) 尾括号视为 ]。
+func matchLeakMarker(s string) (end int, hasClose bool) {
+	m := leakMarkerOpenRe.FindStringIndex(s)
+	if m == nil {
+		return -1, false
+	}
+	end = m[1]
+	rest := s[end:]
+	trimmed := strings.TrimLeft(rest, pyWhitespace)
+	if trimmed != "" && (trimmed[0] == ']' || trimmed[0] == '>' || trimmed[0] == ')') {
+		return end + (len(rest) - len(trimmed)) + 1, true
+	}
+	return end, false
+}
+
+// lastMarkerSpan 返回最后一个 marker 变体的 (start, end)；没有则 (-1, -1)。
+func lastMarkerSpan(text string) (int, int) {
+	last, end := -1, -1
+	for _, loc := range leakMarkerRe.FindAllStringIndex(text, -1) {
+		last, end = loc[0], loc[1]
+	}
+	return last, end
+}
+
+// isBareMarker 整段恰好是一个 marker 变体（含任意括号组合与尾括号）。
+func isBareMarker(t string) bool {
+	if t == LeakMarker {
+		return true
+	}
+	end, _ := matchLeakMarker(t)
+	return end == len(t) && end != -1
+}
+
+// normalizeLeakMarker 归一 marker 变体：只归一**已存在**的括号（原本没写
+// 尾括号就不补——否则跨帧拼接多出一个字符；写了 > / ) / ] 统一成 ]，
+// 保持「一个 marker 只有一个闭括号」）；``` 围栏内的变体同理。
+func normalizeLeakMarker(text string) string {
+	t := pyLStrip(text)
+	if t == "" {
+		return text
+	}
+	lead := text[:len(text)-len(t)]
+	if end, hasClose := matchLeakMarker(t); end != -1 {
+		closing := ""
+		if hasClose {
+			closing = "]"
+		}
+		return lead + leakMarkerOpenCanonical + closing + t[end:]
+	}
+	if strings.HasPrefix(t, "```") {
+		rest := t[3:]
+		low := strings.ToLower(pyLStrip(rest))
+		after := pyLStrip(rest)
+		if strings.HasPrefix(low, "json") {
+			after = pyLStrip(pyLStrip(rest)[4:])
+		}
+		if end, hasClose := matchLeakMarker(after); end != -1 {
+			_ = hasClose // 围栏内变体统一归一到完整 marker
+			return lead + t[:len(t)-len(after)] + LeakMarker + after[end:]
+		}
+	}
+	return text
+}
+
 // leakBodyOffset 把「marker 之前的围栏前缀 / marker 之后的正文」解析出来
-// （_leak_body_offset L2805-2837）。state: "pre"（围栏/前缀区）、"body"
+// （_leak_body_offset）。state: "pre"（围栏/前缀区）、"body"
 // （已越过 marker）、"no"（显然不是）。
 func leakBodyOffset(text string) (state string, body string) {
-	t := pyLStrip(text)
-	if t == "" || strings.HasPrefix(LeakMarker, t) {
+	t := pyLStrip(normalizeLeakMarker(text))
+	if t == "" || strings.HasPrefix(LeakMarker, t) || markerPrefixOK(t) {
 		return "pre", ""
 	}
-	if strings.HasPrefix(t, LeakMarker) {
-		return "body", t[len(LeakMarker):]
+	if end, _ := matchLeakMarker(t); end != -1 {
+		b := pyLStrip(t[end:])
+		// issue #49：模型会连写多个 marker（数组在最后一个之后）——逐个跳过，
+		// 否则 hold 会被判成「body 不是数组」而在流式中途证伪、整块补发。
+		for {
+			e, _ := matchLeakMarker(b)
+			if e == -1 {
+				break
+			}
+			b = pyLStrip(b[e:])
+		}
+		// 重复 marker 还没打完（跨帧，如 "[assista"）——仍算候选，内容留空
+		// 等下一帧；不回 "pre" 是因为此处已越过首个 marker。
+		if b != "" && markerPrefixOK(b) {
+			return "body", ""
+		}
+		return "body", b
 	}
 	if !strings.HasPrefix(t, "`") {
 		return "no", ""
@@ -350,18 +483,18 @@ func leakBodyOffset(text string) (state string, body string) {
 	switch {
 	case strings.HasPrefix(low, "json"):
 		after = pyLStrip(pyLStrip(rest)[4:])
-	case strings.HasPrefix(LeakMarker, low) || strings.HasPrefix(low, LeakMarker):
+	case strings.HasPrefix(LeakMarker, low) || leakMarkerRe.MatchString(low):
 		after = pyLStrip(rest) // 无语言标记的 ``` 围栏
 	case strings.HasPrefix("json", low):
 		return "pre", "" // 语言标记还没打完（j/js/json）
 	default:
 		return "no", ""
 	}
-	if strings.HasPrefix(LeakMarker, after) {
+	if strings.HasPrefix(LeakMarker, after) || markerPrefixOK(after) {
 		return "pre", ""
 	}
-	if strings.HasPrefix(after, LeakMarker) {
-		return "body", after[len(LeakMarker):]
+	if end, _ := matchLeakMarker(after); end != -1 {
+		return "body", after[end:]
 	}
 	return "no", ""
 }
@@ -379,11 +512,14 @@ func findMarkerSplit(text string, allowPrefix bool) (emit, hold string) {
 	if text == "" {
 		return "", ""
 	}
+	// 首个完整标记处切开：marker 变体按正则定位（issue #60 follow-up），
+	// 工具结果 marker 保持精确匹配。
 	best := -1
-	for _, mk := range []string{LeakMarker, ToolResultMarker} {
-		if i := strings.Index(text, mk); i != -1 && (best == -1 || i < best) {
-			best = i
-		}
+	if loc := leakMarkerRe.FindStringIndex(text); loc != nil {
+		best = loc[0]
+	}
+	if i := strings.Index(text, ToolResultMarker); i != -1 && (best == -1 || i < best) {
+		best = i
 	}
 	if best != -1 {
 		return text[:best], text[best:]
@@ -397,7 +533,13 @@ func findMarkerSplit(text string, allowPrefix bool) (emit, hold string) {
 		tail = r[len(r)-markerHoldWindow:]
 	}
 	tailStr := string(tail)
-	for _, mk := range []string{LeakMarker, ToolResultMarker} {
+	// 尾部是 marker 变体的真前缀（1 字符/帧时 '[' 或 '<' 单独到达也不能当
+	// 散文放出，否则 marker 开头丢失）；工具结果 marker 前缀保持精确匹配。
+	if n := markerPrefixLen(tailStr); n > 0 {
+		return string(r[:len(r)-n]), string(r[len(r)-n:])
+	}
+	{
+		mk := ToolResultMarker
 		mkr := []rune(mk)
 		for n := min(len(tail), len(mkr)-1); n > 0; n-- {
 			if strings.HasSuffix(tailStr, pySlice(mk, 0, n)) {
@@ -571,15 +713,28 @@ func ParseLeakedToolCalls(text string, allowedNames map[string]bool) (calls []To
 		}
 		t = pyStrip(inner[:len(inner)-3])
 	}
-	if !strings.HasPrefix(t, LeakMarker) {
+	// issue #51：泄漏块可能以 DSML 闭合标签开头（「闭标签 + 数组」形态），
+	// 先剥掉再决定起点。
+	t = pyStrip(dsmlCloseRe.ReplaceAllString(t, ""))
+	// issue #60 follow-up：marker 可能写成 [<assistant …] / 尾括号缺失，
+	// 按变体匹配最后一个 marker；正文里再出现的重复 marker 一并剥掉。
+	mpos, mend := lastMarkerSpan(t)
+	if mpos < 0 {
 		return nil, text
 	}
-	rest := pyStrip(t[len(LeakMarker):])
-	if !strings.HasPrefix(rest, "[") || !strings.HasSuffix(rest, "]") {
+	t = pyStrip(t[mend:])
+	for {
+		e, _ := matchLeakMarker(t)
+		if e == -1 {
+			break
+		}
+		t = pyStrip(t[e:])
+	}
+	if !strings.HasPrefix(t, "[") || !strings.HasSuffix(t, "]") {
 		return nil, text
 	}
 	var arr []any
-	if err := json.Unmarshal([]byte(rest), &arr); err != nil {
+	if err := json.Unmarshal([]byte(t), &arr); err != nil {
 		return nil, text
 	}
 	if len(arr) == 0 {
@@ -660,8 +815,9 @@ func leakedPartialDroppable(text string, allowedNames map[string]bool) bool {
 	if t == "" {
 		return false
 	}
-	if t == LeakMarker {
-		// 只有 marker、连数组都没开始写：判据 3 的退化情形，同样是回声
+	if isBareMarker(t) {
+		// 只有 marker（含括号变体）、连数组都没开始写：判据 3 的退化情形，
+		// 同样是回声
 		return true
 	}
 	state, body := leakBodyOffset(t)
@@ -695,7 +851,7 @@ func leakedMalformedEcho(text string, allowedNames map[string]bool) bool {
 		return false
 	}
 	t := pyStrip(text)
-	if t == "" || t == LeakMarker {
+	if t == "" || isBareMarker(t) {
 		return false
 	}
 	state, body := leakBodyOffset(t)

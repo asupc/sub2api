@@ -61,7 +61,7 @@ func TestQoderChatURL_PerRealm(t *testing.T) {
 	t.Parallel()
 	for realm, wantHost := range map[string]string{
 		"cn":   "https://gateway.qoder.com.cn",
-		"intl": "https://api1.qoder.sh",
+		"intl": "https://api3.qoder.sh",
 	} {
 		account := qoderTestAccount()
 		account.Credentials["realm"] = realm
@@ -115,7 +115,7 @@ func TestForwardAsRawChatCompletions_QoderStream(t *testing.T) {
 	require.Equal(t, qoder.COSYVersion, upstream.lastReq.Header.Get("cosy-version"))
 	require.Equal(t, "application/json", upstream.lastReq.Header.Get("Content-Type"))
 	require.Equal(t, "text/event-stream", upstream.lastReq.Header.Get("Accept"))
-	require.Equal(t, "AGREE", upstream.lastReq.Header.Get("cosy-data-policy"))
+	require.Equal(t, "agree", upstream.lastReq.Header.Get("cosy-data-policy"))
 
 	// 出站体为 qoder_encode 载荷：解码后是 baseprompt 骨架（模型 key 已解析）。
 	decoded, derr := qoder.QoderDecode(string(upstream.lastBody))
@@ -386,7 +386,7 @@ func TestForwardAsRawChatCompletions_QoderStreamMidStreamErrorKeepsErrorFrame(t 
 }
 
 // TestForwardAsRawChatCompletions_QoderGatewayFailover 验证网关主机故障切换：
-// intl 主选 api1 返回 502（瞬时故障）→ 换 api2 重试成功；body 与 COSY 签名头
+// intl 主选 api3 返回 502（瞬时故障）→ 换 api2 重试成功；body 与 COSY 签名头
 // 跨主机保持不变（签名只覆盖 path）。
 func TestForwardAsRawChatCompletions_QoderGatewayFailover(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -417,7 +417,7 @@ func TestForwardAsRawChatCompletions_QoderGatewayFailover(t *testing.T) {
 	require.NotNil(t, result)
 
 	require.Len(t, upstream.requests, 2)
-	require.Equal(t, "api1.qoder.sh", upstream.requests[0].URL.Host)
+	require.Equal(t, "api3.qoder.sh", upstream.requests[0].URL.Host)
 	require.Equal(t, "api2.qoder.sh", upstream.requests[1].URL.Host)
 	require.Equal(t, "/algo/api/v2/service/pro/sse/agent_chat_generation", upstream.requests[1].URL.Path)
 	// 换主机不换签名：body 与 Authorization 完全一致。
