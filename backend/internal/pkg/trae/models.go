@@ -46,8 +46,14 @@ const modelsCreatedAt int64 = 1753600000
 
 // ModelEntry /v1/models 的一条模型记录。
 type ModelEntry struct {
-	Name          string
+	Name string
+	// ContextLength 声明口径（issue #53 三版）：官方目录 max > dev ⇒ 声明
+	// max（支持 Max Mode，请求时会注入 is_max_mode）；否则 dev（__dev 通道
+	// 实际窗口）；目录缺失 ⇒ 默认兜底，不猜数字。
 	ContextLength int64 // 0 → DefaultContextLength
+	// MaxMode 说明字段：true = 该模型支持 Max Mode（context_length 已按其
+	// 上限声明）。OpenAI 兼容客户端会忽略未知字段。
+	MaxMode bool
 }
 
 // ModelsResponseFor 组装 OpenAI /v1/models 形状的响应体。
@@ -67,13 +73,17 @@ func ModelsResponseFor(entries []ModelEntry) map[string]any {
 		if context <= 0 {
 			context = DefaultContextLength
 		}
-		data = append(data, map[string]any{
+		item := map[string]any{
 			"id":             entry.Name,
 			"object":         "model",
 			"created":        modelsCreatedAt,
 			"owned_by":       "trae",
 			"context_length": context,
-		})
+		}
+		if entry.MaxMode {
+			item["max_mode"] = true
+		}
+		data = append(data, item)
 	}
 	return map[string]any{
 		"object": "list",

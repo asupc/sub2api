@@ -192,14 +192,42 @@ func TestRefreshAccessTokenStepOneSucceeds(t *testing.T) {
 	if capture.body["ClientID"] != "en1oxy7wnw8j9n" {
 		t.Errorf("ClientID = %v（SOLO 变体应为 en1oxy7wnw8j9n）", capture.body["ClientID"])
 	}
-	// ★ PlatformCode 写死 IDE_PC（源码事实，勿按线派生 SOLO_PC）。
-	if capture.body["PlatformCode"] != "IDE_PC" {
-		t.Errorf("PlatformCode = %v, want IDE_PC", capture.body["PlatformCode"])
+	// ★ 客户端 1.107.1 形态：顶层 ClientSecret 恒空串、无扁平 DeviceID/PlatformCode，
+	// 设备字段全部收进 DeviceInfo（与 AuthCode 交换同一个派生点），另带 IDEVersion。
+	if capture.body["ClientSecret"] != "" {
+		t.Errorf("ClientSecret = %v, want 空串", capture.body["ClientSecret"])
 	}
-	if got := capture.header.Get("x-platform-code"); got != "IDE_PC" {
-		t.Errorf("x-platform-code = %q, want IDE_PC", got)
+	if _, flat := capture.body["DeviceID"]; flat {
+		t.Error("顶层不得再有扁平 DeviceID（已并入 DeviceInfo）")
 	}
-	if capture.body["RefreshToken"] != "rt-old" || capture.body["DeviceID"] != pair.DeviceID {
+	if _, flat := capture.body["PlatformCode"]; flat {
+		t.Error("顶层不得再有扁平 PlatformCode（已并入 DeviceInfo）")
+	}
+	if capture.body["IDEVersion"] == nil {
+		t.Error("缺 IDEVersion")
+	}
+	deviceInfo, ok := capture.body["DeviceInfo"].(map[string]any)
+	if !ok {
+		t.Fatalf("缺 DeviceInfo: %v", capture.body)
+	}
+	if deviceInfo["DeviceID"] != pair.DeviceID || deviceInfo["MachineID"] != creds.MachineID {
+		t.Errorf("DeviceInfo 设备字段 = %v", deviceInfo)
+	}
+	// ★ PlatformCode 按产品线派生（SOLO 线 SOLO_PC——客户端按 product 取，
+	// 2026-10-22 修复：refresh 不再写死 IDE_PC）。
+	if deviceInfo["PlatformCode"] != "SOLO_PC" {
+		t.Errorf("DeviceInfo.PlatformCode = %v, want SOLO_PC", deviceInfo["PlatformCode"])
+	}
+	if deviceInfo["DeviceName"] != VirtualDeviceName {
+		t.Errorf("DeviceInfo.DeviceName = %v", deviceInfo["DeviceName"])
+	}
+	if deviceInfo["DevicePublicKey"] != pair.PublicKeyPEM {
+		t.Error("DeviceInfo.DevicePublicKey 应与上报公钥同源（私钥推导）")
+	}
+	if got := capture.header.Get("x-platform-code"); got != "SOLO_PC" {
+		t.Errorf("x-platform-code = %q, want SOLO_PC", got)
+	}
+	if capture.body["RefreshToken"] != "rt-old" {
 		t.Errorf("body = %v", capture.body)
 	}
 	proof, ok := capture.body["DeviceProof"].(map[string]any)
@@ -260,7 +288,8 @@ func TestRefreshAccessTokenFallsBackToDer(t *testing.T) {
 	}
 }
 
-// TestRefreshAccessTokenFallsBackToLegacy ★★ 步 1-3 全失败 → 步 4 旧协议兜底体成功。
+// TestRefreshAccessTokenFallsBackToLegacy ★★ 本线四个带签名/带体变体全被拒 →
+// 无 proof 形态成功（新端点；旧协议兜底体已随客户端 1.107.1 形态废除）。
 func TestRefreshAccessTokenFallsBackToLegacy(t *testing.T) {
 	server, captures := serveRefresh(t, func(capture refreshCapture, _ int) (int, string) {
 		if _, hasProof := capture.body["DeviceProof"]; hasProof {
@@ -278,48 +307,50 @@ func TestRefreshAccessTokenFallsBackToLegacy(t *testing.T) {
 		t.Errorf("result = %+v", result)
 	}
 	if len(*captures) != 4 {
-		t.Fatalf("四步链应恰好四次请求, got %d", len(*captures))
+		t.Fatalf("本线四变体应恰好四次请求, got %d", len(*captures))
 	}
-	// 步 1/2 新端点，步 3/4 旧端点。
-	wantPaths := []string{newRefreshPath, newRefreshPath, legacyRefreshPath2, legacyRefreshPath2}
+	// 步 1/2 新端点，步 3 旧端点，步 4（无 proof）回新端点。
+	wantPaths := []string{newRefreshPath, newRefreshPath, legacyRefreshPath2, newRefreshPath}
 	for i, want := range wantPaths {
 		if (*captures)[i].path != want {
 			t.Errorf("链[%d].path = %s, want %s", i, (*captures)[i].path, want)
 		}
 	}
 	// 步 3 的 signPath 是旧路径（验签用旧路径原文）。
-	thirdProof := (*captures)[2].body["DeviceProof"].(map[string]any)
 	if (*captures)[2].body["ClientID"] != "en1oxy7wnw8j9n" {
 		t.Errorf("国际 SOLO 变体 ClientID = %v", (*captures)[2].body["ClientID"])
 	}
-	_ = thirdProof
-	// 步 4 兜底体：无 DeviceProof、ClientSecret "-"、UserID 空。
-	legacy := (*captures)[3].body
-	if _, exists := legacy["DeviceProof"]; exists {
-		t.Error("步 4 不应带 DeviceProof")
+	// 步 4 无 proof 形态：无 DeviceProof、ClientSecret 空串、仍带 DeviceInfo。
+	noproof := (*captures)[3].body
+	if _, exists := noproof["DeviceProof"]; exists {
+		t.Error("无 proof 变体不应带 DeviceProof")
 	}
-	if legacy["ClientSecret"] != "-" || legacy["UserID"] != "" {
-		t.Errorf("步 4 兜底体 = %v", legacy)
+	if noproof["ClientSecret"] != "" {
+		t.Errorf("ClientSecret = %v, want 空串", noproof["ClientSecret"])
 	}
-	if legacy["ClientID"] != "en1oxy7wnw8j9n" || legacy["RefreshToken"] != "rt-old" {
-		t.Errorf("步 4 = %v", legacy)
+	if _, exists := noproof["DeviceInfo"]; !exists {
+		t.Error("无 proof 变体仍应带 DeviceInfo（与 AuthCode 交换同源）")
 	}
-	// 步 4 头：不带 x-device-id / x-cloudide-token，仍带 x-app-id + x-platform-code。
+	if noproof["ClientID"] != "en1oxy7wnw8j9n" || noproof["RefreshToken"] != "rt-old" {
+		t.Errorf("步 4 = %v", noproof)
+	}
+	// 步 4 头：不带 x-device-id（无私钥签名就不伪造），x-cloudide-token 恒空串。
 	if got := (*captures)[3].header.Get("x-device-id"); got != "" {
-		t.Error("步 4 不应带 x-device-id")
+		t.Error("无 proof 变体不应带 x-device-id")
 	}
 	if got := (*captures)[3].header.Get("x-cloudide-token"); got != "" {
-		t.Error("步 4 不应带 x-cloudide-token")
+		t.Error("x-cloudide-token 应为空串")
 	}
 	if got := (*captures)[3].header.Get("x-app-id"); got == "" {
-		t.Error("步 4 应带 x-app-id")
+		t.Error("应带 x-app-id")
 	}
-	if got := (*captures)[3].header.Get("x-platform-code"); got != "IDE_PC" {
+	if got := (*captures)[3].header.Get("x-platform-code"); got != "SOLO_PC" {
 		t.Errorf("步 4 x-platform-code = %q", got)
 	}
 }
 
-// TestRefreshAccessTokenWithoutPrivateKey 无设备私钥：只剩步 4（唯一路径）。
+// TestRefreshAccessTokenWithoutPrivateKey 无设备私钥：每线只发「无 proof」形态
+//（本线 + 另一条线，共两步）；本线成功即止。
 func TestRefreshAccessTokenWithoutPrivateKey(t *testing.T) {
 	server, captures := serveRefresh(t, func(capture refreshCapture, _ int) (int, string) {
 		return 200, `{"Result":{"AccessToken":"only-legacy","RefreshToken":"rotated"}}`
@@ -331,22 +362,58 @@ func TestRefreshAccessTokenWithoutPrivateKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(*captures) != 1 {
-		t.Fatalf("无私钥应只走步 4, got %d 次请求", len(*captures))
+		t.Fatalf("无私钥本线 NoProof 应一步成功, got %d 次请求", len(*captures))
 	}
-	if (*captures)[0].path != legacyRefreshPath2 {
+	if (*captures)[0].path != newRefreshPath {
 		t.Errorf("path = %s", (*captures)[0].path)
+	}
+	if _, exists := (*captures)[0].body["DeviceProof"]; exists {
+		t.Error("无私钥不得伪造 DeviceProof")
 	}
 	if result.AccessToken != "only-legacy" || result.RefreshToken != "rotated" || !result.RefreshRotated {
 		t.Errorf("result = %+v", result)
 	}
-	// 私钥字段存在但无法解析：同样只剩步 4，不整体失败。
+	// 私钥字段存在但无法解析：同样只走无 proof 形态，不整体失败。
 	broken := &Credentials{Variant: string(VariantTraeCN), RefreshToken: "rt-old", DevicePrivateKey: "not a pem"}
 	*captures = nil
 	if _, err := RefreshAccessToken(context.Background(), redirectClient(t, server), VariantTraeCN, broken, ClientOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(*captures) != 1 {
-		t.Errorf("坏私钥应跳过步 1-3 只走步 4, got %d", len(*captures))
+		t.Errorf("坏私钥应只走无 proof 形态, got %d", len(*captures))
+	}
+}
+
+// TestRefreshAccessTokenOtherLineFallback ★ refresh_token 绑签发它的那把
+// ClientID：本线钥匙被 10101 拒 → 另一条线的变体接住（issue 2026-10-22 真机形态）。
+func TestRefreshAccessTokenOtherLineFallback(t *testing.T) {
+	server, captures := serveRefresh(t, func(capture refreshCapture, _ int) (int, string) {
+		di, _ := capture.body["DeviceInfo"].(map[string]any)
+		if di != nil && di["PlatformCode"] == "IDE_PC" {
+			// 本线（Trae CN = IDE 线）被拒：参数无效 + refresh token 不匹配。
+			return 200, `{"ResponseMetadata":{"Error":{"Code":"10101","Message":"{__Message.field}","StandardCode":"040004"}}}`
+		}
+		return 200, `{"Result":{"AccessToken":"solo-line-access"}}`
+	})
+	creds, _ := deviceCreds(t, VariantTraeCN, "rt-from-solo-client")
+
+	result, err := RefreshAccessToken(context.Background(), redirectClient(t, server), VariantTraeCN, creds, ClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.AccessToken != "solo-line-access" {
+		t.Errorf("result = %+v", result)
+	}
+	if len(*captures) != 5 {
+		t.Fatalf("本线四步被拒后应由另一线第 5 步接住, got %d", len(*captures))
+	}
+	// 另一线第 5 步用 SOLO 钥匙与 SOLO_PC 平台码。
+	other := (*captures)[4].body
+	if other["ClientID"] != "en1oxy7wnw8j9n" {
+		t.Errorf("另一线 ClientID = %v, want en1oxy7wnw8j9n", other["ClientID"])
+	}
+	if di, _ := other["DeviceInfo"].(map[string]any); di == nil || di["PlatformCode"] != "SOLO_PC" {
+		t.Errorf("另一线 DeviceInfo.PlatformCode = %v", other["DeviceInfo"])
 	}
 }
 

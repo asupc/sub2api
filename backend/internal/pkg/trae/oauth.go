@@ -439,6 +439,30 @@ func (t *ExchangedToken) Authorization() string {
 	return AuthorizationHeader(t.AccessToken)
 }
 
+// deviceInfoPayload 设备信息体 12 键（客户端 _buildDeviceInfo 的唯一派生点）：
+// AuthCode 交换与 refreshToken 刷新发**同一个** DeviceInfo——两条链的结构
+// 不可能再分叉（2026-10-22 真机缺陷：refresh 只发扁平 {DeviceID, PlatformCode}
+// 被上游 10101/040004 拒，自动续期静默失效 14 天）。
+func deviceInfoPayload(facts DeviceFacts, line OAuthLine) map[string]any {
+	return map[string]any{
+		"DeviceID":     facts.DeviceID,
+		"MachineID":    facts.MachineID,
+		"PlatformCode": line.PlatformCode(),
+		"DeviceType":   "PC",
+		"DeviceName":   facts.DeviceName,
+		// 与授权 URL 的 x_device_brand 同源（客户端装的是 deviceModel）。
+		"DeviceModel": facts.DeviceModel,
+		// 与授权 URL 的 x_app_version 同源（客户端三处同值）。
+		"ClientVersion":   facts.appVersion(),
+		"DevicePublicKey": facts.DevicePublicKeyPEM,
+		"DeviceBrand":     facts.DeviceBrand,
+		"DeviceCPU":       facts.DeviceCPU,
+		// 与授权 URL 的 x_device_type / x_os_version 同源。
+		"OSInfo":    facts.OSName,
+		"OSVersion": facts.OSVersion,
+	}
+}
+
 // buildExchangePayload 构造 AuthCode 交换主路径请求体。
 // AuthCode 场景不发 DeviceProof（那是 refreshToken 刷新场景专属），
 // DevicePublicKey 直接取信封里的 publicKeyPEM，不推导。
@@ -447,24 +471,8 @@ func buildExchangePayload(clientID, authCode, codeVerifier string, facts DeviceF
 		"ClientID":     clientID,
 		"AuthCode":     authCode,
 		"CodeVerifier": codeVerifier,
-		"DeviceInfo": map[string]any{
-			"DeviceID":     facts.DeviceID,
-			"MachineID":    facts.MachineID,
-			"PlatformCode": line.PlatformCode(),
-			"DeviceType":   "PC",
-			"DeviceName":   facts.DeviceName,
-			// 与授权 URL 的 x_device_brand 同源（客户端装的是 deviceModel）。
-			"DeviceModel": facts.DeviceModel,
-			// 与授权 URL 的 x_app_version 同源（客户端三处同值）。
-			"ClientVersion":   facts.appVersion(),
-			"DevicePublicKey": facts.DevicePublicKeyPEM,
-			"DeviceBrand":     facts.DeviceBrand,
-			"DeviceCPU":       facts.DeviceCPU,
-			// 与授权 URL 的 x_device_type / x_os_version 同源。
-			"OSInfo":    facts.OSName,
-			"OSVersion": facts.OSVersion,
-		},
-		"IDEVersion": facts.appVersion(),
+		"DeviceInfo":   deviceInfoPayload(facts, line),
+		"IDEVersion":   facts.appVersion(),
 	}
 }
 

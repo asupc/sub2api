@@ -145,6 +145,13 @@ func PrepareLLMChatBody(src []byte, variant Variant, defaultModel, uid, deviceID
 	body["app_version_code"] = AppVersionCode
 	body["app_id"] = ChatAppID
 	body["package_type"] = ChatPackageType
+	// Max Mode（issue #53 三版）：官方目录 context_window_tokens 里 max > dev
+	// 的模型注入 is_max_mode:true——prompt_max_tokens 恒 168000 不变（实测该
+	// 字段不钳制实际上下文，1M 窗口由上游内部决策）；目录未同步 / 不支持
+	// 则不注入（不猜）。目录同步见 catalog.go 的 EnsureCatalog。
+	if _, _, ok := MaxModeWindow(variant.Region(), configName); ok {
+		body["is_max_mode"] = true
+	}
 
 	out, err := json.Marshal(body)
 	if err != nil {

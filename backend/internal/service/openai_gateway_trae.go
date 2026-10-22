@@ -77,7 +77,14 @@ func applyTraeChatBody(account *Account, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return trae.PrepareLLMChatBody(body, creds.VariantOf(), trae.DefaultModel, creds.UID, creds.DeviceID, creds.MachineID), nil
+	variant := creds.VariantOf()
+	// Max Mode（issue #53 三版）：顺带确保官方模型目录新鲜（24h TTL、单飞、
+	// 静默失败）——目录里的 max > dev 决定本次请求是否注入 is_max_mode。
+	// 异步进行：目录未同步时本次按默认窗口出站（不猜数字），下批请求生效。
+	if jwt := strings.TrimSpace(creds.JWT); jwt != "" {
+		go trae.EnsureCatalog(context.Background(), nil, variant.Region(), jwt)
+	}
+	return trae.PrepareLLMChatBody(body, variant, trae.DefaultModel, creds.UID, creds.DeviceID, creds.MachineID), nil
 }
 
 // applyTraeChatHeaders 删净 sendCCUpstreamRequest 已设置的默认头（Bearer
