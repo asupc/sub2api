@@ -497,3 +497,25 @@
 - **部署验证**：新镜像 `sub2api:0.2.17-so-20261021`（VERSION=0.2.17 / commit ed3b52a）经 `/vol2/1000/docker/sub2api/docker-compose.yml` 部署，容器 healthy、`/health` 200、Pricing 257 模型加载、TraeOps/WorkbuddyOps/QoderOps 运营任务全部拉起；回滚镜像 `sub2api:0.2.17` 保留。
 - **改动文件/模块**：`frontend/pnpm-workspace.yaml`、`frontend/pnpm-lock.yaml`、`backend/scripts/resolve-version.sh`（仅 git mode）、根 `Dockerfile`。
 - **与上游合并影响**：`pnpm-workspace.yaml` 为二开独有文件；`pnpm-lock.yaml` 与根 `Dockerfile` 为上游同名文件，下次同步需保留 chmod 二开语义；`UPSTREAM-BASE` 不变。
+
+## 平台移植源同步（PORTER-BASE 2026-10-23）
+
+- **来源**：qoder2api-hub `5acef5e..4e46ccd`（61 提交，v1.5.1→v1.6.9，含 10-21 已评估三批）；trae-workbuddy-switch `8edb86d..a1711fd`（259 提交，其中 issue #76 密钥权限系列 ~40 个不适用）；workbuddy2api-panel 本机无仓库跳过（基准不动）。
+- **已移植（qoder，commit 49f5c94）**：
+  - 出站头族对齐 qodercli 1.1.75/桌面端 0.4.8（`7fb9281` #75 + `879b336`）：COSYVersion 1.1.75（QD_COSY_VERSION 覆盖）、UA=undici、business 三头、data-policy 小写、所有请求带 machineos（auto 识别）、openapi UA 按区域、intl 网关 api3 主选（QD_INTL_GATEWAY）。
+  - 结构化白名单补 deepseek/dfmodel（`370948e` + trae仓 `5f08418` #72）；keep_reasoning 复用 IsDeepSeekModel。
+  - intl 签到最小机器头兜底（`d6dd0d4` v1.6.9）：omitted+showCampaign=false 降档重试一次（QD_INTL_MACHINE_FALLBACK）；提速项不移植（so 无逐基址重试与面板同步等待，架构差异）。
+  - runtime-info 环境码 cn=0/intl=3 + 落盘 environment 校验（#75）。
+  - 回声 marker 变体正则识别 + 重复 marker + DSML 闭标签前缀 + 散文同帧（`370948e`）。
+  - 出站清洗孤儿工具历史 + 结构化 400/422 降级记忆（6h，区域+模型，错误路径写入不重发——源的同账号文本重发在 CC pipeline 换号循环外，代价高于每 TTL 一次 400 体验，`5f08418` 语义取舍）。
+  - 多模态 parts 出站（`361a3ff` 前半）：带图消息 content 保留结构化 parts，图片真正传上游。
+  - 模型目录 is_free/峰谷价元数据（promotion 峰值×折扣；`69fa3fc` 数据面；前端展示列未加，字段已随 sync preview JSON 下发）。
+- **已移植（trae，commit e890c97）**：
+  - JWT 续期协议修复（`74b70a2`）：客户端 1.107.1 体形态（ClientSecret 空串 + DeviceInfo 12 字段 + IDEVersion，与 AuthCode 交换同一 deviceInfoPayload 派生点）、account_base 端点、六步变体链（含另一条产品线兜底）、10101/040004 参数无效分类、PlatformCode 按线派生、无私钥不发 proof。so 周期刷新链已有 account_refresh_failed Warn 日志（源仓的吞错缺陷不存在）。
+  - Max Mode（`b49dee2`/`5c3e51a` #53 三版）：`pkg/trae/catalog.go` 重放 batch_get_detail_param（24h TTL 进程内缓存、单飞、静默失败、endpoint 可注入测试），max>dev 注入 is_max_mode（prompt_max_tokens 恒 168000），ModelEntry 增 MaxMode；**不落盘**（源落盘 ~/.buddy-switch，so 容器无对应约定，重启重拉一次可接受）。
+- **用户明确跳过（不再建议）**：workbuddy 会话头三件套恒发（`092c5e3`）与 sanitize DeepSeek Harness 改写 + 积分到期取最早（`66a33ab`/`67cf544`）——2026-10-22 用户裁定不移植。
+- **评估未移植（原因）**：qoder #77/#83 换区 failover（请求级 realm 概念，so 按账号路由无对应路径）；#81 /agents/models（面板内部接口缺陷，so 无此接口）；#86 账号测试 only_account（so 测试本就指定账号）；v1.6.3/v1.6.4 用量洞察/web 工具与面板 UI 系列（so 有自身体系）；Pro 升级包领取（`1b2a3b7`——so 已有 runProWelfare 等价实现）；trae issue #76 密钥权限系列（自有网关 Key 体系，so 有自身 API Key/订阅体系）；trae 账号池系列（RAII/excluded/Retry-After，同 10-16 口径）；trae 限额护栏/pacing/在途闸门/历史削减（so 有自身 402 停调度）；DSML #66 系列/排队/首帧/CRLF（so 同代或更新实现）；无客户端部署（so 即服务器 OAuth 流）；稳定会话 ID（已有账号固定会话头）。
+- **改动文件**：`pkg/qoder/{baseprompt,fingerprint,realms,sign,sse,accounts,umid,models}.go` 及测试；`service/openai_gateway_qoder{,_test}.go`；`pkg/trae/{oauth,refresh,payload,models}.go`、`pkg/trae/catalog.go`（新增）及测试；`service/openai_gateway_trae.go`。
+- **验证**：`go build ./...` 全绿；`go vet -tags=unit ./internal/...` 通过；单测——pkg/qoder、pkg/trae、其余包全绿，service 5 个失败为**存量**（Gemini thinking variant / 复合分组族，stash 基线验证与本次失败清单完全一致，与移植无关，待单独排查）；黄金向量（sign payload/sig、UA、网关顺序、data-policy、DesktopVersion 0.4.8）已按新协议更新。
+- **基准推进**：PORTER-BASE qoder 行 → `4e46ccd9…`、trae 行 → `a1711fdc…`（workbuddy 不变）。
+- **与上游合并影响**：不涉及 sub2api-upstream-sync 的 UPSTREAM-BASE；改动全部位于二开文件与测试。
