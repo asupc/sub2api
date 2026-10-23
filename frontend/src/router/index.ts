@@ -331,17 +331,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/admin/models',
     name: 'AdminModelManifest',
-    redirect: { path: '/admin/model-capability', query: { tab: 'manifest' } },
-  },
-  {
-    path: '/admin/benchmark-plans',
-    name: 'AdminModelBenchmarkPlans',
-    redirect: { path: '/admin/model-capability', query: { tab: 'plans' } },
-  },
-  {
-    path: '/admin/model-benchmarks',
-    name: 'AdminModelBenchmark',
-    redirect: { path: '/admin/model-capability', query: { tab: 'ranking' } },
+    redirect: '/admin/model-capability',
   },
   {
     path: '/admin/model-capability',
@@ -351,8 +341,8 @@ const routes: RouteRecordRaw[] = [
       requiresAuth: true,
       requiresAdmin: true,
       title: 'Model Capability Center',
-      titleKey: 'admin.modelBenchmark.title',
-      descriptionKey: 'admin.modelBenchmark.description'
+      titleKey: 'admin.modelManifest.title',
+      descriptionKey: 'admin.modelManifest.description'
     }
   },
   {

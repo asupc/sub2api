@@ -105,14 +105,6 @@
             class="w-36"
             :options="statusOptions"
           />
-          <!-- 模型视角专用：按最近测评分数降序（未测评的排最后） -->
-          <Select
-            v-if="viewMode === 'model'"
-            v-model="sortMode"
-            size="sm"
-            class="w-36"
-            :options="sortOptions"
-          />
           <button
             type="button"
             class="btn btn-secondary btn-sm"
@@ -223,17 +215,6 @@
 
           <!-- 右侧统计胶囊与状态 -->
           <div class="ml-auto flex items-center gap-3 sm:gap-6">
-            <div class="text-right">
-              <div class="text-[11px] text-gray-400">{{ t('admin.modelManifest.benchmark.label') }}</div>
-              <div
-                v-if="model.benchmark_score != null"
-                class="text-xs font-semibold tabular-nums text-indigo-600 dark:text-indigo-400"
-                :title="benchmarkTooltip(model)"
-              >
-                {{ model.benchmark_score.toFixed(1) }}
-              </div>
-              <div v-else class="text-xs text-gray-400 dark:text-dark-500">{{ t('admin.modelManifest.benchmark.untested') }}</div>
-            </div>
             <div class="text-right">
               <div class="text-[11px] text-gray-400">{{ t('admin.modelManifest.availableAccounts') }}</div>
               <div
@@ -483,12 +464,6 @@ function toggleExpand(modelId: string) {
   expanded.value = next
 }
 
-const sortMode = ref<'default' | 'score'>('score')
-const sortOptions = computed(() => [
-  { value: 'default', label: t('admin.modelManifest.benchmark.sortDefault') },
-  { value: 'score', label: t('admin.modelManifest.benchmark.sortScore') }
-])
-
 const statusOptions = computed(() => [
   { value: 'all', label: t('admin.modelManifest.statusAll') },
   { value: 'healthy', label: t('admin.modelManifest.statusHealthy') },
@@ -514,27 +489,8 @@ const filteredModels = computed(() => {
     }
     return true
   })
-  if (sortMode.value === 'score') {
-    // 最近测评分数降序；未测评的排最后（同分保持既有顺序）。
-    return [...filtered].sort((a, b) => {
-      const left = a.benchmark_score
-      const right = b.benchmark_score
-      if (left == null && right == null) return 0
-      if (left == null) return 1
-      if (right == null) return -1
-      return right - left
-    })
-  }
   return filtered
 })
-
-function benchmarkTooltip(model: ModelManifestItem): string {
-  const date = model.benchmark_scored_at ? new Date(model.benchmark_scored_at).toLocaleString() : '—'
-  if (model.benchmark_suite_version) {
-    return t('admin.modelManifest.benchmark.tooltip', { date, version: model.benchmark_suite_version })
-  }
-  return t('admin.modelManifest.benchmark.tooltipNoVersion', { date })
-}
 
 // 平台胶囊：从数据中动态统计（含各平台模型数），保证与真实账号对齐
 const platformOptions = computed(() => {

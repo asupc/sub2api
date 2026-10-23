@@ -665,7 +665,7 @@ const adminNavItems = computed((): NavItem[] => {
         { path: '/admin/accounts', label: t('nav.accountsAll'), icon: null },
       ],
     },
-    // 模型能力中心：融合模型清单、测评计划与模型能力测评
+    // 模型能力中心：模型清单与账号供给透视
     { path: '/admin/model-capability', label: t('nav.modelCapabilityCenter'), icon: BeakerIcon },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     {
