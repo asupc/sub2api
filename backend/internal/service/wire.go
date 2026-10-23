@@ -702,35 +702,6 @@ func ProvideScheduledTestRunnerService(
 	return svc
 }
 
-// ProvideModelBenchmarkService wires the benchmark application service.
-// 顺带给模型清单注入「最近测评分数」来源：/admin/models/manifest 会一并返回
-// 每个模型的最近一次能力分（展示增强项，查询失败不影响清单可用性）。
-// 测评执行走公共网关回环：仅需 API Key 来源（认证）与设置服务（回环 Key 选择）。
-func ProvideModelBenchmarkService(
-	repo ModelBenchmarkRepository,
-	apiKeys APIKeyRepository,
-	settings *SettingService,
-	manifestService *ModelManifestService,
-	billing *BillingService,
-	cfg *config.Config,
-) *ModelBenchmarkService {
-	if manifestService != nil && repo != nil {
-		manifestService.SetBenchmarkScoreSource(repo)
-	}
-	return NewModelBenchmarkService(repo, apiKeys, settings, manifestService, NewModelBenchmarkExecutor(apiKeys, settings, billing, cfg))
-}
-
-// ProvideModelBenchmarkRunnerService creates and starts the independent benchmark runner.
-func ProvideModelBenchmarkRunnerService(
-	repo ModelBenchmarkRepository,
-	benchmarkService *ModelBenchmarkService,
-	cfg *config.Config,
-) *ModelBenchmarkRunnerService {
-	svc := NewModelBenchmarkRunnerService(repo, benchmarkService, cfg)
-	svc.Start()
-	return svc
-}
-
 // ProvideOpsScheduledReportService creates and starts OpsScheduledReportService.
 func ProvideOpsScheduledReportService(
 	opsService *OpsService,
@@ -1036,8 +1007,6 @@ var ProviderSet = wire.NewSet(
 	ProvideIdempotencyCleanupService,
 	ProvideScheduledTestService,
 	ProvideScheduledTestRunnerService,
-	ProvideModelBenchmarkService,
-	ProvideModelBenchmarkRunnerService,
 	NewGroupCapacityService,
 	NewChannelService,
 	wire.Bind(new(ChannelCacheInvalidator), new(*ChannelService)),

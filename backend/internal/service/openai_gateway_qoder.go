@@ -804,30 +804,6 @@ func qoderIsChatModelKey(key string) bool {
 // testQoderAccountConnection 经真实转发路径测试 qoder 账号连接：复用
 // sendCCUpstreamRequest 的 qoder 分叉（COSY 签名头族 + qoder_encode 体 + 网关主机
 // 故障切换；私有 SSE 信封已在分叉内包装为 OpenAI SSE），交既有测试流解析。
-func isBenchmarkAccountTest(c *gin.Context) bool {
-	if c == nil {
-		return false
-	}
-	return c.GetBool(accountTestBenchmarkKey)
-}
-
-func createQoderModelBenchmarkPayload(modelID, prompt string, maxTokens int) map[string]any {
-	if maxTokens <= 0 {
-		maxTokens = 4096
-	}
-	payload := map[string]any{
-		"model": modelID,
-		"messages": []map[string]any{
-			{"role": "user", "content": strings.TrimSpace(prompt)},
-		},
-		"stream": true,
-	}
-	if maxTokens > 0 {
-		payload["max_tokens"] = maxTokens
-	}
-	return payload
-}
-
 func (s *AccountTestService) testQoderAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 	testModelID := strings.TrimSpace(modelID)
@@ -851,11 +827,7 @@ func (s *AccountTestService) testQoderAccountConnection(c *gin.Context, account 
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 
-	benchmarkMaxTokens := 0
-	if isBenchmarkAccountTest(c) {
-		benchmarkMaxTokens = modelBenchmarkOutputLimit(c)
-	}
-	payloadBytes, _ := json.Marshal(createQoderModelBenchmarkPayload(testModelID, prompt, benchmarkMaxTokens))
+	payloadBytes, _ := json.Marshal(createOpenAIChatCompletionsTestPayload(testModelID, prompt))
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 agent_chat_generation 测试连接"})
 

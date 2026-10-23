@@ -74,7 +74,6 @@ var ProviderSet = wire.NewSet(
 	NewAdminAccountRepository,
 	NewScheduledTestPlanRepository,   // 定时测试计划仓储
 	NewScheduledTestResultRepository, // 定时测试结果仓储
-	NewModelBenchmarkRepository,      // 模型能力测评仓储
 	NewProxyRepository,
 	NewRedeemCodeRepository,
 	NewPromoCodeRepository,

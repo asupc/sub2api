@@ -267,9 +267,6 @@ func (s *AccountTestService) testTraeAccountConnection(c *gin.Context, account *
 	c.Writer.Flush()
 
 	payload := createOpenAIChatCompletionsTestPayload(testModelID, prompt)
-	if isBenchmarkAccountTest(c) {
-		payload["max_tokens"] = modelBenchmarkOutputLimit(c)
-	}
 	payloadBytes, _ := json.Marshal(payload)
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 	s.sendEvent(c, TestEvent{Type: "status", Text: "正在通过 llm_utils_chat 测试连接"})

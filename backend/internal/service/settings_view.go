@@ -531,19 +531,6 @@ type RectifierSettings struct {
 	APIKeySignaturePatterns  []string `json:"apikey_signature_patterns"`  // API Key 自定义匹配关键词
 }
 
-// ModelBenchmarkSettings 模型能力测评配置：回环网关请求使用的 API Key 与全局统一的
-// 采样次数、单题输出预算（所有测评计划共用，计划内只读）。
-type ModelBenchmarkSettings struct {
-	APIKeyID        int64 `json:"api_key_id"`        // 0 = 未配置（测评执行将报错提示）
-	SampleCount     int   `json:"sample_count"`      // 采样次数（1-3），0 = 旧数据，读取时兜底为 1
-	MaxOutputTokens int   `json:"max_output_tokens"` // 单题 max tokens（128-32768），0 = 旧数据，读取时兜底为 8192
-}
-
-// DefaultModelBenchmarkSettings 返回默认测评配置（未选择 Key）。
-func DefaultModelBenchmarkSettings() *ModelBenchmarkSettings {
-	return &ModelBenchmarkSettings{APIKeyID: 0, SampleCount: 1, MaxOutputTokens: 8192}
-}
-
 // DefaultRectifierSettings 返回默认的整流器配置（全部启用）
 func DefaultRectifierSettings() *RectifierSettings {
 	return &RectifierSettings{

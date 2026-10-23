@@ -9,7 +9,6 @@ import (
 )
 
 const accountTestBackgroundKey = "account_test_background"
-const accountTestBenchmarkKey = "account_test_benchmark"
 
 // Bind attribution before lookup so missing accounts are identifiable too. The
 // request logger retains HTTP request IDs or the caller's background correlation.
@@ -46,15 +45,4 @@ func logAccountTestError(c *gin.Context, message string) {
 	logger.FromContext(c.Request.Context()).Warn("account_test.failed",
 		zap.String("error", truncateString(message, 2048)),
 	)
-}
-
-const accountTestBenchmarkLimitKey = "account_test_benchmark_limit"
-
-func modelBenchmarkOutputLimit(c *gin.Context) int {
-	if c != nil {
-		if limit := c.GetInt(accountTestBenchmarkLimitKey); limit >= 128 && limit <= 4096 {
-			return limit
-		}
-	}
-	return defaultModelBenchmarkMaxOutputTokens
 }
