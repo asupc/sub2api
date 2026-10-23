@@ -8,3 +8,8 @@
 - **描述**：将 `hard-v1` 的每题型变体数从 2 个减少为 1 个，单次测评题量从 112 减少到 56，缩短单次测评时间与成本。评分版本保持 3.0.0 ; 同时修正权重与聚合中的变体数量假设；权重重归一化仍保持 category 总权重不变。
 - **改动文件**：`backend/internal/service/model_benchmark_suite.go`、`backend/internal/service/model_benchmark_types.go`、`backend/internal/service/model_benchmark_service.go`、相关测试文件。
 - **与上游合并影响**：无。
+
+### 2026-10-23 移除模型能力测评功能（保留模型清单）
+- **描述**：删除 benchmark 全部后端实现（service 22 文件 / repository / handler / 路由 `/admin/model-benchmarks/*` / 设置项 / wire 装配 / 账号测试挂钩），`model_manifest_service.go` 剥离评分注入。新增 `250_so_drop_model_benchmark.sql`：既有库 DROP `model_benchmark_{plans,runs,run_items}` 并清空 243~249 的迁移记录，全新库为空操作。
+- **改动文件**：见根 `CHANGELOG-SO.md` 同日条目（完整清单）。
+- **与上游合并影响**：无。
