@@ -435,6 +435,15 @@ func (s *UsageService) GetBatchAPIKeyUsageStats(ctx context.Context, apiKeyIDs [
 	return stats, nil
 }
 
+// GetAPIKeyUsageStatsByUser returns per-key usage stats (with per-model breakdown) scoped to a user.
+func (s *UsageService) GetAPIKeyUsageStatsByUser(ctx context.Context, userID int64, startTime, endTime time.Time, limit int) ([]usagestats.APIKeyUsageStatItem, error) {
+	stats, err := s.usageRepo.GetAPIKeyUsageStatsByUser(ctx, userID, startTime, endTime, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get api key usage stats by user: %w", err)
+	}
+	return stats, nil
+}
+
 // ListWithFilters lists usage logs with admin filters.
 func (s *UsageService) ListWithFilters(ctx context.Context, params pagination.PaginationParams, filters usagestats.UsageLogFilters) ([]UsageLog, *pagination.PaginationResult, error) {
 	logs, result, err := s.usageRepo.ListWithFilters(ctx, params, filters)

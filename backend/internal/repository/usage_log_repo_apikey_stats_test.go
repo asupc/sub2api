@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -82,4 +83,45 @@ func TestUsageLogRepositoryGetAPIKeyUsageStats_Empty(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, items)
 	require.Empty(t, items)
+}
+
+func TestUsageLogRepositoryGetAPIKeyUsageStatsByUser(t *testing.T) {
+	start := time.Date(2026, 9, 22, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+
+	db, mock := newSQLMock(t)
+	repo := &usageLogRepository{sql: db}
+
+	mainRows := mock.NewRows([]string{
+		"api_key_id", "name", "username",
+		"request_count", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens",
+		"total_tokens", "avg_tokens_per_sec", "avg_duration_ms",
+	})
+	mainRows.AddRow(int64(11), "自动开发", "小菜鸡",
+		int64(10), int64(1000), int64(400), int64(50), int64(8000), int64(9450), 37.5, int64(8000))
+	mock.ExpectQuery(regexp.QuoteMeta("AND u.user_id = $4")).
+		WithArgs(start, end, 50, int64(42)).
+		WillReturnRows(mainRows)
+
+	modelRows := mock.NewRows([]string{
+		"api_key_id", "model",
+		"request_count", "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens",
+		"total_tokens", "avg_tokens_per_sec", "avg_duration_ms",
+	})
+	modelRows.AddRow(int64(11), "glm-5.3",
+		int64(6), int64(700), int64(300), int64(50), int64(6000), int64(7050), 40.2, int64(9000))
+	mock.ExpectQuery(regexp.QuoteMeta("api_key_id = ANY($3)")).
+		WithArgs(start, end, sqlmock.AnyArg(), int64(42)).
+		WillReturnRows(modelRows)
+
+	items, err := repo.GetAPIKeyUsageStatsByUser(context.Background(), 42, start, end, 50)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+
+	first := items[0]
+	require.Equal(t, int64(11), first.APIKeyID)
+	require.Equal(t, "自动开发", first.Name)
+	require.Equal(t, int64(9450), first.TotalTokens)
+	require.Len(t, first.Models, 1)
+	require.Equal(t, "glm-5.3", first.Models[0].Model)
 }

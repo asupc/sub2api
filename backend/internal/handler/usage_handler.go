@@ -671,6 +671,89 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 	response.Success(c, gin.H{"stats": stats})
 }
 
+// parseAPIKeyStatsDateRange 解析按密钥统计用量的 start_date/end_date（YYYY-MM-DD，用户时区）。
+// 缺省规则：仅给 end_date 时 start 取 end_date 当天；仅给 start_date 时 end 取次日；
+// 两者都缺省为今天。显式区间要求 start_date <= end_date。
+// 结束时间为排他值（当日后一天 00:00），按日历日推进（AddDate）以兼容夏令时切换日。
+func parseAPIKeyStatsDateRange(c *gin.Context, userTZ string) (time.Time, time.Time, bool) {
+	var startDate, endDate time.Time
+	if raw := strings.TrimSpace(c.Query("start_date")); raw != "" {
+		t, err := timezone.ParseInUserLocation("2006-01-02", raw, userTZ)
+		if err != nil {
+			response.BadRequest(c, "Invalid start_date, expected YYYY-MM-DD")
+			return time.Time{}, time.Time{}, false
+		}
+		startDate = t
+	}
+	if raw := strings.TrimSpace(c.Query("end_date")); raw != "" {
+		t, err := timezone.ParseInUserLocation("2006-01-02", raw, userTZ)
+		if err != nil {
+			response.BadRequest(c, "Invalid end_date, expected YYYY-MM-DD")
+			return time.Time{}, time.Time{}, false
+		}
+		endDate = t
+	}
+	if !startDate.IsZero() && !endDate.IsZero() && startDate.After(endDate) {
+		response.BadRequest(c, "start_date must not be after end_date")
+		return time.Time{}, time.Time{}, false
+	}
+
+	startTime := startDate
+	if startTime.IsZero() {
+		if !endDate.IsZero() {
+			startTime = endDate
+		} else {
+			startTime = timezone.StartOfDayInUserLocation(timezone.NowInUserLocation(userTZ), userTZ)
+		}
+	}
+
+	endTime := startTime.AddDate(0, 0, 1)
+	if !endDate.IsZero() {
+		endTime = endDate.AddDate(0, 0, 1)
+	}
+	return startTime, endTime, true
+}
+
+// DashboardAPIKeysUsageStats handles getting per-key usage stats (with per-model breakdown)
+// for the current user's own API keys, same shape as the admin console API.
+// GET /api/v1/usage/dashboard/api-keys-usage-stats
+// Query params: start_date, end_date (YYYY-MM-DD; only end_date defaults start to that day,
+// both omitted default to today), limit (default 50, max 200)
+func (h *UsageHandler) DashboardAPIKeysUsageStats(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	userTZ := c.Query("timezone")
+	startTime, endTime, ok := parseAPIKeyStatsDateRange(c, userTZ)
+	if !ok {
+		return
+	}
+
+	limitStr := c.DefaultQuery("limit", "50")
+	limit, err := strconv.Atoi(limitStr)
+	if err != nil || limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	items, err := h.usageService.GetAPIKeyUsageStatsByUser(c.Request.Context(), subject.UserID, startTime, endTime, limit)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+
+	response.Success(c, gin.H{
+		"items":      items,
+		"start_date": startTime.Format("2006-01-02"),
+		"end_date":   endTime.AddDate(0, 0, -1).Format("2006-01-02"),
+	})
+}
+
 // GetMyAPIKeyDailyUsage handles getting daily usage details for the current user's API key.
 // GET /api/v1/user/api-keys/:id/usage/daily?days=30
 func (h *UsageHandler) GetMyAPIKeyDailyUsage(c *gin.Context) {

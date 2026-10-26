@@ -2668,6 +2668,10 @@ func (r *stubUsageLogRepo) GetAPIKeyUsageStats(ctx context.Context, startTime, e
 	return nil, errors.New("not implemented")
 }
 
+func (r *stubUsageLogRepo) GetAPIKeyUsageStatsByUser(ctx context.Context, userID int64, startTime, endTime time.Time, limit int) ([]usagestats.APIKeyUsageStatItem, error) {
+	return nil, errors.New("not implemented")
+}
+
 func (r *stubUsageLogRepo) GetUserUsageTrend(ctx context.Context, startTime, endTime time.Time, granularity string, limit int, metric string) ([]usagestats.UserUsageTrendPoint, error) {
 	return nil, errors.New("not implemented")
 }

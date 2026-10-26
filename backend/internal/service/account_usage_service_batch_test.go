@@ -79,6 +79,9 @@ func (r *usageBatchLogRepoStub) GetAPIKeyUsageTrend(context.Context, time.Time, 
 func (r *usageBatchLogRepoStub) GetAPIKeyUsageStats(context.Context, time.Time, time.Time, int) ([]usagestats.APIKeyUsageStatItem, error) {
 	return nil, nil
 }
+func (r *usageBatchLogRepoStub) GetAPIKeyUsageStatsByUser(context.Context, int64, time.Time, time.Time, int) ([]usagestats.APIKeyUsageStatItem, error) {
+	return nil, nil
+}
 func (r *usageBatchLogRepoStub) GetUserUsageTrend(context.Context, time.Time, time.Time, string, int, string) ([]usagestats.UserUsageTrendPoint, error) {
 	return nil, nil
 }
