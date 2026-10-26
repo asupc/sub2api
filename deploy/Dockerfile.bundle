@@ -2,6 +2,16 @@
 # =============================================================================
 # Sub2API Multi-Stage Dockerfile (bundle build 分支副本)
 # =============================================================================
+# 🛑 2026-10-21 起本副本【已失效】，构建必报 ERR_PNPM_LOCKFILE_CONFIG_MISMATCH：
+#   提交 2a53a42 为修根 Dockerfile 四连败，已把 frontend/pnpm-lock.yaml 改为
+#   pnpm 9.15.9 格式（顶层 overrides 块）——与本文件的 pnpm@11.9.0 不兼容
+#   （pnpm 10+ 视 package.json#pnpm.overrides 为死配置，只认
+#   pnpm-workspace.yaml#overrides，frozen 校验必不匹配）。
+#   且本副本缺 2a53a42 的 RUN chmod -R a+rX /app/resources 修复（model-pricing
+#   fallback 会 permission denied）。NAS 构建请用根目录 Dockerfile 或
+#   deploy/build-and-deploy-nas.sh；本文件仅供 deploy/build-docker-tar.sh 离线
+#   打包路径，启用前须先与根 Dockerfile 对齐并把 pnpm 版本/lockfile 策略理顺。
+# =============================================================================
 # ⚠️ 本文件是根目录 Dockerfile 的分支副本，差异共三处：
 #   L42 corepack prepare pnpm@9 -> pnpm@11.9.0
 #   L47 COPY 增加 frontend/pnpm-workspace.yaml（二开 allowBuilds 构建脚本审批）
