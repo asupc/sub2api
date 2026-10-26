@@ -500,12 +500,63 @@ func SanitizeOpenAICrossModeFailoverReasoning(body []byte) (sanitized []byte, ch
 	return out, true, nil
 }
 
+// SanitizeOpenCodeResponsesReasoningReplay drops every reasoning input item from
+// an OpenCode (Zen / Go) Responses request.
+//
+// Muse Spark 等严格 Responses 上游会校验回放的历史 reasoning item，任一条缺少
+// summary 字段就整单 400（"input[N] missing required field summary"，见上游
+// Wei-Shaw/sub2api#7309）。而 Anthropic → Responses 的历史转换只带
+// encrypted_content、不带 summary，导致 /v1/messages 多轮会话从第二轮起必然失败；
+// 带 rs_ id 却没有 encrypted_content 的裸 reasoning item，以及后面没紧跟 assistant
+// message / function_call 的 reasoning item，同样会被拒。
+//
+// Meta Responses 协议明确允许「keep it whole or drop it」，整条丢弃历史 reasoning
+// 天然满足 summary、encrypted_content 与顺序三条约束，因此这里统一删除，而不是
+// 逐条补 summary。模型只丢失上一轮推理文本，不影响 tool_use / tool_result 配对。
+//
+// 只改 input 数组；其余字段（tools、大整数等）经 decodeOpenAIJSONUseNumber /
+// marshalOpenAIUpstreamJSON 原样保留。调用方按平台（account.IsOpenCodeGo）与
+// 协议（该函数仅用于 Responses 转发链）收口。
+func SanitizeOpenCodeResponsesReasoningReplay(body []byte) (sanitized []byte, changed bool, err error) {
+	if len(body) == 0 {
+		return body, false, nil
+	}
+	if !gjson.GetBytes(body, "input").Exists() {
+		return body, false, nil
+	}
+	var decoded map[string]any
+	if err := decodeOpenAIJSONUseNumber(body, &decoded); err != nil {
+		return body, false, fmt.Errorf("decode opencode responses body: %w", err)
+	}
+	if !dropOpenAIReasoningInputItems(decoded) {
+		return body, false, nil
+	}
+	out, marshalErr := marshalOpenAIUpstreamJSON(decoded)
+	if marshalErr != nil {
+		return body, false, fmt.Errorf("serialize opencode responses body: %w", marshalErr)
+	}
+	return out, true, nil
+}
+
 // dropOpenAIEncryptedReasoningInputItems removes reasoning input items that carry
 // provider-specific encrypted_content in full — including their coupled id and
 // summary — and reports whether anything changed. Contrast with
 // trimOpenAIEncryptedReasoningItems, which only strips fields while keeping the
 // reasoning item skeleton.
 func dropOpenAIEncryptedReasoningInputItems(reqBody map[string]any) bool {
+	return dropOpenAIInputItemsWhere(reqBody, isOpenAIEncryptedReasoningInputItem)
+}
+
+// dropOpenAIReasoningInputItems removes every type=reasoning input item in full
+// and reports whether anything changed.
+func dropOpenAIReasoningInputItems(reqBody map[string]any) bool {
+	return dropOpenAIInputItemsWhere(reqBody, isOpenAIReasoningInputItem)
+}
+
+// dropOpenAIInputItemsWhere filters input items by match, handling the array
+// shapes produced both by JSON decoding and by internal map construction, and
+// deletes the input field when every item is dropped.
+func dropOpenAIInputItemsWhere(reqBody map[string]any, match func(any) bool) bool {
 	if len(reqBody) == 0 {
 		return false
 	}
@@ -518,7 +569,7 @@ func dropOpenAIEncryptedReasoningInputItems(reqBody map[string]any) bool {
 		filtered := input[:0]
 		changed := false
 		for _, item := range input {
-			if isOpenAIEncryptedReasoningInputItem(item) {
+			if match(item) {
 				changed = true
 				continue
 			}
@@ -537,7 +588,7 @@ func dropOpenAIEncryptedReasoningInputItems(reqBody map[string]any) bool {
 		filtered := input[:0]
 		changed := false
 		for _, item := range input {
-			if isOpenAIEncryptedReasoningInputItem(item) {
+			if match(item) {
 				changed = true
 				continue
 			}
@@ -553,7 +604,7 @@ func dropOpenAIEncryptedReasoningInputItems(reqBody map[string]any) bool {
 		reqBody["input"] = filtered
 		return true
 	case map[string]any:
-		if isOpenAIEncryptedReasoningInputItem(input) {
+		if match(input) {
 			delete(reqBody, "input")
 			return true
 		}
@@ -573,6 +624,15 @@ func isOpenAIEncryptedReasoningInputItem(item any) bool {
 	}
 	_, has := inputItem["encrypted_content"]
 	return has
+}
+
+func isOpenAIReasoningInputItem(item any) bool {
+	inputItem, ok := item.(map[string]any)
+	if !ok {
+		return false
+	}
+	itemType, _ := inputItem["type"].(string)
+	return strings.TrimSpace(itemType) == "reasoning"
 }
 
 // IsOpenAIResponsesCompactPath reports whether the request targets the legacy

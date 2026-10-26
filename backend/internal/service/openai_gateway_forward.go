@@ -15,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"go.uber.org/zap"
 )
 
 // Forward forwards request to OpenAI API
@@ -1405,6 +1406,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
 	body = normalizeDeepSeekResponsesRequestBody(account, body)
+	body = normalizeOpenCodeUpstreamReasoningReplay(account, targetURL, body)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -1530,6 +1532,31 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		return nil, err
 	}
 	return req, nil
+}
+
+// normalizeOpenCodeUpstreamReasoningReplay 对发往 OpenCode 的 Responses 请求剔除
+// 历史 reasoning item：muse-spark 等严格上游要求回放的 reasoning 带 summary，而
+// Anthropic → Responses 的历史转换只带 encrypted_content（详见
+// SanitizeOpenCodeResponsesReasoningReplay）。
+//
+// 判定与出站 UA / x-opencode-session 同源：OpenCode 平台账号，或任意平台账号指向
+// 官方 opencode.ai 主机（OpenAI 平台账号直连 Zen 的接入方式）。
+func normalizeOpenCodeUpstreamReasoningReplay(account *Account, targetURL string, body []byte) []byte {
+	if account == nil || (!account.IsOpenCodeGo() && !isOfficialOpenCodeHost(targetURL)) {
+		return body
+	}
+	sanitizedBody, changed, err := SanitizeOpenCodeResponsesReasoningReplay(body)
+	if err != nil {
+		logger.L().Warn("openai upstream: normalize opencode reasoning replay failed",
+			zap.Int64("account_id", account.ID),
+			zap.Error(err),
+		)
+		return body
+	}
+	if !changed {
+		return body
+	}
+	return sanitizedBody
 }
 
 // codexIdentityOverrideUA 返回账号级显式配置的出站 User-Agent，供强制统一身份时作为覆写来源。
