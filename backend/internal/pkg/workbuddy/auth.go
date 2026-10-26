@@ -7,6 +7,8 @@
 package workbuddy
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -140,6 +142,36 @@ func (c Credentials) IsGlobal() bool { return c.RealmNormalized() == RealmGlobal
 // IsEnterprise 报告账号是否为企业版（enterpriseId 非空）。
 // 企业版无个人成长体系：签到 / 成长任务 / 旅行 / 夜猫子上游一律被拒，调用方须跳过。
 func (c Credentials) IsEnterprise() bool { return strings.TrimSpace(c.EnterpriseID) != "" }
+
+// IsEnterpriseSession 报告当前 token 是否为企业**切换会话**形态（JWT payload 的
+// token_source=enterprise_switch）。与 IsEnterprise（计费口径，看 enterpriseId）刻意
+// 隔离：切换会话下额度查询等读端点照常（个人口径），但 /v2/report 行为事件被上游
+// 静默丢弃（200 但不入账）——成长任务等行为类动作会白跑。移植自 workbuddy2api-panel
+// 9282779：现解码 JWT 判定、不缓存——refresh 会整体换发 token，切换状态可能随重新
+// 授权翻转。
+func (c Credentials) IsEnterpriseSession() bool {
+	return jwtTokenSource(c.AccessToken) == "enterprise_switch"
+}
+
+// jwtTokenSource 提取 access token JWT payload 的 token_source 声明（空 = 无）。
+// 只解码不验签（真正鉴权由上游完成）；任何解析失败都按「无」处理，绝不报错。
+func jwtTokenSource(accessToken string) string {
+	parts := strings.Split(strings.TrimSpace(accessToken), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		TokenSource string `json:"token_source"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.TokenSource)
+}
 
 // NeedsRefresh 报告 token 是否将在 within 内过期（或已过期 / 无 expiry）。
 func (c Credentials) NeedsRefresh(within time.Duration, now time.Time) bool {

@@ -84,6 +84,13 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 	if err != nil {
 		return nil, fmt.Errorf("marshal chat completions request: %w", err)
 	}
+	// WB/Trae 上游的多模态 parts 未实测：/v1/messages 图片默认丢弃但留痕
+	//（移植自 trae-workbuddy-switch 76a97c0；SO_ANTHROPIC_FORWARD_IMAGES=1 打开转发）。
+	if account.Platform == PlatformWorkbuddy || account.Platform == PlatformTrae {
+		if !anthropicForwardImagesEnabled() {
+			chatBody, _ = dropChatBodyImagesWithNote(chatBody)
+		}
+	}
 	if normalizedBody, normalized := NormalizeGLMOpenAIReasoningEffort(chatBody, upstreamModel); normalized {
 		chatBody = normalizedBody
 	}

@@ -334,3 +334,49 @@ func TestBuildCacheKey(t *testing.T) {
 		t.Errorf("空 uid 应有占位段，got %q", got)
 	}
 }
+
+// TestDropReasoningContentParts 11101 防御：content 里的 reasoning_text/reasoning
+// 片段剔除（Codex 经 Responses→chat 转换后透传思考片段，上游 content 白名单不含，
+// 命中 400 code=11101）。移植自 workbuddy2api-panel dea68c4。
+// 直接单测本函数而非 PrepareChatBody：后者的工具配对清理会把无配对 tool 结果的
+// tool_calls 一并裁掉，与本用例的「tool_calls 消息保留」断言互相干扰。
+func TestDropReasoningContentParts(t *testing.T) {
+	msgs := []any{
+		map[string]any{"role": "user", "content": "q"},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "reasoning_text", "text": "thinking..."},
+			map[string]any{"type": "text", "text": "answer"},
+		}},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "reasoning", "text": "thinking2"},
+		}},
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "reasoning_text", "text": "t3"},
+		}, "tool_calls": []any{map[string]any{"id": "c1"}}},
+	}
+	out, changed := dropReasoningContentParts(msgs)
+	if !changed {
+		t.Fatal("应报告有剔除")
+	}
+	if len(out) != 3 {
+		t.Fatalf("被清空的无 tool_calls 消息应整条删除，剩 %d 条", len(out))
+	}
+	second := out[1].(map[string]any)
+	parts := second["content"].([]any)
+	if len(parts) != 1 || parts[0].(map[string]any)["type"] != "text" {
+		t.Errorf("reasoning_text 应剔除只留 text，got %v", parts)
+	}
+	third := out[2].(map[string]any)
+	if _, has := third["tool_calls"]; !has {
+		t.Error("有 tool_calls 的消息应保留")
+	}
+	if got := third["content"].([]any); len(got) != 0 {
+		t.Errorf("tool_calls 消息的 reasoning 应剔除、content 变空数组，got %v", got)
+	}
+
+	// 无思考片段：不改动、changed=false。
+	plain := []any{map[string]any{"role": "user", "content": "q"}}
+	if _, changed := dropReasoningContentParts(plain); changed {
+		t.Error("无思考片段不应报告变更")
+	}
+}

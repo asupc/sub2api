@@ -297,13 +297,43 @@ func TestWorkbuddyUpstreamError_ModelBlockedAndAccountFaultPassThrough(t *testin
 	require.Empty(t, repo.setErrors)
 	require.Empty(t, repo.rateLimited)
 
-	// 11140 request illegal（UA 风控）：透传 + 不计 strike。
+	// 11140 request illegal（账号被上游限制，重登无效需官方申诉）：置 error 停调度
+	// + 换号轮转（移植自 workbuddy2api-panel 7a8b7a7——此前仅透传不处置，被限制的
+	// 账号会继续被选中送死刷风控）。
 	handled, foErr = svc.handleWorkbuddyUpstreamError(context.Background(), wbErrorContext(), repo.account,
 		&http.Response{StatusCode: 403, Header: http.Header{}},
 		[]byte(`{"code":11140,"msg":"request illegal"}`), "request illegal", "glm-5.3")
 	require.True(t, handled)
-	require.Nil(t, foErr)
-	require.Empty(t, repo.setErrors)
+	require.NotNil(t, foErr)
+	require.Equal(t, []string{"wb_restricted: account restricted by upstream (11140 request illegal); appeal in WorkBuddy to lift the restriction"}, repo.setErrors)
+}
+
+// TestWorkbuddyUpstreamError_ChannelRefusedAndUpstreamBusy 11-128 通道拒绝与
+// 6021 渠道满载的分流处置（移植自 workbuddy2api-panel 7a8b7a7 / f14f374）：
+// 两者都不罚号；11-128 换号轮转，6021 不轮转且合成 503。
+func TestWorkbuddyUpstreamError_ChannelRefusedAndUpstreamBusy(t *testing.T) {
+	// 11-128 通道拒绝：账号健康，不罚号、换号。
+	repo := &wbRepoRecorder{account: wbGatewayAccount("cn")}
+	svc := wbNewGatewayWithRepo(repo)
+	handled, foErr := svc.handleWorkbuddyUpstreamError(context.Background(), wbErrorContext(), repo.account,
+		&http.Response{StatusCode: 400, Header: http.Header{}},
+		[]byte(`{"code":"11-128","msg":"request illegal"}`), "request illegal", "glm-5.3")
+	require.True(t, handled)
+	require.NotNil(t, foErr, "通道拒绝应换号轮转")
+	require.Empty(t, repo.setErrors, "通道拒绝不得罚号")
+	require.Empty(t, repo.rateLimited, "通道拒绝不得冷却")
+
+	// 6021 queue.full：渠道级满载，不罚号、不轮转（fail-fast）、合成 503。
+	repo2 := &wbRepoRecorder{account: wbGatewayAccount("cn")}
+	svc2 := wbNewGatewayWithRepo(repo2)
+	resp := &http.Response{StatusCode: 429, Header: http.Header{}}
+	handled, foErr = svc2.handleWorkbuddyUpstreamError(context.Background(), wbErrorContext(), repo2.account,
+		resp, []byte(`{"code":6021,"msg":"queue.full.title"}`), "queue.full.title", "glm-5.3")
+	require.True(t, handled)
+	require.Nil(t, foErr, "渠道满载不换号")
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode, "合成 503 让客户端退避")
+	require.Empty(t, repo2.setErrors, "渠道满载不得罚号")
+	require.Empty(t, repo2.rateLimited, "渠道满载不得冷却")
 }
 
 func TestWorkbuddyUpstreamError_ServerErrorsFallBackToGenericChain(t *testing.T) {

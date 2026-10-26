@@ -15,11 +15,14 @@ import (
 // ──────────────────────────────────────────────────────────
 
 const (
-	EndpointMessages             = "/v1/messages"
-	EndpointSystemOne            = "/v1/systemone"
-	EndpointChatCompletions      = "/v1/chat/completions"
-	EndpointEmbeddings           = "/v1/embeddings"
-	EndpointAlphaSearch          = "/v1/alpha/search"
+	EndpointMessages        = "/v1/messages"
+	EndpointSystemOne       = "/v1/systemone"
+	EndpointChatCompletions = "/v1/chat/completions"
+	EndpointEmbeddings      = "/v1/embeddings"
+	EndpointAlphaSearch     = "/v1/alpha/search"
+	// EndpointSearchMessages WorkBuddy 联网搜索（Anthropic Messages 兼容壳，二开新增）。
+	// 上游固定打 /agenttool/v1/search，不走 DeriveUpstreamEndpoint 的平台映射。
+	EndpointSearchMessages       = "/v1/search/messages"
 	EndpointResponses            = "/v1/responses"
 	EndpointResponsesCompact     = "/v1/responses/compact"
 	EndpointResponsesInputTokens = "/v1/responses/input_tokens"
@@ -91,6 +94,10 @@ func NormalizeInboundEndpoint(path string) string {
 		return EndpointEmbeddings
 	case strings.Contains(path, EndpointAlphaSearch) || isBareOrSubpathOf(strings.TrimRight(path, "/"), "/alpha/search") || isBareOrSubpathOf(strings.TrimRight(path, "/"), "/backend-api/codex/alpha/search"):
 		return EndpointAlphaSearch
+	// /v1/search/messages 须先于 EndpointMessages 判定：它不含 "/v1/messages"
+	// 子串，但显式前置可防止未来路径形态变化时被 messages 分支误吸。
+	case strings.Contains(path, EndpointSearchMessages):
+		return EndpointSearchMessages
 	case strings.Contains(path, EndpointChatCompletions):
 		return EndpointChatCompletions
 	case strings.Contains(path, EndpointMessages):

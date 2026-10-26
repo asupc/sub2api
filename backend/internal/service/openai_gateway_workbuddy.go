@@ -28,6 +28,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -56,10 +57,21 @@ const (
 // 网关与 oauth 服务分属不同 wire 节点，无法经构造参数直达）。
 var workbuddyRequestPathRefresher atomic.Pointer[WorkbuddyOAuthService]
 
-// workbuddyChatBaseURL realm → chat 域基址。
+// workbuddyChatBaseURL realm → chat 域基址。CN 域支持 WB_CN_CHAT_BASE 环境变量
+// 覆盖（移植自 workbuddy2api-panel 7fcc20a cn.chat_base：官方桌面端已改用
+// www.workbuddy.cn，copilot.tencent.com 对部分海外出口 TLS 握手复位；空 = 回落
+// 内置默认，老部署零影响）。
 func workbuddyChatBaseURL(cred workbuddy.Credentials) string {
 	if cred.IsGlobal() {
 		return DefaultWorkbuddyGlobalBaseURL
+	}
+	return workbuddyCNChatBaseURL()
+}
+
+// workbuddyCNChatBaseURL CN chat 域基址（环境变量覆盖优先）。
+func workbuddyCNChatBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("WB_CN_CHAT_BASE")); v != "" {
+		return strings.TrimSuffix(v, "/")
 	}
 	return DefaultWorkbuddyCNChatBaseURL
 }
@@ -370,6 +382,24 @@ func (s *OpenAIGatewayService) handleWorkbuddyUpstreamError(
 	upstreamModel string,
 ) (bool, *UpstreamFailoverError) {
 	kind := workbuddy.ClassifyError(resp.StatusCode, respBody)
+	return s.applyWorkbuddyUpstreamErrorKind(ctx, c, account, kind, resp, respBody, upstreamMsg, upstreamModel)
+}
+
+// applyWorkbuddyUpstreamErrorKind 按已判定的 Kind 执行账号处置（处置语义与
+// handleWorkbuddyUpstreamError 完全一致——后者是 chat 路径的「收包后分类再处置」
+// 便捷入口）。搜索路径复用本函数：pkg Search 收包时已用**完整 body** 分过类，
+// 若再走 handleWorkbuddyUpstreamError 会拿截断后的 RawBody 重分一次，存在
+// 标记被截断导致 Kind 漂移的边缘风险；直接传 Kind 消除该风险，不引入第二套处置。
+func (s *OpenAIGatewayService) applyWorkbuddyUpstreamErrorKind(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	kind workbuddy.ErrorKind,
+	resp *http.Response,
+	respBody []byte,
+	upstreamMsg string,
+	upstreamModel string,
+) (bool, *UpstreamFailoverError) {
 	body := string(respBody)
 
 	appendFailover := func(kindLabel string) {
@@ -429,11 +459,60 @@ func (s *OpenAIGatewayService) handleWorkbuddyUpstreamError(
 		return true, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, false, false)
 
 	case kind == workbuddy.KindModelBlocked:
+		if workbuddy.ModelBlockReasonFor(body) == "11158" {
+			// 11158「该账号类型无权使用该模型」：(账号,模型) 级确定性拒绝——账号整体
+			// 健康，换有权限的账号仍可能成功。写模型级限流锁（24h，账号类型权限不会
+			// 自发变化）后换号轮转；全池同错时 failover 耗尽按上游 400 原文透传，
+			// 等价于源项目「全域无权限 → model_unavailable」的客户端可见语义。
+			// 移植自 workbuddy2api-panel 6ee5491。
+			if err := s.accountRepo.SetModelRateLimit(ctx, account.ID, upstreamModel, time.Now().Add(24*time.Hour), "11158 model not allowed for account type"); err != nil {
+				slog.Warn("workbuddy set model forbidden lock failed", "account_id", account.ID, "model", upstreamModel, "error", err)
+			}
+			appendFailover("model_forbidden")
+			return true, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, false, false)
+		}
 		// 11102 该后端无此模型：不罚账号；向客户端返回模型不可用（不换号）。
 		return true, nil
 
+	case kind == workbuddy.KindChannelRefused:
+		// 11-128 通道校验失败（上游判定请求可能不是官方客户端发出）：账号本身健康——
+		// 官方客户端可正常使用同一账号，这不是账号级故障。不罚账号（无冷却/禁用/错误
+		// 计数），本次换号轮转继续（换号不改通道指纹，全池同错时按上游原文透传给客户
+		// 端，提示排查客户端指纹）。移植自 workbuddy2api-panel 7a8b7a7：此前按裸
+		// "request illegal" 文案误判成账号封禁，会把健康账号打下线。
+		slog.Warn("workbuddy channel refused (no punishment, rotate)", "account_id", account.ID, "status", resp.StatusCode, "message", upstreamMsg)
+		appendFailover("channel_refused")
+		return true, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, false, false)
+
+	case kind == workbuddy.KindUpstreamBusy:
+		// 6021 queue.full 渠道级容量满载（上游推理集群排队打满）：非账号问题，换任何
+		// 账号都撞同一堵墙。不罚号、不轮转（fail-fast），合成 503 + upstream_busy 让
+		// 客户端 SDK 按退避自然重试（429 会被客户端误当作自身 key 被限流），body 保留
+		// 上游原文（含 requestId）。移植自 workbuddy2api-panel f14f374：按限流处置
+		// 会逐号软冷却，2 秒内即可把整池健康号全部误杀。
+		slog.Warn("workbuddy upstream busy (6021 queue.full, no punishment, no rotate)", "account_id", account.ID, "message", upstreamMsg)
+		appendFailover("upstream_busy")
+		resp.StatusCode = http.StatusServiceUnavailable
+		return true, nil
+
 	case kind == workbuddy.KindAccountFault:
-		// 11140 request illegal（UA 风控）/ 14017 试用未激活：透传原文 + 告警，不计 strike。
+		if workbuddy.IsAccountRestricted(body) {
+			// 11140 request illegal 账号被上游限制（异常行为/风控）：重登无效，只能在
+			// WorkBuddy 官方渠道申诉解除。置 error 停调度（防继续送死刷风控），本次
+			// 换号轮转。与 11140 的模型级限流变体（"rate-limiting" 文案 → KindSoftRate）
+			// 和 11-128 通道拒绝（→ KindChannelRefused）的分流见 pkg/workbuddy/errors.go。
+			// 移植自 workbuddy2api-panel 7a8b7a7。
+			if err := s.accountRepo.SetError(ctx, account.ID, "wb_restricted: account restricted by upstream (11140 request illegal); appeal in WorkBuddy to lift the restriction"); err != nil {
+				slog.Warn("workbuddy set restricted error failed", "account_id", account.ID, "error", err)
+			} else {
+				account.Status = StatusError
+				account.ErrorMessage = "wb_restricted"
+				account.Schedulable = false
+			}
+			appendFailover("account_restricted")
+			return true, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, true, false)
+		}
+		// 14017 试用未激活等其余账号级故障：透传原文 + 告警，不计 strike。
 		slog.Warn("workbuddy account fault (pass-through)", "account_id", account.ID, "status", resp.StatusCode, "message", upstreamMsg)
 		return true, nil
 
@@ -480,8 +559,8 @@ func workbuddyRateLimitResetAt(header http.Header, body string) time.Time {
 }
 
 // workbuddyWafCooldown WAF 403 的账号软冷却截止时刻：优先 Retry-After 头
-//（复用 ParseRetryAfter 的纯数字解析与 2h 上限），缺失按 wafCooldownBase
-//（对齐源项目 workbuddy2api-panel 的 60s 基数）。不罚号，到期自愈。
+// （复用 ParseRetryAfter 的纯数字解析与 2h 上限），缺失按 wafCooldownBase
+// （对齐源项目 workbuddy2api-panel 的 60s 基数）。不罚号，到期自愈。
 func workbuddyWafCooldown(header http.Header) time.Time {
 	if d, ok := workbuddy.ParseRetryAfter(header); ok && d > 0 {
 		return time.Now().Add(d)

@@ -355,6 +355,17 @@ func RegisterGatewayRoutes(
 			}
 			h.Gateway.XSearch(c)
 		})
+		// WorkBuddy 联网搜索（Anthropic Messages 兼容壳，二开新增）：
+		// DSH 等客户端把搜索 provider 的 baseURL 指到 <网关>/v1/search，
+		// 自动打到本端点。刻意不占用 /v1/messages（那是模型对话标准路径）。
+		gateway.POST("/search/messages", textBodyLimit, func(c *gin.Context) {
+			if !resolvedPlatformSetIntersects(c, service.PlatformWorkbuddy) {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Web Search API is not supported for this platform"}})
+				return
+			}
+			h.Gateway.WorkbuddySearchMessages(c)
+		})
 	}
 
 	// Gemini 原生 API 兼容层（Gemini SDK/CLI 直连）

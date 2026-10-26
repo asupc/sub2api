@@ -32,6 +32,20 @@ func TestClassifyError(t *testing.T) {
 		{429, `{"code":14017,"msg":"trial not activated"}`, KindAccountFault},
 		{429, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, KindAccountFault},
 		{403, `{"code":11140,"msg":"request illegal"}`, KindAccountFault},
+		// 第 3 层：11-128 / 11140 同文案按业务码分流（7a8b7a7）。上游真实 code 为
+		// **字符串** "11-128"（带连字符、带引号，非 JSON 数字）。
+		{400, `{"code":"11-128","msg":"request illegal","displayTips":{"en":"channel verification failed"}}`, KindChannelRefused},
+		{403, `{"code":"11-128","msg":"request illegal"}`, KindChannelRefused},
+		{400, `{"error":{"data":{"code":"11-128","msg":"request illegal"}}}`, KindChannelRefused},
+		{400, `{"code":11140,"msg":"request illegal"}`, KindAccountFault},                    // 11140 账号限制
+		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests."}`, KindSoftRate}, // 11140 限流变体不误判
+		{400, `{"code":"11-128","msg":"blocked by security policy"}`, KindContentBlocked},   // 11-128 审核变体不误判
+		// 第 5 层前置：6021 queue.full 渠道级繁忙（f14f374），先于 429 兜底。
+		{429, `{"code":6021,"msg":"queue.full.title"}`, KindUpstreamBusy},
+		{429, `{"error":{"data":{"code":"6021","msg":"queue.full.title"}}}`, KindUpstreamBusy},
+		{429, `queue full`, KindUpstreamBusy},   // 文案外卡（防上游换状态码/丢 code）
+		{503, `{"code":6021,"msg":"queue.full.title"}`, KindUpstreamBusy},
+		{429, `{"code":1,"msg":"queueing, please wait"}`, KindSoftRate}, // 普通排队文案不误撞
 		// 第 4 层：429 + 14018 = 明确积分耗尽。
 		{429, `{"code":14018,"msg":"Credits exhausted"}`, KindHardCredit},
 		{429, `{"error":{"data":{"code":"14018","msg":"Credits exhausted"}}}`, KindHardCredit},
@@ -49,6 +63,11 @@ func TestClassifyError(t *testing.T) {
 		{400, `{"msg":"service info not found"}`, KindModelBlocked},
 		{404, `{"requestId":"11102","msg":"ok"}`, KindNotFound}, // 撞 ID 不算
 		{429, `{"code":11102,"msg":"service info not found"}`, KindSoftRate},
+		// 11158 模型权限（6ee5491）：与 11102 同层判定。
+		{400, `{"code":11158,"msg":"model [deepseek] is not allowed for user type"}`, KindModelBlocked},
+		{400, `{"code":11158,"msg":"permission denied"}`, KindModelBlocked},
+		{400, `{"msg":"model xxx is not allowed for user type"}`, KindModelBlocked},
+		{429, `{"code":11158,"msg":"is not allowed for user type"}`, KindSoftRate}, // 429 带码仍属限流语义
 		// 第 7 层：非 429 状态码携带限流文案。
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, KindSoftRate},
 		{400, `rate limit`, KindSoftRate},
@@ -200,5 +219,39 @@ func TestIsAlreadyCheckin(t *testing.T) {
 	}
 	if IsAlreadyCheckin(errors.New("network")) {
 		t.Error("网络层错误不是幂等信号")
+	}
+}
+
+// TestClassifyRealChannelRefusedBody 用上游**真实** 11-128 响应体（code 为字符串
+// "11-128"，带连字符，见 workbuddy2api-panel issue #197）钉住分流。护栏来历：源项目
+// PR #233 提交时字面量里的连字符丢失（实现与测试同写成错误码值），双方自洽所以测试
+// 全绿，但线上永远命中不了真实业务码——本用例用字节构造业务码，防止「实现和测试
+// 一起写错」再次通过（移植自源 d809396）。
+func TestClassifyRealChannelRefusedBody(t *testing.T) {
+	code := string([]rune{49, 49, 45, 49, 50, 56}) // "11-128"
+	body := `{"code":"` + code + `","msg":"request illegal","requestId":"b1bc87ea","displayTips":{"en":"This call failed channel verification."}}`
+	if got := ClassifyError(400, []byte(body)); got != KindChannelRefused {
+		t.Fatalf("ClassifyError(real 11-128)=%v want KindChannelRefused", got)
+	}
+	if got := ClassifyError(403, []byte(`{"code":"`+code+`","msg":"request illegal"}`)); got != KindChannelRefused {
+		t.Fatalf("ClassifyError(real 11-128, 403)=%v want KindChannelRefused", got)
+	}
+}
+
+// TestModelBlockReasonFor 11158 与 11102 的负缓存 reason 前缀区分（6ee5491）。
+func TestModelBlockReasonFor(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{"code":11158,"msg":"model is not allowed for user type"}`, "11158"},
+		{`{"code":11102,"msg":"service info not found"}`, "11102"},
+		{`{"msg":"model xxx is not allowed for user type"}`, "11158"},
+		{`{"msg":"service info not found"}`, "11102"},
+	}
+	for _, c := range cases {
+		if got := ModelBlockReasonFor(c.body); got != c.want {
+			t.Errorf("ModelBlockReasonFor(%q)=%q want %q", c.body, got, c.want)
+		}
 	}
 }

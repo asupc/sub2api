@@ -142,7 +142,9 @@ func CommonHeaders(req *http.Request, c Credentials) {
 // TraceID 透传入站值（空 = 回落 conversationRequestID）。
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
-	// ConversationID X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）。
+	// ConversationID X-Conversation-ID：body 提取的入站值；空则由 injectConversationHeaders
+	// 生成 32 hex 补发（2026-10-26 起恒发——国际端点收紧通道校验后，缺 X-Conversation-ID
+	// 会 400/11-128 "conversation id missing"，见 workbuddy2api-panel 7a8b7a7）。
 	ConversationID string
 	// ConversationRequestID X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发。
 	ConversationRequestID string
@@ -208,8 +210,10 @@ func injectAttribution(req *http.Request, c Credentials) {
 
 // injectConversationHeaders 注入官方客户端会话头族（后台聚合）。
 // 头族分四层，各司其职：
-//   - X-Conversation-ID：会话级，多轮稳定（body 的 conversationId）。空则不发——
-//     透传客户端原值优先，客户端没给就不伪造，避免误导后台建错会话。
+//   - X-Conversation-ID：会话级，多轮稳定（body 的 conversationId）。**恒发**：
+//     入站没带时本级补一个 32 hex（workbuddy2api-panel 7a8b7a7——国际端点收紧
+//     通道校验后缺该头直接 400/11-128 "conversation id missing"，透传优先的旧
+//     口径不再安全）。
 //   - X-Conversation-Request-ID：对话轮级聚合主键，必发。一次 user send 内的
 //     所有 tool call/重试/换号/降级复用同一个 → 后台按它聚合成一条（不再碎片化）。
 //   - X-Conversation-Message-ID = X-Request-ID：消息级，每条独立（32 位 hex）。
@@ -225,9 +229,11 @@ func injectConversationHeaders(req *http.Request, meta ChatMeta) {
 		convReqID = NewMessageID()
 	}
 	messageID := NewMessageID()
-	if meta.ConversationID != "" {
-		req.Header.Set("X-Conversation-ID", meta.ConversationID)
+	conversationID := meta.ConversationID
+	if conversationID == "" {
+		conversationID = NewMessageID()
 	}
+	req.Header.Set("X-Conversation-ID", conversationID)
 	req.Header.Set("X-Conversation-Request-ID", convReqID)
 	req.Header.Set("X-Conversation-Message-ID", messageID)
 	req.Header.Set("X-Request-ID", messageID)

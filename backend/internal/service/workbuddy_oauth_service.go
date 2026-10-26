@@ -23,6 +23,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/workbuddy"
+	"golang.org/x/sync/singleflight"
 )
 
 // workbuddyRefreshEarlyWindow access token 到期前的提前刷新窗口（30min）。
@@ -39,6 +40,13 @@ type WorkbuddyOAuthService struct {
 
 	mu       sync.Mutex
 	sessions map[string]*workbuddyLoginSession // state → 会话
+
+	// refreshFlight 同账号 refresh 单飞（移植自 workbuddy2api-panel 3c4eb88）：
+	// 上游对 refreshToken 反重放——同一 RT 被消费后再用返回 12153 并整条 RT 链作废，
+	// 账号从此恒 401 只能人工重登。请求路径 401 强制刷新、后台保活、管理端手动刷新
+	// 会并发触发同一账号的 refresh，并发越高掉登录概率越大。按 UID 单飞后并发调用
+	// 等待并复用首个结果，不重复打上游；不同账号仍并行。
+	refreshFlight singleflight.Group
 }
 
 // workbuddyLoginSession 一次设备授权的进程内会话（持有各自代理的 DeviceLogin）。
@@ -155,7 +163,25 @@ func (s *WorkbuddyOAuthService) RefreshAccountToken(ctx context.Context, account
 
 // refreshAccountCredentials 刷新并持久化凭据；成功时同时清理 session 容忍计数
 // （token 换新说明会话恢复，历史 strike 不再有意义）。
+//
+// 并发入口（请求路径 401 强制刷新 / 后台保活 / 管理端手动刷新）统一走同账号
+// single-flight（见 refreshFlight 注释）：并发调用等待并复用首个结果。
 func (s *WorkbuddyOAuthService) refreshAccountCredentials(ctx context.Context, account *Account) (*Account, error) {
+	if account == nil {
+		return nil, infraerrors.New(http.StatusBadRequest, "WORKBUDDY_OAUTH_INVALID_ACCOUNT", "account is nil")
+	}
+	v, err, _ := s.refreshFlight.Do(strconv.FormatInt(account.ID, 10), func() (any, error) {
+		return s.doRefreshAccountCredentials(ctx, account)
+	})
+	if err != nil {
+		return nil, err
+	}
+	updated, _ := v.(*Account)
+	return updated, nil
+}
+
+// doRefreshAccountCredentials 单飞内的实际刷新（只应经 refreshAccountCredentials 调用）。
+func (s *WorkbuddyOAuthService) doRefreshAccountCredentials(ctx context.Context, account *Account) (*Account, error) {
 	cred, err := parseWorkbuddyCredentials(account)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadRequest, "WORKBUDDY_OAUTH_INVALID_CREDENTIALS", "账号凭证不完整: %v", err)
@@ -172,6 +198,12 @@ func (s *WorkbuddyOAuthService) refreshAccountCredentials(ctx context.Context, a
 	if err != nil {
 		var ue *workbuddy.Error
 		if errors.As(err, &ue) && (ue.Kind == workbuddy.KindSessionDead || ue.Status == http.StatusUnauthorized) {
+			// 12153 兜底（移植自 workbuddy2api-panel 3c4eb88）：DB 里的 auth 可能已被
+			// 其他进程/入口 rotate 过，本次拿旧 RT 撞了反重放。采纳 DB 最新 token 重试
+			// 一次——若库里 RT 已换新，用新值能刷新成功，跨入口竞态也能自救。
+			if recovered, ok := s.retryWithPersistedCredentials(ctx, account, cred, client); ok {
+				return recovered, nil
+			}
 			// refresh_token 已失效：不可自愈，需人工重新登录。
 			return nil, infraerrors.Newf(http.StatusUnauthorized, "WORKBUDDY_OAUTH_REFRESH_REJECTED", "refresh token 已失效，需重新登录: %s", ue.Msg)
 		}
@@ -192,6 +224,42 @@ func (s *WorkbuddyOAuthService) refreshAccountCredentials(ctx context.Context, a
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "WORKBUDDY_OAUTH_PERSIST_FAILED", "凭据写回失败: %v", err)
 	}
 	return account, nil
+}
+
+// retryWithPersistedCredentials 12153 自救路径：从 DB 重读凭据，若 refresh_token 已被
+// 他处换新则用新 RT 重试刷新一次；返回 (updated, true) 表示自救成功。
+func (s *WorkbuddyOAuthService) retryWithPersistedCredentials(
+	ctx context.Context,
+	account *Account,
+	used workbuddy.Credentials,
+	client *workbuddy.Client,
+) (*Account, bool) {
+	if s.accountRepo == nil {
+		return nil, false
+	}
+	fresh, err := s.accountRepo.GetByID(ctx, account.ID)
+	if err != nil || fresh == nil || fresh.ID != account.ID {
+		return nil, false
+	}
+	freshCred, err := parseWorkbuddyCredentials(fresh)
+	if err != nil || strings.TrimSpace(freshCred.RefreshToken) == "" ||
+		freshCred.RefreshToken == used.RefreshToken {
+		return nil, false // 库内 RT 与本次用的相同 → 确实已作废，不重试
+	}
+	newCred, err := client.RefreshToken(ctx, freshCred)
+	if err != nil {
+		return nil, false
+	}
+	merged := MergeCredentials(fresh.Credentials, workbuddyCredentialsAnyMap(newCred))
+	if fresh.Extra != nil {
+		if _, has := fresh.Extra[workbuddySessionStrikesExtraKey]; has {
+			_ = s.accountRepo.UpdateExtra(ctx, fresh.ID, map[string]any{workbuddySessionStrikesExtraKey: 0})
+		}
+	}
+	if err := persistAccountCredentials(ctx, s.accountRepo, fresh, merged); err != nil {
+		return nil, false
+	}
+	return fresh, true
 }
 
 // proxyURL 解析代理 ID → URL（nil ID / nil repo 返回空串即直连）。

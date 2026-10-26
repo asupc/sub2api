@@ -36,6 +36,15 @@ const (
 	KindBadParams ErrorKind = "bad_params"
 	// KindAccountFault 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换。
 	KindAccountFault ErrorKind = "account_fault"
+	// KindChannelRefused 11-128「request illegal」通道校验失败（上游认为请求不是官方
+	// 客户端发出）→ 账号本身健康（官方客户端可正常使用同一账号），不罚账号，由轮转换号。
+	// 移植自 workbuddy2api-panel 7a8b7a7：11-128 与 11140 的 msg 同为 "request illegal"，
+	// 只看文案会把通道校验失败误判成账号封禁。
+	KindChannelRefused ErrorKind = "channel_refused"
+	// KindUpstreamBusy 6021「queue.full.title」渠道级容量满载（上游推理集群排队打满）→
+	// 非账号问题：不罚号、不轮转（换任何账号都撞同一堵墙），透传让客户端退避重试。
+	// 移植自 workbuddy2api-panel f14f374：按限流处置 2 秒即可把整池健康号全冷却误杀。
+	KindUpstreamBusy ErrorKind = "upstream_busy"
 	// KindModelBlocked 11102「该后端无此模型」→ (账号,模型) 负缓存避让。
 	KindModelBlocked ErrorKind = "model_blocked"
 	// KindWafBlock 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 退避。
@@ -92,16 +101,52 @@ var softRateMarkers = []string{
 var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 
 // accountFaultMarkers 账号级授权/配额故障关键词（大小写不敏感子串匹配）：
-//   - "request illegal"（code 11140）→ 账号级授权风控，需重新 OAuth 登录才能恢复；
 //   - code 14017（"trial not activated"）→ register 未完成的试用未激活账号。
 //
-// 注意 11140 **不能**按 code 判定：该 code 也承载模型级限流文案（"The model
-// provider is rate-limiting requests."），那种场景必须保持 KindSoftRate（下方
-// softRateMarkers 后判定）。故此处只收 msg 关键词 "request illegal"。
+// 注意 "request illegal" **不放进本词表**：WorkBuddy 的 11-128 通道校验失败
+// （`{"code":11-128,"msg":"request illegal"}`）与 11140 账号限制
+// （`{"code":11140,"msg":"request illegal"}`）文案完全相同，语义相反。两者的判定
+// 统一走 IsAccountRestricted / isChannelRefused（code + 文案双条件，见 ClassifyError
+// 注释）。另：11140 **不能**按 code 单独判定——该 code 也承载模型级限流文案
+// （"The model provider is rate-limiting requests."），那种场景必须保持 KindSoftRate。
 var accountFaultMarkers = []string{
-	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",
+}
+
+// accountRestrictedMsg WorkBuddy 11140 账号限制与 11-128 通道拒绝共用的正文关键词。
+const accountRestrictedMsg = "request illegal"
+
+// IsAccountRestricted 报告上游 body 是否为 WorkBuddy 的账号级限制（11140
+// "request illegal"）。必须 code + 文案双条件：
+//   - 只看文案："request illegal" 也出现在 11-128 通道校验失败里（账号健康）；
+//   - 只看 code：11140 也承载模型级限流文案（应归 KindSoftRate）。
+//
+// 移植自 workbuddy2api-panel 7a8b7a7（IsAccountRestricted）。
+func IsAccountRestricted(body string) bool {
+	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return false
+	}
+	return hasBusinessCode(body, "11140")
+}
+
+// isChannelRefused 报告上游 body 是否为 WorkBuddy 的通道校验失败（11-128
+// "request illegal"）。11-128 还承载内容审核变体（"blocked by security policy"，
+// 归 KindContentBlocked），故必须 code + 文案双条件，不能按 code 一刀切。
+// 移植自 workbuddy2api-panel 7a8b7a7（isChannelRefused）。
+func isChannelRefused(body string) bool {
+	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+		return false
+	}
+	return hasBusinessCode(body, "11-128")
+}
+
+// isQueueFullBody 判定渠道级容量满载文案（6021 queue.full.title 家族）。该形态表明
+// 上游推理集群排队队列打满，与具体账号无关；换号在任何时刻都会撞同一堵墙。子串口径
+// 但用完整固定文案（"queue.full"/"queue full"），避免与普通限流文案误撞。
+// 移植自 workbuddy2api-panel f14f374（isQueueFullBody）。
+func isQueueFullBody(lower string) bool {
+	return strings.Contains(lower, "queue.full") || strings.Contains(lower, "queue full")
 }
 
 // contentBlockedMarkers 内容策略拦截关键词：上游按逐字精确指纹审核，system 来源的
@@ -151,9 +196,16 @@ const modelRateLimitCode = "6004"
 
 // modelBlockCode / modelBlockMsgMarker 11102「该后端无此模型」的确定性判定。
 // msg 只收窄短语 "service info not found"，不收 "model ... not found" 宽正则。
+//
+// modelForbiddenCode / modelForbiddenMsgMarker 11158「该账号类型无权使用该模型」
+// 的确定性判定（移植自 workbuddy2api-panel 6ee5491）。同一模型在不同账号类型上
+// 权限不同，与 11102 同属 (账号, 模型) 级确定性拒绝：换有权限的账号仍可能成功，
+// 全部账号都拒绝时才向客户端报模型不可用。
 const (
-	modelBlockCode      = "11102"
-	modelBlockMsgMarker = "service info not found"
+	modelBlockCode          = "11102"
+	modelBlockMsgMarker     = "service info not found"
+	modelForbiddenCode      = "11158"
+	modelForbiddenMsgMarker = "is not allowed for user type"
 )
 
 // softRateResetLoc 上游 429 重置时间固定按 UTC+8 解释（上游文案如此，与时区无关）。
@@ -182,29 +234,53 @@ func IsModelRateLimit(body string) bool {
 	return reModelRateLimit.MatchString(body)
 }
 
-// IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 的确定性答复。
+// IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 或「该账号类型无权使用
+// 该模型」(11158) 的确定性答复。
 //
 // 只比对 code/msg 等独立字段，绝不做整段文本子串匹配：错误体还带 requestId 等字段，
-// 拿整段文本匹配会把 "11102" 撞在 ID 上、误避让一个本来能用的模型。判定 =
-// code 字段精确等于 "11102"，或 msg/message 字段命中窄短语 "service info not
-// found"。只看 400/404：429 带 11102 属限流语义。字段遍历覆盖顶层与 error 子对象两层。
+// 拿整段文本匹配会把 code 撞在 ID 上、误避让一个本来能用的模型。判定 =
+// code 字段精确等于 "11102"/"11158"，或 msg/message 字段命中对应窄短语。
+// 只看 400/404：429 带这些 code 属限流语义。字段遍历覆盖顶层与 error 子对象两层。
+// 移植自 workbuddy2api-panel 6ee5491（合并 11158 判定）。
 func IsModelBlocked(status int, body string) bool {
 	if (status != http.StatusBadRequest && status != http.StatusNotFound) || body == "" {
 		return false
 	}
-	// 轻量预检：body 既无 "11102" 又无 marker 时直接短路。
-	if !strings.Contains(body, modelBlockCode) && !strings.Contains(strings.ToLower(body), modelBlockMsgMarker) {
+	lower := strings.ToLower(body)
+	// 轻量预检：body 无任何已知 code/marker 时直接短路（大多数 4xx 零分配返回）。
+	if !strings.Contains(body, modelBlockCode) && !strings.Contains(body, modelForbiddenCode) &&
+		!strings.Contains(lower, modelBlockMsgMarker) && !strings.Contains(lower, modelForbiddenMsgMarker) {
 		return false
 	}
+	code, msg := modelBlockFields(body)
+	if code == modelBlockCode || code == modelForbiddenCode {
+		return true
+	}
+	lowerMsg := strings.ToLower(msg)
+	return strings.Contains(lowerMsg, modelBlockMsgMarker) || strings.Contains(lowerMsg, modelForbiddenMsgMarker)
+}
+
+// ModelBlockReasonFor 返回确定性模型拒绝对应的负缓存 reason 前缀（"11102"/"11158"），
+// 供上层 (账号,模型) 级锁池区分两种拒绝。11158 是账号类型权限问题；其余已由
+// IsModelBlocked 确认的形态沿用 11102。移植自 workbuddy2api-panel 6ee5491。
+func ModelBlockReasonFor(body string) string {
+	code, msg := modelBlockFields(body)
+	if code == modelForbiddenCode || strings.Contains(strings.ToLower(msg), modelForbiddenMsgMarker) {
+		return modelForbiddenCode
+	}
+	return modelBlockCode
+}
+
+// modelBlockFields 提取顶层或 error 子对象中的业务 code 与消息。
+func modelBlockFields(body string) (code, msg string) {
 	var root map[string]any
 	if err := json.Unmarshal([]byte(body), &root); err != nil {
-		return false
+		return "", ""
 	}
 	nodes := []map[string]any{root}
 	if inner, ok := root["error"].(map[string]any); ok {
 		nodes = append(nodes, inner)
 	}
-	code, msg := "", ""
 	for _, node := range nodes {
 		for _, key := range []string{"code", "errCode", "error_code"} {
 			if v, ok := node[key]; ok && v != nil && code == "" {
@@ -217,10 +293,7 @@ func IsModelBlocked(status int, body string) bool {
 			}
 		}
 	}
-	if code == modelBlockCode {
-		return true
-	}
-	return strings.Contains(strings.ToLower(msg), modelBlockMsgMarker)
+	return code, msg
 }
 
 // hasBusinessCode 报告 JSON 错误信封（含嵌套 error/data 对象）中是否存在精确等于
@@ -284,27 +357,31 @@ func codeMarker(lower, code string) bool {
 // ClassifyError 按 HTTP 状态码 + body 判定错误类别（纯函数）。
 //
 // 判定顺序自「严」到「宽」，每层的先后都有语义依据：
-//  0. 11102（IsModelBlocked）——「该后端无此模型」确定性答复，语义最具体，最先判
-//     （只认 400/404，429+11102 属限流语义走第 4 层）。
+//  0. 11102/11158（IsModelBlocked）——「该后端无此模型/该账号类型无权使用该模型」
+//     确定性答复，语义最具体，最先判（只认 400/404，429+11102 属限流语义走限流层）。
 //  1. 402 —— 真正的计费余额耗尽状态码，最严、最不可自愈，最先判。
 //  2. sessionDeadMarkers —— 需要人工重登的终态。若 401 body 同时含 "12153" 与
 //     "rate limit"（网关错误页混排），归 session_dead：短冷却救不活失效 session。
-//  3. accountFaultMarkers —— 账号级授权/配额故障（11140 request illegal 风控、
-//     14017 trial not activated）。必须先于 status==429 判定：14017 常带 429 状态码，
-//     若落到 429 兜底会误归 soft_rate（账号级故障等不来自愈）。
+//  3. 11-128/11140 业务码分流（isChannelRefused/IsAccountRestricted）——两者 msg 同为
+//     "request illegal" 但语义相反（通道拒绝 vs 账号限制），code + 文案双条件判定；
+//     之后 accountFaultMarkers 兜底其余账号级文案（14017 trial not activated）。
+//     必须先于 status==429 判定：14017 常带 429 状态码，若落到 429 兜底会误归
+//     soft_rate（账号级故障等不来自愈）。
 //  4. 429 + code 14018 —— 明确的账号积分耗尽，归 hard_credit。只认结构化业务码。
-//  5. status==429 —— 限流状态码兜底（先于 hardMarkers）：429 body 高频携带
+//  5. 6021 queue.full —— 渠道级容量满载，归 upstream_busy：不罚号不轮转。判在
+//     status==429 兜底之前（比「限流」更具体的渠道级信号，同 14018 的具体优先哲学）。
+//  6. status==429 —— 限流状态码兜底（先于 hardMarkers）：429 body 高频携带
 //     "quota exceeded"/"额度不足" 等跨计费/限流两界的措辞，hardMarkers 先判会把
 //     限流误归 hard_credit 硬冷却到次日 04:00，白扔号约 12h。状态码是比关键词
 //     更权威的信号；真正的余额耗尽由 402（第 1 层）或 14018（第 4 层）捕获。
-//  6. hardMarkers —— 非 429 响应携带计费关键词（200 业务信封 / 403 信封等）。
-//  7. softRateMarkers —— 非 429 状态码携带限流文案（覆盖 200/400/403/5xx）。
-//  8. 11115 —— 「prompt is too long」请求级语义：判在 404/5xx 与通用 4xx 兜底
+//  7. hardMarkers —— 非 429 响应携带计费关键词（200 业务信封 / 403 信封等）。
+//  8. softRateMarkers —— 非 429 状态码携带限流文案（覆盖 200/400/403/5xx）。
+//  9. 11115 —— 「prompt is too long」请求级语义：判在 404/5xx 与通用 4xx 兜底
 //     之前（404 上打 11115 若落 not_found 会误冷却账号——上下文超限与账号无关）。
-//  9. 404 / 5xx —— 与限流无关的常规分类。
-//  10. IsWafBlocked —— 403 且无业务信封（HTML 拦截页/空体/纯文本）。判在通用 4xx
+//  10. 404 / 5xx —— 与限流无关的常规分类。
+//  11. IsWafBlocked —— 403 且无业务信封（HTML 拦截页/空体/纯文本）。判在通用 4xx
 //     兜底之前：此前该形态落 client 兜底 → 只换号不罚 → 连环 403。
-//  11. 内容策略/参数错误/图片无效/其他 4xx —— 通用兜底。
+//  12. 内容策略/参数错误/图片无效/其他 4xx —— 通用兜底。
 func ClassifyError(statusCode int, body []byte) ErrorKind {
 	s := string(body)
 	return classifyString(statusCode, s)
@@ -329,6 +406,18 @@ func classifyString(status int, body string) ErrorKind {
 			return KindSessionDead
 		}
 	}
+	// WorkBuddy 11-128 / 11140 的 msg 同为 "request illegal"，必须按业务码分流：
+	//   - 11-128 = 通道校验失败（上游认为请求不是官方客户端发出）→ 账号健康，
+	//     归 KindChannelRefused 不罚号。误判成 account_fault 会把健康账号当封禁处置。
+	//   - 11140 = 账号被上游限制（异常行为/风控）→ account_fault，由上层禁用。
+	// 两者都要求 code + 文案双条件，避免 11140 的模型级限流变体被误判（见
+	// IsAccountRestricted 注释）。移植自 workbuddy2api-panel 7a8b7a7。
+	if isChannelRefused(body) {
+		return KindChannelRefused
+	}
+	if IsAccountRestricted(body) {
+		return KindAccountFault
+	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return KindAccountFault
@@ -339,6 +428,15 @@ func classifyString(status int, body string) ErrorKind {
 	// 普通 429 的软限流语义。
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return KindHardCredit
+	}
+	// 6021「queue.full.title」是渠道级容量满载（上游推理集群排队队列打满），不是账号
+	// 问题：同一时刻换任何账号都会撞同一堵墙。必须先于通用 429 兜底，否则会按软限流
+	// 逐号冷却——实测 2 秒内即可把整池健康号全部误杀（2026-10-15 实案）。429 + 结构化
+	// code 6021 为主判据（与 14018 同口径）；"queue.full" 固定文案单列为外卡——该文案
+	// 是上游 i18n key 原文，语义唯一，非 429 状态码出现同样归本类（防上游换状态码）。
+	// 移植自 workbuddy2api-panel f14f374。
+	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
+		return KindUpstreamBusy
 	}
 	if status == http.StatusTooManyRequests {
 		return KindSoftRate

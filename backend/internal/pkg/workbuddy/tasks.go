@@ -776,6 +776,9 @@ func (c *Client) ClaimGift(ctx context.Context, cred Credentials) (int64, error)
 }
 
 // ClaimCompensation 领取活动补偿（有则领，无则业务错误）。
+// 盲领入口——调用前应先 GetCompensationStatus 确认 Pending()（移植自
+// workbuddy2api-panel d48b715：盲领让「没补偿/已领过/领取失败」在日志里完全同构，
+// 补偿带截止日，错过静默过期）。
 func (c *Client) ClaimCompensation(ctx context.Context, cred Credentials) (int64, error) {
 	data, err := c.billingJSON(ctx, cred, http.MethodPost, "/billing/meter/claim-compensation", map[string]any{})
 	if err != nil {
@@ -786,6 +789,40 @@ func (c *Client) ClaimCompensation(ctx context.Context, cred Credentials) (int64
 	}
 	_ = json.Unmarshal(data, &resp)
 	return resp.Credit, nil
+}
+
+// CompensationStatus 单账号的补偿活动状态（移植自 workbuddy2api-panel d48b715）。
+type CompensationStatus struct {
+	// Active 当前是否有生效中的补偿活动（无活动时为 false，属正常 200 返回，不是错误）。
+	Active bool `json:"active"`
+	// Claimed 本次活动是否已领取。
+	Claimed bool `json:"claimed"`
+	// CreditNum 待领额度（积分）。
+	CreditNum int64 `json:"credit_num"`
+	// ValidityPeriod 发放积分的有效期倍数。上游未明示单位，只透传不换算。
+	ValidityPeriod int64 `json:"validity_period"`
+	// EndTime 领取截止时间（上游 "2006-01-02 15:04:05" 无时区字符串，原样透传）。
+	EndTime string `json:"end_time"`
+}
+
+// Pending 是否存在「可领且未领」的补偿——ClaimCompensation 的前置判据。
+// 三者与门：active=false 是没有活动；claimed=true 是已领完；credit_num<=0 是
+// 活动存在但无额度。三种都归「无需领取」。
+func (s CompensationStatus) Pending() bool { return s.Active && !s.Claimed && s.CreditNum > 0 }
+
+// GetCompensationStatus 查补偿活动状态。走 billingJSON（billingBase），与
+// ClaimCompensation 同域同头。只在传输失败 / 非 2xx / 业务 code 非 0 时返回 error
+//——active=false 是正常返回。
+func (c *Client) GetCompensationStatus(ctx context.Context, cred Credentials) (CompensationStatus, error) {
+	data, err := c.billingJSON(ctx, cred, http.MethodPost, "/billing/meter/compensation-status", map[string]any{})
+	if err != nil {
+		return CompensationStatus{}, err
+	}
+	var st CompensationStatus
+	if err := json.Unmarshal(data, &st); err != nil {
+		return CompensationStatus{}, err
+	}
+	return st, nil
 }
 
 // HeatmapYesterdayMissed 检查昨日是否漏签（heatmap cell score==0）。
@@ -816,6 +853,99 @@ func (c *Client) HeatmapYesterdayMissed(ctx context.Context, cred Credentials) (
 func (c *Client) UseMakeupCard(ctx context.Context, cred Credentials, date string) error {
 	_, err := c.growthJSON(ctx, cred, http.MethodPost, makeupCardUsePath, map[string]any{"target_date": date})
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// 补领清扫（周期幂等 accept + claim，不跑任何行为链路）。
+// ---------------------------------------------------------------------------
+
+// TaskSweepResult 一轮补领清扫的汇总（移植自 workbuddy2api-panel 162762f）。
+type TaskSweepResult struct {
+	Accepted int   // 本轮接受成功的任务数
+	Claimed  int   // 本轮领奖成功的任务数
+	Credits  int64 // 本轮到账积分
+	Energy   int64 // 本轮到账能量
+}
+
+// RunTaskSweep 对该账号做一轮幂等补领清扫（移植自 workbuddy2api-panel 162762f
+// tasksweep.go）：只 accept 尚未接受的任务、只 claim 已达标未领的任务，**不跑任何
+// 行为链路**（不真实对话、不上报事件）。
+//
+// 存在理由：RunGrowthAction 只覆盖内置动作任务，「经真实对话等链路点亮」的任务不
+// 经过任何自动动作链路，达标后奖励无人领，积分长期卡住。判据只用 progress 口径
+// Task.Claimable（!claimed && target>0 && current>=target），不用
+// accept_status=="completed"（回读时会短暂转 completed 后回滚，据此领奖会误领）；
+// claim 幂等（重复领 already_claimed → 0 分 0 能），宁可多试一轮也不漏领。
+func (c *Client) RunTaskSweep(ctx context.Context, cred Credentials) (*TaskSweepResult, error) {
+	res := &TaskSweepResult{}
+	// 默认列表 + mp 列表按 task_code 去重合并（mp 任务在默认列表查不到）。
+	// mpOnly 集合记录「只在 mp 列表出现」的任务码——accept/claim 都要走 mp 口径。
+	tasks, err := c.ListTasks(ctx, cred)
+	if err != nil {
+		return res, err
+	}
+	seen := map[string]bool{}
+	for _, t := range tasks {
+		seen[t.TaskCode] = true
+	}
+	mpOnly := map[string]bool{}
+	mpTasks, mpErr := c.ListTasksMP(ctx, cred)
+	if mpErr == nil {
+		for _, t := range mpTasks {
+			if !seen[t.TaskCode] {
+				tasks = append(tasks, t)
+				seen[t.TaskCode] = true
+				mpOnly[t.TaskCode] = true
+			}
+		}
+	}
+
+	// accept 按默认/mp 口径分开提交（端标记不同）。
+	var codes, mpCodes []string
+	for _, t := range tasks {
+		if t.Claimed || t.Locked || t.AcceptStatus == "accepted" || t.AcceptStatus == "completed" {
+			continue
+		}
+		if mpOnly[t.TaskCode] {
+			mpCodes = append(mpCodes, t.TaskCode)
+		} else {
+			codes = append(codes, t.TaskCode)
+		}
+	}
+	if len(codes) > 0 {
+		if err := c.AcceptTasks(ctx, cred, codes); err == nil {
+			res.Accepted += len(codes)
+		}
+	}
+	if len(mpCodes) > 0 {
+		if err := c.AcceptTasksMP(ctx, cred, mpCodes); err == nil {
+			res.Accepted += len(mpCodes)
+		}
+	}
+
+	// claim 只按 progress 口径（Claimable 已推算）。
+	for _, t := range tasks {
+		if !t.Claimable {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		var credit, energy int64
+		var cerr error
+		if mpOnly[t.TaskCode] {
+			credit, energy, cerr = c.ClaimRewardMP(ctx, cred, t.TaskCode)
+		} else {
+			credit, energy, cerr = c.ClaimReward(ctx, cred, t.TaskCode)
+		}
+		if cerr != nil {
+			continue // 单个失败不中断（源同口径：出错计数但不中断整轮）
+		}
+		res.Claimed++
+		res.Credits += credit
+		res.Energy += energy
+	}
+	return res, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -88,10 +89,16 @@ func (c *Client) Now() time.Time {
 // httpc 返回注入的 http client。
 func (c *Client) httpc() *http.Client { return c.httpClient }
 
-// chatBase 按 realm 返回 chat/growth 域基址。
+// chatBase 按 realm 返回 chat/growth 域基址。CN 域支持 WB_CN_CHAT_BASE 环境变量
+// 覆盖（移植自 workbuddy2api-panel 7fcc20a cn.chat_base：官方桌面端已改用
+// www.workbuddy.cn，copilot.tencent.com 对部分海外出口 TLS 握手复位；空 = 回落
+// 内置默认）。service 层 workbuddyChatBaseURL 同口径，两处必须同步改。
 func (c *Client) chatBase(cred Credentials) string {
 	if cred.IsGlobal() {
 		return globalBase
+	}
+	if v := strings.TrimSpace(os.Getenv("WB_CN_CHAT_BASE")); v != "" {
+		return strings.TrimSuffix(v, "/")
 	}
 	return chatBaseCN
 }
@@ -343,6 +350,14 @@ func PrepareChatBody(cred Credentials, body []byte, conversationID string) []byt
 	// （Claude Code system prompt 身份句 / x-anthropic-billing-header 归因行 /
 	// 裸 11128 反探测串等），见 sanitize.go。放在全部归一化之后、marshal 之前。
 	if msgs, ok := obj["messages"].([]any); ok {
+		// 思考片段剔除（源项目 payload.go dropReasoningContentParts 同位）：Codex 等
+		// 客户端经 Responses→chat 转换后，助手历史里会带 reasoning_text/reasoning 片段，
+		// 上游 content 类型白名单不含它们，命中 400 code=11101 "unsupported content
+		// type"。思考片段只是模型私有推理，下游续写不需要，剔除无副作用。
+		if cleaned, ch := dropReasoningContentParts(msgs); ch {
+			obj["messages"] = cleaned
+			msgs = cleaned
+		}
 		// 工具配对清理（源项目 tool_pairing.go 同位，无条件启用）：剔除无配对的
 		// tool_call↔tool 结果与空 function.name 脏条目（上游 400 code 11133/11148
 		// 会顶死整条会话），见 tool_pairing.go。放在脱敏之前——被删条目无需再净化。
@@ -509,6 +524,63 @@ func normalizeImageURL(obj map[string]any) {
 			part["image_url"] = map[string]any{"url": imageURL}
 		}
 	}
+}
+
+// dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段。
+//
+// Codex 只走 /v1/responses：responses→chat 转换会把助手历史里的思考片段原样透传进
+// /v1/chat/completions。上游 content 类型白名单不含 reasoning_text，命中即 HTTP 400
+// code=11101 "unsupported content type at index 0: reasoning_text"。思考片段只是模型
+// 私有推理，下游续写不需要，剔除无副作用：
+//   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）；
+//   - 若删除后 content 为空且该消息无 tool_calls，整条消息一并删除。
+//
+// 移植自 workbuddy2api-panel dea68c4（payload.go dropReasoningContentParts）。
+func dropReasoningContentParts(msgs []any) ([]any, bool) {
+	changed := false
+	out := make([]any, 0, len(msgs))
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		msgChanged := false
+		kept := make([]any, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				kept = append(kept, rawPart)
+				continue
+			}
+			ptype, _ := part["type"].(string)
+			if strings.TrimSpace(ptype) == "reasoning_text" || strings.TrimSpace(ptype) == "reasoning" {
+				msgChanged = true
+				continue
+			}
+			kept = append(kept, rawPart)
+		}
+		if !msgChanged {
+			out = append(out, rawMsg)
+			continue
+		}
+		changed = true
+		// content 被清空：无 tool_calls 的消息整条删除（留着是一条空 content 消息，
+		// 上游同样拒）；有 tool_calls 的保留（tool_calls 才是这轮的语义主体）。
+		if len(kept) == 0 {
+			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+				continue
+			}
+		}
+		msg["content"] = kept
+		out = append(out, rawMsg)
+	}
+	return out, changed
 }
 
 // ensureConsoleSystem global realm 兜底 system 注入（防上游 code 11-128）：

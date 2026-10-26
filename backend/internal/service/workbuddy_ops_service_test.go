@@ -24,7 +24,7 @@ func TestWorkbuddyOpsService_TaskRegistryMatchesSpec(t *testing.T) {
 	for _, task := range svc.Tasks() {
 		byID[task.ID] = task
 	}
-	require.Len(t, byID, 7)
+	require.Len(t, byID, 9)
 
 	require.Equal(t, []int{9, 21}, byID["checkin"].Hours)
 	require.True(t, byID["checkin"].IncludeDisabled)
@@ -34,6 +34,9 @@ func TestWorkbuddyOpsService_TaskRegistryMatchesSpec(t *testing.T) {
 	require.True(t, byID["keepalive"].IncludeDisabled)
 	require.Equal(t, []int{23}, byID["blackcat"].Hours)
 	require.Equal(t, []int{1}, byID["growth"].Hours)
+	require.Equal(t, 4*time.Hour, byID["growth_sweep"].Interval, "补领清扫周期幂等（162762f）")
+	require.Equal(t, 6*time.Hour, byID["compensation"].Interval, "补偿先查后领（d48b715）")
+	require.True(t, byID["compensation"].IncludeDisabled, "补偿是积分恢复入口，error 账号也要领")
 	require.Equal(t, 6*time.Hour, byID["balance"].Interval)
 	require.True(t, byID["balance"].IncludeDisabled)
 

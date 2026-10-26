@@ -123,6 +123,27 @@ func (s *WorkbuddyOpsService) buildTasks() []PlatformOpsTask {
 			RunOne:   s.runGrowth,
 		},
 		{
+			// 补领清扫（移植自 workbuddy2api-panel 162762f）：周期幂等 accept 未接单
+			// + claim 已达标未领的奖励，不跑行为链路。与 growth 互补——growth 只覆盖
+			// 内置动作任务，经真实对话点亮的任务由本任务兜底领奖（治积分卡住）。
+			ID:       "growth_sweep",
+			Platform: PlatformWorkbuddy,
+			Name:     "成长任务补领清扫",
+			Interval: 4 * time.Hour,
+			RunOne:   s.runGrowthSweep,
+		},
+		{
+			// 补偿先查后领（移植自 workbuddy2api-panel d48b715）：盲领会把「没补偿/
+			// 已领过/领取失败」混成同一种日志，补偿带截止日会静默过期。先查状态，
+			// 待领才领；无活动是正常状态不算错误。
+			ID:              "compensation",
+			Platform:        PlatformWorkbuddy,
+			Name:            "补偿检查领取",
+			Interval:        6 * time.Hour,
+			IncludeDisabled: true, // 补偿是积分恢复入口，error 账号也要领
+			RunOne:          s.runCompensation,
+		},
+		{
 			ID:              "balance",
 			Platform:        PlatformWorkbuddy,
 			Name:            "余额刷新",
@@ -311,7 +332,7 @@ func (s *WorkbuddyOpsService) runCheckin(ctx context.Context, account *Account) 
 
 // runTravel 猫猫旅行单趟巡检（领奖 / 派出 / 领养，最多一个动作）。
 func (s *WorkbuddyOpsService) runTravel(ctx context.Context, account *Account) (string, error) {
-	cred, skip, err := s.growthEligibleCredentials(account)
+	cred, skip, err := s.behaviorEligibleCredentials(account)
 	if err != nil {
 		return "", err
 	}
@@ -332,7 +353,7 @@ func (s *WorkbuddyOpsService) runTravel(ctx context.Context, account *Account) (
 
 // runActivity 对话活跃上报（一条 chat_request_send 点亮连登 + first_buddy 门槛）。
 func (s *WorkbuddyOpsService) runActivity(ctx context.Context, account *Account) (string, error) {
-	cred, skip, err := s.growthEligibleCredentials(account)
+	cred, skip, err := s.behaviorEligibleCredentials(account)
 	if err != nil {
 		return "", err
 	}
@@ -361,7 +382,7 @@ func (s *WorkbuddyOpsService) runKeepalive(ctx context.Context, account *Account
 
 // runBlackcat 夜猫子：仅在 23:00–08:00 计数窗口内补足差额对话，窗口外视为成功跳过。
 func (s *WorkbuddyOpsService) runBlackcat(ctx context.Context, account *Account) (string, error) {
-	cred, skip, err := s.growthEligibleCredentials(account)
+	cred, skip, err := s.behaviorEligibleCredentials(account)
 	if err != nil {
 		return "", err
 	}
@@ -394,7 +415,7 @@ func (s *WorkbuddyOpsService) runBlackcat(ctx context.Context, account *Account)
 // black_cat；black_cat 动作内部自带夜窗判定）。其余无内置动作的任务仅接受报名，
 // 达标领奖交给下一轮（判据事件未移植，见 pkg tasks.go 注释）。
 func (s *WorkbuddyOpsService) runGrowth(ctx context.Context, account *Account) (string, error) {
-	cred, skip, err := s.growthEligibleCredentials(account)
+	cred, skip, err := s.behaviorEligibleCredentials(account)
 	if err != nil {
 		return "", err
 	}
@@ -437,17 +458,96 @@ func (s *WorkbuddyOpsService) runBalance(ctx context.Context, account *Account) 
 	return "", nil
 }
 
+// runGrowthSweep 补领清扫：只 accept 未接单 + claim 已达标未领（移植自
+// workbuddy2api-panel 162762f）。不跑行为链路，与 runGrowth 互补。跳过企业切换
+// 会话（行为类判定同源——虽然清扫本身不上报，但该形态下任务进度恒 0/x，清扫也是
+// 空转，省上游请求）。
+func (s *WorkbuddyOpsService) runGrowthSweep(ctx context.Context, account *Account) (string, error) {
+	cred, skip, err := s.behaviorEligibleCredentials(account)
+	if err != nil {
+		return "", err
+	}
+	if skip {
+		return "", nil
+	}
+	client, err := s.accountClient(account)
+	if err != nil {
+		return "", err
+	}
+	res, err := client.RunTaskSweep(ctx, cred)
+	if err != nil {
+		return "", fmt.Errorf("task sweep: %w", err)
+	}
+	if res.Accepted == 0 && res.Claimed == 0 {
+		return "无待补领", nil
+	}
+	note := fmt.Sprintf("accepted=%d claimed=%d credit=%d energy=%d", res.Accepted, res.Claimed, res.Credits, res.Energy)
+	log.Printf("[WorkbuddyOps] growth_sweep account %d %s", account.ID, note)
+	return note, nil
+}
+
+// runCompensation 补偿先查后领（移植自 workbuddy2api-panel d48b715）：
+// 查状态 → Pending 才领。无活动/已领完/无额度都是正常状态（不算错误）。
+func (s *WorkbuddyOpsService) runCompensation(ctx context.Context, account *Account) (string, error) {
+	// 补偿对个人/企业/切换会话都可能发放，不做成长体系门控；只要有凭证就查。
+	cred, err := parseWorkbuddyCredentials(account)
+	if err != nil {
+		return "", fmt.Errorf("parse workbuddy credentials: %w", err)
+	}
+	client, err := s.accountClient(account)
+	if err != nil {
+		return "", err
+	}
+	st, err := client.GetCompensationStatus(ctx, cred)
+	if err != nil {
+		return "", fmt.Errorf("compensation status: %w", err)
+	}
+	if !st.Pending() {
+		return "无待领补偿", nil // active=false / 已领 / 无额度均为正常
+	}
+	credit, err := client.ClaimCompensation(ctx, cred)
+	if err != nil {
+		// 领取失败必须显形（源的命题是「不要静默失败」）：补偿带截止日，下次
+		// 轮询前可能过期，返回错误让 ops 状态记录可见。
+		return "", fmt.Errorf("claim compensation (credit_num=%d, end_time=%s): %w", st.CreditNum, st.EndTime, err)
+	}
+	note := fmt.Sprintf("领取补偿 %d 积分（截止 %s）", credit, st.EndTime)
+	log.Printf("[WorkbuddyOps] compensation account %d %s", account.ID, note)
+	// 领到积分后顺手刷新余额快照（失败不影响领取结果）。
+	if _, qerr := s.oauthService.QueryWorkbuddyQuota(ctx, account.ID); qerr != nil {
+		log.Printf("[WorkbuddyOps] compensation quota refresh account %d failed: %v", account.ID, qerr)
+	}
+	return note, nil
+}
+
 // ---------------------------------------------------------------------------
 // 账号侧小工具。
 // ---------------------------------------------------------------------------
 
 // growthEligibleCredentials 解析凭证；企业账号 skip=true（调用方按跳过处理）。
+// 只判**企业版账号**（计费口径 enterprise_id）——签到等对切换会话仍有效的任务用本函数。
 func (s *WorkbuddyOpsService) growthEligibleCredentials(account *Account) (cred workbuddy.Credentials, skip bool, err error) {
 	cred, err = parseWorkbuddyCredentials(account)
 	if err != nil {
 		return workbuddy.Credentials{}, false, fmt.Errorf("parse workbuddy credentials: %w", err)
 	}
 	if cred.IsEnterprise() {
+		return workbuddy.Credentials{}, true, nil
+	}
+	return cred, false, nil
+}
+
+// behaviorEligibleCredentials 行为类任务的门控（移植自 workbuddy2api-panel 9282779）：
+// 在 growthEligibleCredentials 之上再排除企业**切换会话**（token_source=
+// enterprise_switch）——该形态下 /v2/report 行为事件返回 200 却被上游静默丢弃，
+// 成长任务每轮白跑且无任何报错（实测 15 个任务全部 0/x）。签到等显式报错的任务
+// 不走本门控（源同样不动签到）；skip 时调用方按跳过处理并提示用户重新授权。
+func (s *WorkbuddyOpsService) behaviorEligibleCredentials(account *Account) (cred workbuddy.Credentials, skip bool, err error) {
+	cred, skip, err = s.growthEligibleCredentials(account)
+	if err != nil || skip {
+		return cred, skip, err
+	}
+	if cred.IsEnterpriseSession() {
 		return workbuddy.Credentials{}, true, nil
 	}
 	return cred, false, nil

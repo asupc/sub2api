@@ -3,6 +3,7 @@
 package workbuddy
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 )
@@ -120,5 +121,33 @@ func TestNeedsRefresh(t *testing.T) {
 	}
 	if !(Credentials{}).NeedsRefresh(time.Minute, now) {
 		t.Error("无 expiry 恒需刷新")
+	}
+}
+
+// TestIsEnterpriseSession 企业切换会话识别（移植自 workbuddy2api-panel 9282779）：
+// JWT payload 的 token_source=enterprise_switch 判定，与 IsEnterprise（计费口径）隔离。
+func TestIsEnterpriseSession(t *testing.T) {
+	mkToken := func(claims string) string {
+		payload := base64.RawURLEncoding.EncodeToString([]byte(claims))
+		return "hdr." + payload + ".sig"
+	}
+	cases := []struct {
+		name string
+		cred Credentials
+		want bool
+	}{
+		{"enterprise_switch", Credentials{AccessToken: mkToken(`{"token_source":"enterprise_switch","uid":"u1"}`)}, true},
+		{"normal token", Credentials{AccessToken: mkToken(`{"token_source":"password","uid":"u1"}`)}, false},
+		{"no token_source", Credentials{AccessToken: mkToken(`{"uid":"u1"}`)}, false},
+		{"not a jwt", Credentials{AccessToken: "opaque-token"}, false},
+		{"empty", Credentials{}, false},
+		{"malformed payload", Credentials{AccessToken: "hdr.!!!.sig"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.cred.IsEnterpriseSession(); got != c.want {
+				t.Errorf("IsEnterpriseSession()=%v want %v", got, c.want)
+			}
+		})
 	}
 }

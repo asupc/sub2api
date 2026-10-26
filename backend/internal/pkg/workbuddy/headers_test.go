@@ -111,14 +111,15 @@ func TestInjectConversationHeaders(t *testing.T) {
 	if got := req2.Header.Get("X-Conversation-Request-ID"); got != "not-hex-id!!" {
 		t.Errorf("非空 convReqID 应原样作聚合主键，got %q", got)
 	}
-	// 零值 meta：本级补发 32 hex 聚合主键，保证必发。
+	// 零值 meta：本级补发 32 hex 聚合主键与会话 ID，保证三元组恒发
+	//（缺 X-Conversation-ID 会被国际端点 400/11-128 conversation id missing）。
 	req3 := httptest.NewRequest(http.MethodPost, "/", nil)
 	injectConversationHeaders(req3, ChatMeta{})
 	if got := req3.Header.Get("X-Conversation-Request-ID"); got == "" || !validTraceID(got) {
 		t.Errorf("零值 meta 应补发 32 hex 聚合主键，got %q", got)
 	}
-	if _, ok := req3.Header["X-Conversation-ID"]; ok {
-		t.Error("空 ConversationID 不应伪造 X-Conversation-ID")
+	if got := req3.Header.Get("X-Conversation-ID"); got == "" || !validTraceID(got) {
+		t.Errorf("空 ConversationID 应补发 32 hex 会话 ID（恒发），got %q", got)
 	}
 }
 
