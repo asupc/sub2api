@@ -23,6 +23,8 @@ const messages: Record<string, string> = {
   'admin.dashboard.metricActualCost': 'By Actual Cost',
   'admin.dashboard.noDataAvailable': 'No data available',
   'admin.redeem.userPrefix': 'User #{id}',
+  'common.expandAll': 'Expand all ({count})',
+  'common.collapseAll': 'Collapse',
 }
 
 vi.mock('vue-i18n', async () => {
@@ -245,5 +247,69 @@ describe('ModelDistributionChart', () => {
     expect(rows[3].text()).toContain('4')
     expect(rows[3].text()).toContain('400')
     expect(rows[3].text()).toContain('$10.00')
+  })
+
+  it('shows 6 models by default without scroll and expands to all on demand', async () => {
+    const manyStats = Array.from({ length: 8 }, (_, i) => ({
+      model: `model-${i}`,
+      requests: 1,
+      input_tokens: 10,
+      output_tokens: 5,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
+      total_tokens: 1000 - i * 10,
+      cost: 0,
+      actual_cost: 0,
+    }))
+    const wrapper = mount(ModelDistributionChart, {
+      props: {
+        modelStats: manyStats,
+      },
+      global: {
+        stubs: {
+          LoadingSpinner: true,
+        },
+      },
+    })
+
+    // 默认只展示 6 条，无滚动容器（环图 mock 文本含全部 labels，故只断言 tbody）
+    expect(wrapper.find('.overflow-auto').exists()).toBe(false)
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows).toHaveLength(6)
+    expect(wrapper.find('tbody').text()).not.toContain('model-7')
+
+    // 环图仍统计全部 8 个模型
+    const chartData = JSON.parse(wrapper.find('.chart-data').text())
+    expect(chartData.labels).toHaveLength(8)
+
+    // 展开全部后展示 8 条
+    const expandButton = wrapper.findAll('button').find((button) => button.text().includes('Expand all'))
+    expect(expandButton).toBeTruthy()
+    expect(expandButton!.text()).toContain('(8)')
+    await expandButton!.trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(8)
+    expect(wrapper.find('tbody').text()).toContain('model-7')
+
+    // 再点收起
+    const collapseButton = wrapper.findAll('button').find((button) => button.text() === 'Collapse')
+    expect(collapseButton).toBeTruthy()
+    await collapseButton!.trigger('click')
+    expect(wrapper.findAll('tbody tr')).toHaveLength(6)
+  })
+
+  it('hides the expand button when models fit within the default count', () => {
+    const wrapper = mount(ModelDistributionChart, {
+      props: {
+        modelStats,
+      },
+      global: {
+        stubs: {
+          LoadingSpinner: true,
+        },
+      },
+    })
+
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2)
+    expect(wrapper.text()).not.toContain('Expand all')
   })
 })

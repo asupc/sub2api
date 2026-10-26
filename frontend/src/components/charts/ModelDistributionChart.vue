@@ -106,7 +106,7 @@
       <div class="h-48 w-48 shrink-0">
         <Doughnut :data="chartData" :options="doughnutOptions" />
       </div>
-      <div class="max-h-48 w-full min-w-0 flex-1 overflow-auto">
+      <div class="w-full min-w-0 flex-1 overflow-x-auto">
         <table class="w-full text-xs">
           <thead>
             <tr class="text-gray-500 dark:text-gray-400">
@@ -126,7 +126,7 @@
             </tr>
           </thead>
           <tbody>
-            <template v-for="model in displayModelStats" :key="model.model">
+            <template v-for="model in visibleModelStats" :key="model.model">
               <tr
                 class="border-t border-gray-100 transition-colors dark:border-dark-700"
                 :class="enableBreakdown ? 'cursor-pointer hover:bg-gray-50 dark:hover:bg-dark-700/40' : ''"
@@ -198,17 +198,29 @@
               </tr>
               <tr v-if="expandedKey === `model-${model.model}`">
                 <td :colspan="distributionColspan" class="p-0">
-                  <UserBreakdownSubTable
-                    :items="breakdownItems"
-                    :loading="breakdownLoading"
-                    :show-account-cost="showAccountCost"
-                    :show-cost="showCost"
-                  />
+                  <!-- 用户明细最多 50 行，单独限高滚动，避免把卡片撑高 -->
+                  <div class="max-h-48 overflow-y-auto">
+                    <UserBreakdownSubTable
+                      :items="breakdownItems"
+                      :loading="breakdownLoading"
+                      :show-account-cost="showAccountCost"
+                      :show-cost="showCost"
+                    />
+                  </div>
                 </td>
               </tr>
             </template>
           </tbody>
         </table>
+        <div v-if="hasMoreModels" class="mt-1.5 flex justify-end">
+          <button
+            type="button"
+            class="text-[11px] text-teal-600 hover:underline dark:text-teal-400"
+            @click="modelsExpanded = !modelsExpanded"
+          >
+            {{ modelsExpanded ? t('common.collapseAll') : t('common.expandAll', { count: displayModelStats.length }) }}
+          </button>
+        </div>
       </div>
     </div>
     <div
@@ -288,7 +300,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from 'chart.js'
 import { Doughnut } from 'vue-chartjs'
@@ -387,6 +399,10 @@ const showCost = computed(() => props.showCost)
 const distributionColspan = computed(() => (!props.showCost ? 6 : (showAccountCost.value ? 6 : 5)))
 const activeView = ref<'model_distribution' | 'spending_ranking'>('model_distribution')
 
+// 模型列表默认展示条数：约等于原 max-h-48 滚动区高度，超出则"展开全部"查看，不再出现纵向滚动条
+const DEFAULT_VISIBLE_MODEL_COUNT = 6
+const modelsExpanded = ref(false)
+
 const totalDistributionTokens = computed(() => {
   return displayModelStats.value.reduce((sum, m) => sum + toFiniteNumber(m.total_tokens), 0)
 })
@@ -435,6 +451,13 @@ const displayModelStats = computed(() => {
 
   const metricKey = (props.showCost && props.metric === 'actual_cost') ? 'actual_cost' : 'total_tokens'
   return [...sourceStats].sort((a, b) => toFiniteNumber(b[metricKey]) - toFiniteNumber(a[metricKey]))
+})
+
+const hasMoreModels = computed(() => displayModelStats.value.length > DEFAULT_VISIBLE_MODEL_COUNT)
+
+const visibleModelStats = computed(() => {
+  if (modelsExpanded.value) return displayModelStats.value
+  return displayModelStats.value.slice(0, DEFAULT_VISIBLE_MODEL_COUNT)
 })
 
 const chartData = computed(() => {
@@ -593,4 +616,10 @@ const formatCost = (value: number | null | undefined): string => {
   }
   return safeValue.toFixed(4)
 }
+
+// 数据源/日期/指标变化后会重新计算 displayModelStats，此时复位展开状态，避免展开态泄漏到新数据集。
+// 放在 script 末尾注册：watch 会立即读取一次 source，需保证此前的 const 辅助函数均已初始化。
+watch(displayModelStats, () => {
+  modelsExpanded.value = false
+})
 </script>

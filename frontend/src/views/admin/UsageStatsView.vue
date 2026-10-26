@@ -260,6 +260,14 @@
           />
         </div>
 
+        <!-- 按 API 密钥统计用量（整行宽幅，口径与管理控制台一致） -->
+        <UsageApiKeyStatsCard
+          scope="admin"
+          :start-date="startDate"
+          :end-date="endDate"
+          :reload-key="apiKeyStatsReloadKey"
+        />
+
         <!-- 用户用量排行 Top（仅 Token 口径；完整排行在使用记录页 ranking tab） -->
         <div class="card p-4 border border-slate-200/80 dark:border-dark-700">
           <div class="flex items-center justify-between mb-3">
@@ -319,6 +327,7 @@ import ModelDistributionChart from '@/components/charts/ModelDistributionChart.v
 import GroupDistributionChart from '@/components/charts/GroupDistributionChart.vue'
 import EndpointDistributionChart from '@/components/charts/EndpointDistributionChart.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
+import UsageApiKeyStatsCard from '@/components/dashboard/UsageApiKeyStatsCard.vue'
 import type { AdminUsageStatsResponse } from '@/api/admin/usage'
 import type {
   EndpointStat,
@@ -343,8 +352,9 @@ const inboundEndpointStats = ref<EndpointStat[]>([])
 const upstreamEndpointStats = ref<EndpointStat[]>([])
 const endpointPathStats = ref<EndpointStat[]>([])
 const topUsers = ref<UserBreakdownItem[]>([])
+const apiKeyStatsReloadKey = ref(0)
 
-const loading = ref(false)
+const loading = ref(true) // 首屏即加载态：避免子卡片在 refreshAll 前先自行取数导致重复请求
 const chartsLoading = ref(false)
 const modelStatsLoading = ref(false)
 const endpointStatsLoading = ref(false)
@@ -652,6 +662,7 @@ const refreshAll = () => {
   void loadModelStats(modelDistributionSource.value)
   void loadChartData()
   void loadRanking()
+  apiKeyStatsReloadKey.value++
 }
 
 const onDateRangeChange = (range: { startDate: string; endDate: string; preset: string | null }) => {

@@ -258,6 +258,14 @@
             :end-date="endDate"
           />
         </div>
+
+        <!-- 按 API 密钥统计用量（整行宽幅，口径与管理控制台一致） -->
+        <UsageApiKeyStatsCard
+          scope="user"
+          :start-date="startDate"
+          :end-date="endDate"
+          :reload-key="apiKeyStatsReloadKey"
+        />
       </template>
     </div>
   </AppLayout>
@@ -276,6 +284,7 @@ import ModelDistributionChart from '@/components/charts/ModelDistributionChart.v
 import GroupDistributionChart from '@/components/charts/GroupDistributionChart.vue'
 import EndpointDistributionChart from '@/components/charts/EndpointDistributionChart.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
+import UsageApiKeyStatsCard from '@/components/dashboard/UsageApiKeyStatsCard.vue'
 import type {
   EndpointStat,
   GroupStat,
@@ -291,8 +300,9 @@ const trendData = ref<TrendDataPoint[]>([])
 const requestedModelStats = ref<ModelStat[]>([])
 const groupStats = ref<GroupStat[]>([])
 const inboundEndpointStats = ref<EndpointStat[]>([])
+const apiKeyStatsReloadKey = ref(0)
 
-const loading = ref(false)
+const loading = ref(true) // 首屏即加载态：避免子卡片在 refreshAll 前先自行取数导致重复请求
 const chartsLoading = ref(false)
 const modelStatsLoading = ref(false)
 const endpointStatsLoading = ref(false)
@@ -541,6 +551,7 @@ const refreshAll = () => {
   void loadStats()
   void loadModelStats()
   void loadChartData()
+  apiKeyStatsReloadKey.value++
 }
 
 const onDateRangeChange = (range: { startDate: string; endDate: string; preset: string | null }) => {

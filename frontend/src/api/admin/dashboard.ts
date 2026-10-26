@@ -5,6 +5,8 @@
 
 import { apiClient } from '../client'
 import type {
+  ApiKeyModelUsageStat,
+  ApiKeyUsageStatItem,
   DashboardStats,
   TrendDataPoint,
   ModelStat,
@@ -15,6 +17,9 @@ import type {
   UserBreakdownItem,
   UsageRequestType
 } from '@/types'
+
+/** 密钥用量类型定义在 @/types，admin/用户共用；此处 re-export 保持既有导入兼容 */
+export type { ApiKeyModelUsageStat, ApiKeyUsageStatItem }
 
 /**
  * Get dashboard statistics
@@ -217,35 +222,6 @@ export interface ApiKeyTrendResponse {
   start_date: string
   end_date: string
   granularity: string
-}
-
-/** 单个 API 密钥下某模型的用量统计（密钥行展开明细） */
-export interface ApiKeyModelUsageStat {
-  model: string
-  request_count: number
-  input_tokens: number
-  output_tokens: number
-  cache_creation_tokens: number
-  cache_read_tokens: number
-  total_tokens: number
-  avg_tokens_per_sec: number | null
-  avg_duration_ms: number
-}
-
-/** 单个 API 密钥在指定时间范围内的汇总用量（含按模型明细） */
-export interface ApiKeyUsageStatItem {
-  api_key_id: number
-  name: string
-  username: string
-  request_count: number
-  input_tokens: number
-  output_tokens: number
-  cache_creation_tokens: number
-  cache_read_tokens: number
-  total_tokens: number
-  avg_tokens_per_sec: number | null
-  avg_duration_ms: number
-  models: ApiKeyModelUsageStat[]
 }
 
 export interface ApiKeyUsageStatsParams {

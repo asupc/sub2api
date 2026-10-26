@@ -5,6 +5,7 @@
 
 import { apiClient } from './client'
 import type {
+  ApiKeyUsageStatItem,
   UsageLog,
   UsageQueryParams,
   UsageStatsResponse,
@@ -322,6 +323,32 @@ export async function getDashboardSnapshotV2(
   return data
 }
 
+export interface UserApiKeyUsageStatsParams {
+  start_date?: string
+  end_date?: string
+  limit?: number
+}
+
+export interface UserApiKeyUsageStatsResponse {
+  items: ApiKeyUsageStatItem[]
+  start_date: string
+  end_date: string
+}
+
+/**
+ * Get per-API-key usage stats for the current user's own keys
+ * (with per-model breakdown, same shape as the admin console API).
+ */
+export async function getDashboardApiKeysUsageStats(
+  params?: UserApiKeyUsageStatsParams
+): Promise<UserApiKeyUsageStatsResponse> {
+  const { data } = await apiClient.get<UserApiKeyUsageStatsResponse>(
+    '/usage/dashboard/api-keys-usage-stats',
+    { params }
+  )
+  return data
+}
+
 export interface BatchApiKeyUsageStats {
   api_key_id: number
   today_actual_cost: number
@@ -384,6 +411,7 @@ export const usageAPI = {
   getMyApiKeyDailyUsage,
   getDashboardSnapshotV2,
   getDashboardApiKeysUsage,
+  getDashboardApiKeysUsageStats,
   // Error requests
   listMyErrorRequests,
   getMyErrorDetail
