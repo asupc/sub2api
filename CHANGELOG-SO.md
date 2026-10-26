@@ -100,6 +100,29 @@
   - **基准推进**：PORTER-BASE qoder 行 → `4e46ccd9…`、trae 行 → `a1711fdc…`（workbuddy 不变）。
   - **与上游合并影响**：不涉及 sub2api-upstream-sync 的 UPSTREAM-BASE；改动全部位于二开文件与测试。
 
+- **2026-10-26（当前基准）**：
+  - **来源**：workbuddy2api-panel `6b31db6..73a7560`（59 提交；**上游 2026-10-21 声明停止维护**——官方收紧非官方客户端识别，反代存活周期不可控，后续协议跟进需自行评估风险）；qoder2api-hub `4e46ccd..0426c33`（25 提交，v1.7.2→v1.7.6）；trae-workbuddy-switch `a1711fd..1707fae`（35 提交）。注：workbuddy2api-panel 已移出 sub2api 工作区至 `/vol2/1000/code/workbuddy2api-panel/original/`，git 克隆在其 original/ 子目录。
+  - **已移植（workbuddy）**：
+    - 错误分类分流（`7a8b7a7`+`d809396`）：11-128 通道拒绝（KindChannelRefused，不罚号换号）与 11140 账号限制（IsAccountRestricted code+文案双条件，置 wb_restricted 停调度）按业务码分流——同文案 "request illegal" 语义相反，旧裸文案判定会误伤；11158 模型权限（`6ee5491`）归 (账号,模型) 级锁（SetModelRateLimit 24h）；6021 queue.full（`f14f374`）归渠道级繁忙（KindUpstreamBusy，不罚号不轮转、合成 503，修全池误冷却）。
+    - refresh 单飞（`3c4eb88`）：`refreshAccountCredentials` 按 UID singleflight + 12153 自救（重读 DB 采纳他处 rotate 的新 RT 重试一次），防 RT 反重放撞并发刷新整链作废掉登录。
+    - 出站体双防御：reasoning_text/reasoning 片段剔除（`dea68c4`，Codex 经 Responses→chat 转换透传思考片段，上游 content 白名单不含，400 code=11101）+ 会话头三元组恒发（`7a8b7a7` 头部——**推翻 10-22 跳过裁定**：国际端点收紧后缺 X-Conversation-ID 直接 400/11-128 conversation id missing，前提已变）。
+    - 任务补领清扫（`162762f`）：`RunTaskSweep` 周期幂等 accept 未接单 + claim 已达标未领（progress 口径 Claimable，不跑行为链路），ops 新任务 growth_sweep（4h），治积分卡住。
+    - 补偿先查后领（`d48b715`）：`GetCompensationStatus`+`Pending()` 三与门，ops 新任务 compensation（6h，IncludeDisabled），领取失败显形返回错误。
+    - 联网搜索（`58caff1`+`4f31005`）：`pkg/workbuddy/search.go` 上游客户端（POST {chatBase}/agenttool/v1/search，扁平响应不套信封）+ `POST /v1/search/messages` Anthropic 兼容壳（web_search 工具校验/query 提取剥前缀/web_search_tool_result 响应），走 workbuddy 账号池选号轮转 + 复用 applyWorkbuddyUpstreamErrorKind 处置。
+    - 企业切换会话门控（`9282779`）：`IsEnterpriseSession()`（JWT token_source=enterprise_switch，不缓存），行为类任务（travel/activity/blackcat/growth）`behaviorEligibleCredentials` 跳过，签到不动。
+    - cn.chat_base 可配（`7fcc20a`）：`WB_CN_CHAT_BASE` 环境变量覆盖 CN chat 域（官方桌面已迁 workbuddy.cn，copilot.tencent.com 部分海外出口 TLS 复位）。
+    - /v1/messages 图片默认丢弃留痕（trae 仓 `76a97c0`）：WB/Trae 出站剔除 image parts 并在 user 文本写明「已移除 N 张图片」（`SO_ANTHROPIC_FORWARD_IMAGES=1` 打开转发），纯图片消息用提示顶替 content；Qoder 侧 `flattenContentParts` 图片归一化保留 detail 档位（丢了等于偷偷掉画质）。
+  - **已移植（qoder）**：
+    - max_tokens 出站钳制+上限学习（`0426c33` #101）：从 `Range of max_tokens should be [1, N]` 学 (区域,模型) 输出上限（进程内缓存 7 天 TTL，不落盘——容器无落盘约定），出站组装钳制（超限→上限、0/负→1）；`/v1/models` 补 max_output_tokens；模板默认值 32768 也参与钳制（刻意偏离源：否则学到低于 32768 上限后模板默认值把请求打成 400）。
+    - intl 活动平台第二入口（`c5a2ab0`）：`OpenAPICandidates` 候选链（env 主基址→center.qoder.sh→openapi.{domain}→website，仅 intl 加 center），`doJSONOpenAPI` 仅连接失败/404/405/410 换基址 + 404 免探缓存 6h。
+    - 官方积分消耗（`c5a2ab0`）：`FetchCreditUsage`（credits-summary/heatmap，账号级 5min TTL），接进 ProbeQoderQuota 快照（total/peak/peak_date/unit + 近 30 天 daily）。
+    - 前缀会话亲和（`9119ef6`）：`pkg/qoder/session_affinity.go`（AffinityStore + 内存 LRU/TTL + RESP2 Redis，键=作用域 HMAC+消息流累积 HMAC，值=随机 UUID），opt-in（`QD_SESSION_CACHE=off/memory/redis`），接线在 body["session_id"] 定稿处。hash_secret 走 `QD_SESSION_HASH_SECRET`（多进程 Redis 必配）。
+  - **评估未移植（原因）**：workbuddy models.hidden 黑名单（so 有 model_mapping 白名单等价）；裸模型名跨域回退（so 按账号路由无该池语义）；软冷却 reason 透出/6004 双时钟/到期快照口径（so 有自身限流展示体系，相关"积分到期取最早"10-22 已裁定不移植）；缓存告警对称反推（so 无缓存告警）；按地区轮询/DNS 指定/ProxyFromEnvironment/手机端/账号备注/积分历史（so 自有调度与 Docker 部署形态）；qoder #100 RateLimited 收尾 AttributeError（Python 异常族缺陷，Go 天然免疫）；排队可见/快速失败（so 是池化冷却换号语义，优于流内干等）；企业判定+面板徽标（so 已有 Shared* 判定基础与自身 UI）；看板轮询动画/.hint 类名/导入死代码/启动停止脚本（面板与部署脚本不适用）；trae /v1/responses（so 经 Responses→CC 桥已有等价，三入站全通）；模型限流探测联动（10-16 已评估，so 有自身限流体系）；runtime_log/macOS 钥匙串/免责确认/「计入网关」语义表（桌面端专属）；trae 1635f0a macOS 钥匙串区域服务名（桌面登录态导入，so 即服务器 OAuth 流）。
+  - **改动文件**：`pkg/workbuddy/{errors,headers,client,auth,tasks}.go`、`pkg/workbuddy/search.go`（新增）及测试；`service/{openai_gateway_workbuddy,workbuddy_oauth_service,workbuddy_ops_service}.go` 及测试、`service/{workbuddy_search_service,openai_gateway_messages_images}.go`（新增）；`pkg/qoder/{baseprompt,models,realms,accounts}.go`、`pkg/qoder/{maxout,session_affinity}.go`（新增）及测试；`service/{openai_gateway_qoder,qoder_oauth_service}.go`、`handler/gateway_handler.go`（models 列表透出 max_output_tokens）；`handler/{endpoint,gateway_workbuddy_search}.go`（新增/接线）、`handler/gateway_handler.go`、`server/routes/gateway.go`（/v1/search/messages 路由）；`service/openai_gateway_messages_chat_fallback.go`（图片丢弃接线）。
+  - **验证**：`go build ./...` 全绿；`go vet -tags=unit ./internal/...` 通过；pkg/workbuddy、pkg/qoder 单测全绿；三平台相关 service/handler 测试全绿；service 全量 5 个失败与 10-23 已知存量基线完全一致（Gemini thinking variant / 复合分组族 / antigravity / openai_compat），无新增失败。
+  - **基准推进**：PORTER-BASE 三行 → workbuddy `73a7560e…`、qoder `0426c334…`、trae `1707fae1…`。
+  - **与上游合并影响**：不涉及 UPSTREAM-BASE；`handler/gateway_handler.go`、`server/routes/gateway.go` 为上游同名文件（下次同步保留 qoder models 字段透出与 /v1/search/messages 路由），其余为二开文件。
+
 ## 变更时间线
 
 ### 2026-09
