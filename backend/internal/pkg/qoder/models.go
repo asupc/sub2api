@@ -49,6 +49,10 @@ type CatalogEntry struct {
 	IsVL           bool            `json:"is_vl"`
 	IsReasoning    bool            `json:"is_reasoning"`
 	Thinking       *ThinkingConfig `json:"thinking_config"`
+	// MaxOutputTokens 输出上限（issue #101）：官方 catalog 通常没有此字段，
+	// 仅动态接口偶发带 maxOutputTokens / max_output_tokens 时才有值；0 = 未知，
+	// 不得猜默认值（已知才钳制，见 maxout.go）。
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 	// IsFree / 峰谷价（官方 promotion）：运营展示用元数据，不参与网关计费
 	//（so 计费走自身价目表）。动态目录刷新时覆盖，静态快照缺省。
 	IsFree            *bool    `json:"is_free,omitempty"`
@@ -75,6 +79,29 @@ func (e CatalogEntry) PublicID() string {
 		return name
 	}
 	return e.Key
+}
+
+// EffectiveMaxOutputTokens 该条目对外声明的输出上限（issue #101）：catalog 自带
+// 或已学到的；未知返回 0——不猜、不输出（源 max_output_limit 语义：已知才报）。
+func (e CatalogEntry) EffectiveMaxOutputTokens(realm string) int {
+	if e.MaxOutputTokens > 0 {
+		return e.MaxOutputTokens
+	}
+	return MaxOutputLimit(e.Key, realm)
+}
+
+// ModelEntryOutputFields /v1/models 条目补充字段（issue #101，源 model_entry
+// L3003-3010）：已知输出上限时输出 max_output_tokens 与 max_completion_tokens
+// （客户端两个字段名都认）；未学到则不返回该字段，不猜默认值。
+func ModelEntryOutputFields(model, realm string) map[string]any {
+	limit := MaxOutputLimit(model, realm)
+	if limit <= 0 {
+		return nil
+	}
+	return map[string]any{
+		"max_output_tokens":     limit,
+		"max_completion_tokens": limit,
+	}
 }
 
 // nonChatFilters chat 场景过滤（qoder_proxy.py L1750-1752）。
@@ -524,6 +551,12 @@ type dynamicEntryFields struct {
 	Thinking       *ThinkingConfig `json:"thinking_config"`
 	IsFree         *bool           `json:"is_free"`
 	PriceFactor    *float64        `json:"price_factor"`
+	// MaxOutputTokens 动态接口偶发的输出上限（issue #101，三种拼写兼容）。
+	MaxOutputTokens *int `json:"max_output_tokens"`
+	// MaxOutputTokensCamel 官方 camelCase 拼写（maxOutputTokens）。
+	MaxOutputTokensCamel *int `json:"maxOutputTokens"`
+	// MaxOutput 源兼容的第三种拼写（max_output）。
+	MaxOutput *int `json:"max_output"`
 	// OriginalPriceFactor 峰值回落口径之一（promotion 缺失时）。
 	OriginalPriceFactor *float64         `json:"original_price_factor"`
 	Promotion           *promotionFields `json:"promotion"`
@@ -630,6 +663,14 @@ func overlayEntry(base CatalogEntry, raw map[string]any) CatalogEntry {
 	}
 	if f.MaxInputTokens != nil {
 		out.MaxInputTokens = *f.MaxInputTokens
+	}
+	// 输出上限（issue #101）：动态接口三种拼写取第一个有值的（max_output_tokens /
+	// maxOutputTokens / max_output），对齐源 catalog_meta_for 的取值顺序。
+	for _, v := range []*int{f.MaxOutputTokens, f.MaxOutputTokensCamel, f.MaxOutput} {
+		if v != nil && *v > 0 {
+			out.MaxOutputTokens = *v
+			break
+		}
 	}
 	if f.IsVL != nil {
 		out.IsVL = *f.IsVL

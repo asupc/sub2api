@@ -135,3 +135,80 @@ func TestEndpointConstants(t *testing.T) {
 		t.Fatal("machine os/hostname resolver must be non-empty on this host")
 	}
 }
+
+// OpenAPICandidates 候选顺序与 intl 专属 center.qoder.sh（源 openapi_candidates）。
+func TestOpenAPICandidates(t *testing.T) {
+	// intl：主基址 -> center.qoder.sh -> openapi.{domain} -> website。
+	intl := OpenAPICandidates("intl")
+	if len(intl) < 3 {
+		t.Fatalf("intl candidates too few: %v", intl)
+	}
+	if intl[0] != "https://openapi.qoder.sh" {
+		t.Fatalf("intl primary: %v", intl)
+	}
+	center := -1
+	openapiDomain := -1
+	website := -1
+	for i, h := range intl {
+		switch h {
+		case "https://center.qoder.sh":
+			center = i
+		case "https://openapi.qoder.com":
+			openapiDomain = i
+		case "https://qoder.com":
+			website = i
+		}
+	}
+	if center < 0 || openapiDomain < 0 || website < 0 {
+		t.Fatalf("intl missing entries: %v", intl)
+	}
+	// center 必须排在官网域名之前（issue: 回退候选）。
+	if center > openapiDomain || center > website {
+		t.Fatalf("center.qoder.sh must precede website: %v", intl)
+	}
+
+	// cn：无 center.qoder.sh（实测 401，故仅 intl）。
+	cn := OpenAPICandidates("cn")
+	for _, h := range cn {
+		if h == "https://center.qoder.sh" {
+			t.Fatalf("cn must not include center.qoder.sh: %v", cn)
+		}
+	}
+	if cn[0] != "https://openapi.qoder.com.cn" {
+		t.Fatalf("cn primary: %v", cn)
+	}
+
+	// env 覆盖主基址（QD_{REALM}_OPENAPI）。
+	t.Setenv("QD_INTL_OPENAPI", "https://proxy.example/")
+	got := OpenAPICandidates("intl")
+	if got[0] != "https://proxy.example" {
+		t.Fatalf("env override: %v", got)
+	}
+	// 去重：主基址与 openapi.{domain} 相同（cn）时不重复。
+	seen := map[string]bool{}
+	for _, h := range cn {
+		if seen[h] {
+			t.Fatalf("duplicate candidate: %v", cn)
+		}
+		seen[h] = true
+	}
+}
+
+// 404 免探缓存：命中后不再探基址，TTL 后重探。
+func TestOpenAPIPathMissingCache(t *testing.T) {
+	resetOpenAPIMissingCache()
+	if OpenAPIPathMissing("intl", "/sash/x") {
+		t.Fatal("should start empty")
+	}
+	markOpenAPIPathMissing("intl", "/sash/x")
+	if !OpenAPIPathMissing("intl", "/sash/x") {
+		t.Fatal("should be marked missing")
+	}
+	if OpenAPIPathMissing("cn", "/sash/x") {
+		t.Fatal("must be realm-scoped")
+	}
+	resetOpenAPIMissingCache()
+	if OpenAPIPathMissing("intl", "/sash/x") {
+		t.Fatal("reset must clear")
+	}
+}

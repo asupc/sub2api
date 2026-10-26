@@ -20,8 +20,18 @@ func withRealm(t *testing.T, name, openapi string) {
 	orig := RealmConfigs[name]
 	cfgCopy := *orig
 	cfgCopy.OpenAPI = openapi
+	// 裁掉真实域名候选：doJSONOpenAPI 在主基址 404/连接失败时会换下一个基址，
+	// 测试里若留下官网域名就会打出真实网络请求。只保留注入的测试基址。
+	cfgCopy.Domain = ""
+	cfgCopy.Website = ""
 	RealmConfigs[name] = &cfgCopy
-	t.Cleanup(func() { RealmConfigs[name] = orig })
+	// 换基址即换宿主：清掉上个用例记下的 404 缓存，避免测试间互相污染
+	// （doJSONOpenAPI 的 (realm,path) 免探缓存是进程级的）。
+	resetOpenAPIMissingCache()
+	t.Cleanup(func() {
+		RealmConfigs[name] = orig
+		resetOpenAPIMissingCache()
+	})
 }
 
 func TestMakePKCE(t *testing.T) {

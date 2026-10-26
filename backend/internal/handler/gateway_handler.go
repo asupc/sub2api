@@ -23,6 +23,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/qoder"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/typesafe"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -1345,6 +1346,25 @@ func writeModelsList(c *gin.Context, platform string, modelIDs []string) {
 	}
 	if platform == service.PlatformGrok {
 		writeGrokModelsList(c, modelIDs)
+		return
+	}
+	// qoder：条目补 max_output_tokens（issue #101，学到该模型上游输出上限时才输出；
+	// 未学到不猜、不带该字段）。字段集保持 claude.Model 形态再加两个别名字段。
+	if platform == service.PlatformQoder {
+		models := make([]map[string]any, 0, len(modelIDs))
+		for _, modelID := range modelIDs {
+			item := map[string]any{
+				"id":           modelID,
+				"type":         "model",
+				"display_name": modelID,
+				"created_at":   "2024-01-01T00:00:00Z",
+			}
+			for k, v := range qoder.ModelEntryOutputFields(modelID, "") {
+				item[k] = v
+			}
+			models = append(models, item)
+		}
+		writeModelsListResponse(c, models)
 		return
 	}
 	models := make([]claude.Model, 0, len(modelIDs))

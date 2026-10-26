@@ -288,7 +288,7 @@ func (s *OpenAIGatewayService) wrapQoderChatResponse(ctx context.Context, accoun
 		// 输出压到首帧内容之后；慢上游时探测至多等到首个心跳帧（15s）。
 		firstFrame, firstErr := it.Next()
 		if firstErr != nil {
-			code, detail := qoderStreamErrorInfo(firstErr)
+			code, detail := qoderLearnStreamError(account, model, firstErr)
 			s.applyQoderUpstreamFailurePolicy(ctx, account, code, detail)
 			status := classifyQoderUpstreamFailure(code, detail)
 			errBody, _ := json.Marshal(qoderClientErrorPayload(code, detail))
@@ -334,7 +334,7 @@ func (s *OpenAIGatewayService) wrapQoderChatResponse(ctx context.Context, accoun
 				}
 			}
 			if streamErr != nil {
-				code, detail := qoderStreamErrorInfo(streamErr)
+				code, detail := qoderLearnStreamError(account, model, streamErr)
 				s.applyQoderUpstreamFailurePolicy(ctx, account, code, detail)
 				frame, _ := json.Marshal(qoderClientErrorPayload(code, detail))
 				_, _ = pipeWriter.Write([]byte("data: " + string(frame) + "\n\n"))
@@ -352,7 +352,7 @@ func (s *OpenAIGatewayService) wrapQoderChatResponse(ctx context.Context, accoun
 	agg, aggErr := qoder.AggregateStream(resp.Body, model, usage, allowed)
 	_ = resp.Body.Close()
 	if aggErr != nil {
-		code, detail := qoderStreamErrorInfo(aggErr)
+		code, detail := qoderLearnStreamError(account, model, aggErr)
 		s.applyQoderUpstreamFailurePolicy(ctx, account, code, detail)
 		status := classifyQoderUpstreamFailure(code, detail)
 		errBody, _ := json.Marshal(qoderClientErrorPayload(code, detail))
@@ -451,6 +451,14 @@ func qoderStreamErrorInfo(err error) (int, string) {
 		return se.IntStatus(), se.Detail
 	}
 	return http.StatusBadGateway, err.Error()
+}
+
+// qoderLearnStreamError 从流内错误文本学 max_tokens 输出上限（issue #101，
+// 源 record_error 的学习钩子语义）并返回 (code, detail)。学习失败不影响错误处置。
+func qoderLearnStreamError(account *Account, model string, err error) (int, string) {
+	code, detail := qoderStreamErrorInfo(err)
+	qoder.LearnMaxOutputLimit(detail, model, qoderAccountRealm(account))
+	return code, detail
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +601,9 @@ func (s *OpenAIGatewayService) handleQoderUpstreamError(
 ) (bool, *UpstreamFailoverError) {
 	code := resp.StatusCode
 	detail := string(respBody)
+	// issue #101：从上游 400 文本学输出上限（下一次请求直接 clamp）。接在
+	// 错误文本可得的单点上（源 record_error 的学习钩子语义），学到不落盘。
+	qoder.LearnMaxOutputLimit(detail, upstreamModel, qoderAccountRealm(account))
 
 	appendFailover := func(kindLabel string) {
 		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{

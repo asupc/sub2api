@@ -701,3 +701,252 @@ func TestCampaignsMinimalFallbackDisabled(t *testing.T) {
 		t.Fatalf("fallback must be disabled, calls=%d show=%v", calls, st.ShowCampaign)
 	}
 }
+
+// doJSONOpenAPI：连接失败/404 才换基址，业务 4xx 不换。
+func TestDoJSONOpenAPIFallbackSemantics(t *testing.T) {
+	resetOpenAPIMissingCache()
+	// 主基址 404，候选基址 200：应切到候选并返回成功。
+	var hitPrimary, hitFallback bool
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPrimary = true
+		w.WriteHeader(404)
+	}))
+	defer primary.Close()
+	fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitFallback = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer fallback.Close()
+
+	// 候选顺序 = env QD_CN_OPENAPI -> cfg.OpenAPI：两个都指向测试服务器。
+	t.Setenv("QD_CN_OPENAPI", primary.URL)
+	cfg := RealmConfigs["cn"]
+	orig := *cfg
+	trimmed := orig
+	trimmed.OpenAPI = fallback.URL
+	trimmed.Domain = ""
+	trimmed.Website = ""
+	RealmConfigs["cn"] = &trimmed
+	t.Cleanup(func() { RealmConfigs["cn"] = &orig })
+	resetOpenAPIMissingCache()
+
+	client := NewClient(nil)
+	var out map[string]any
+	// fallback=false：只探主基址（env 那个），404 直接返回、不换基址。
+	err := client.doJSONOpenAPI(context.Background(), "cn", "/sash/test404",
+		http.MethodGet, nil, http.Header{}, &out, false)
+	if err == nil {
+		t.Fatal("expected 404 error")
+	}
+	if se, ok := err.(*StatusError); !ok || se.Code != 404 {
+		t.Fatalf("want StatusError 404, got %v", err)
+	}
+	if !hitPrimary || hitFallback {
+		t.Fatalf("fallback=false must only probe primary: primary=%v fallback=%v",
+			hitPrimary, hitFallback)
+	}
+
+	// fallback=true：主基址 404 → 换下一个候选 → 成功。
+	hitPrimary, hitFallback = false, false
+	resetOpenAPIMissingCache()
+	if err := client.doJSONOpenAPI(context.Background(), "cn", "/sash/test404b",
+		http.MethodGet, nil, http.Header{}, &out, true); err != nil {
+		t.Fatalf("should fall through to second candidate: %v", err)
+	}
+	if !hitPrimary || !hitFallback {
+		t.Fatalf("fallback=true must try both: primary=%v fallback=%v",
+			hitPrimary, hitFallback)
+	}
+
+	// 业务 4xx（401）：不换基址，直接返回。
+	hitPrimary, hitFallback = false, false
+	primary2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitPrimary = true
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"error":"denied"}`))
+	}))
+	defer primary2.Close()
+	// 只留一个候选，确保「不换基址」可观测（第二个候选根本不该被打）。
+	t.Setenv("QD_CN_OPENAPI", primary2.URL)
+	trimmed2 := orig
+	trimmed2.OpenAPI = primary2.URL
+	trimmed2.Domain = ""
+	trimmed2.Website = ""
+	RealmConfigs["cn"] = &trimmed2
+	resetOpenAPIMissingCache()
+	err = client.doJSONOpenAPI(context.Background(), "cn", "/sash/test401",
+		http.MethodGet, nil, http.Header{}, &out, true)
+	if err == nil {
+		t.Fatal("expected 401 error")
+	}
+	if se, ok := err.(*StatusError); !ok || se.Code != 401 {
+		t.Fatalf("want StatusError 401, got %v", err)
+	}
+	if !hitPrimary || hitFallback {
+		t.Fatalf("401 must not switch base: primary=%v fallback=%v",
+			hitPrimary, hitFallback)
+	}
+	// 401 不该被记为 404 缓存。
+	if OpenAPIPathMissing("cn", "/sash/test401") {
+		t.Fatal("401 must not mark path missing")
+	}
+}
+
+// doJSONOpenAPI 404 两次（≥2 个候选）后记入免探缓存。
+func TestDoJSONOpenAPI404Cache(t *testing.T) {
+	resetOpenAPIMissingCache()
+	var calls int
+	handler := func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(404)
+	}
+	srv1 := httptest.NewServer(http.HandlerFunc(handler))
+	defer srv1.Close()
+	srv2 := httptest.NewServer(http.HandlerFunc(handler))
+	defer srv2.Close()
+	// 两个候选都 404：tried>=2 时标记 missing。
+	t.Setenv("QD_CN_OPENAPI", srv1.URL)
+	cfg := RealmConfigs["cn"]
+	orig := *cfg
+	trimmed := orig
+	trimmed.OpenAPI = srv2.URL
+	trimmed.Domain = ""
+	trimmed.Website = ""
+	RealmConfigs["cn"] = &trimmed
+	t.Cleanup(func() { RealmConfigs["cn"] = &orig })
+	resetOpenAPIMissingCache()
+
+	client := NewClient(nil)
+	for i := 0; i < 3; i++ {
+		_ = client.doJSONOpenAPI(context.Background(), "cn", "/sash/missing",
+			http.MethodGet, nil, http.Header{}, nil, true)
+	}
+	// 第一次两个基址都探过（calls=2）并标记 missing；之后调用不再打服务器。
+	if calls != 2 {
+		t.Fatalf("first probe should hit both candidates once, got %d", calls)
+	}
+	if !OpenAPIPathMissing("cn", "/sash/missing") {
+		t.Fatal("path should be marked missing")
+	}
+	before := calls
+	_ = client.doJSONOpenAPI(context.Background(), "cn", "/sash/missing",
+		http.MethodGet, nil, http.Header{}, nil, true)
+	if calls != before {
+		t.Fatalf("cached 404 still probed: %d -> %d", before, calls)
+	}
+}
+
+// FetchCreditUsage：summary+heatmap 解析、TTL 缓存、失败路径。
+func TestFetchCreditUsage(t *testing.T) {
+	resetCreditUsageCache()
+	t.Cleanup(resetCreditUsageCache)
+	var heatCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case PathCreditsSummary:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"totalCredits": 1234.5, "peakCredits": 200, "peakDate": "2026-10-01",
+				"unit": "credits"})
+		case PathCreditsHeatmap:
+			heatCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []any{
+					map[string]any{"date": "2026-10-01", "value": 10},
+					map[string]any{"date": "2026-10-02", "value": 20},
+					map[string]any{"date": "2026-10-03", "value": 30},
+				}})
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	cfg := RealmConfigs["cn"]
+	orig := *cfg
+	trimmed := orig
+	trimmed.OpenAPI = srv.URL
+	trimmed.Domain = ""
+	trimmed.Website = ""
+	RealmConfigs["cn"] = &trimmed
+	t.Cleanup(func() { RealmConfigs["cn"] = &orig })
+	resetOpenAPIMissingCache()
+
+	client := NewClient(nil)
+	creds := Credentials{AccessToken: "dt", Realm: "cn", UID: "u1"}
+	usage, err := client.FetchCreditUsage(context.Background(), creds, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Total != 1234.5 || usage.Peak != 200 || usage.PeakDate != "2026-10-01" ||
+		usage.Unit != "credits" || len(usage.Daily) != 3 {
+		t.Fatalf("usage: %+v", usage)
+	}
+	if heatCalls != 1 {
+		t.Fatalf("heatmap calls = %d", heatCalls)
+	}
+	// TTL 内二次调用走缓存（heatmap 不再请求）。
+	if _, err := client.FetchCreditUsage(context.Background(), creds, 0); err != nil {
+		t.Fatal(err)
+	}
+	if heatCalls != 1 {
+		t.Fatalf("cache miss: heatmap calls = %d", heatCalls)
+	}
+	// days 截断：只保留最近 N 天。
+	resetCreditUsageCache()
+	usage2, err := client.FetchCreditUsage(context.Background(), creds, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage2.Daily) != 2 || usage2.Daily[0].Date != "2026-10-02" {
+		t.Fatalf("days=2 truncation: %+v", usage2.Daily)
+	}
+}
+
+// FetchCreditUsage：summary 失败返回错误；heatmap 失败只丢 daily。
+func TestFetchCreditUsageErrors(t *testing.T) {
+	resetCreditUsageCache()
+	t.Cleanup(resetCreditUsageCache)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == PathCreditsSummary {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"totalCredits": 5, "peakCredits": 1, "peakDate": "d", "unit": "u"})
+			return
+		}
+		w.WriteHeader(500) // heatmap 失败
+	}))
+	defer srv.Close()
+	cfg := RealmConfigs["cn"]
+	orig := *cfg
+	trimmed := orig
+	trimmed.OpenAPI = srv.URL
+	trimmed.Domain = ""
+	trimmed.Website = ""
+	RealmConfigs["cn"] = &trimmed
+	t.Cleanup(func() { RealmConfigs["cn"] = &orig })
+	resetOpenAPIMissingCache()
+
+	client := NewClient(nil)
+	creds := Credentials{AccessToken: "dt", Realm: "cn", UID: "u2"}
+	usage, err := client.FetchCreditUsage(context.Background(), creds, 0)
+	if err != nil {
+		t.Fatalf("heatmap failure must not fail whole fetch: %v", err)
+	}
+	if usage.Total != 5 || len(usage.Daily) != 0 {
+		t.Fatalf("usage: %+v", usage)
+	}
+
+	// summary 失败：返回错误。
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(502)
+	}))
+	defer srv2.Close()
+	trimmed2 := orig
+	trimmed2.OpenAPI = srv2.URL
+	trimmed2.Domain = ""
+	trimmed2.Website = ""
+	RealmConfigs["cn"] = &trimmed2
+	resetOpenAPIMissingCache()
+	resetCreditUsageCache()
+	if _, err := client.FetchCreditUsage(context.Background(), creds, 0); err == nil {
+		t.Fatal("summary failure should surface")
+	}
+}

@@ -328,9 +328,31 @@ func (r *QoderTokenRefresher) Refresh(ctx context.Context, account *Account) (ma
 const (
 	// qoderQuotaExtraKey 额度快照在 extra 中的键。
 	qoderQuotaExtraKey = "qd_quota"
+	// qoderCreditsUsageExtraKey 官方积分消耗快照在 extra 中的键。
+	qoderCreditsUsageExtraKey = "qd_credits_usage"
 	// QoderNoCreditReason 积分耗尽罚号的 error reason（恢复逻辑按它识别）。
 	QoderNoCreditReason = "qd_no_credit"
+	// qoderCreditsUsageDailyDays 快照里保留的逐日消耗天数（源 daily 全量 365
+	// 天，落库控制体积只留最近 30 天）。
+	qoderCreditsUsageDailyDays = 30
 )
+
+// QoderCreditsUsageDay 逐日积分消耗。
+type QoderCreditsUsageDay struct {
+	Date  string  `json:"date"`
+	Value float64 `json:"value"`
+}
+
+// QoderCreditsUsageSnapshot 官方积分消耗快照（extra["qd_credits_usage"] 的形状）。
+// 字段口径对齐源 fetch_credit_usage 的 summary；Daily 只留最近 30 天控制体积。
+type QoderCreditsUsageSnapshot struct {
+	TotalCredits float64                 `json:"total_credits"`
+	PeakCredits  float64                 `json:"peak_credits"`
+	PeakDate     string                  `json:"peak_date,omitempty"`
+	Unit         string                  `json:"unit,omitempty"`
+	Daily        []QoderCreditsUsageDay  `json:"daily,omitempty"`
+	UpdatedAt    string                  `json:"updated_at"`
+}
 
 // QoderQuotaSnapshot 额度快照（extra["qd_quota"] 的形状）。
 type QoderQuotaSnapshot struct {
@@ -348,6 +370,9 @@ type QoderQuotaSnapshot struct {
 	SharedUnlimited  bool   `json:"shared_unlimited,omitempty"`
 	SharedSource     string `json:"shared_source,omitempty"`
 	EffectiveRemain  int    `json:"effective_remain,omitempty"`
+	// CreditsUsage 官方积分消耗（issue: 官方积分消耗）：跟随额度快照一起透出，
+	// admin quota 端点无需新造即可看到。拉取失败为 nil（不影响额度快照）。
+	CreditsUsage     *QoderCreditsUsageSnapshot `json:"credits_usage,omitempty"`
 }
 
 // QueryAccountQuota 查询账号剩余积分：落 extra["qd_quota"] 快照并做 qd_no_credit
@@ -407,11 +432,36 @@ func (s *QoderOAuthService) ProbeQoderQuota(ctx context.Context, account *Accoun
 	if plan, perr := client.UserPlan(ctx, creds); perr == nil && plan != "" {
 		snapshot.Plan = plan
 	}
+	// 官方积分消耗尽力而为（issue: 官方积分消耗；拉取失败不影响额度快照）。
+	// summary + heatmap 走 pkg 侧 5 分钟缓存，ops balance 6h 周期不会打爆上游。
+	if usage, uerr := client.FetchCreditUsage(ctx, creds, qoderCreditsUsageDailyDays); uerr == nil {
+		snapshot.CreditsUsage = &QoderCreditsUsageSnapshot{
+			TotalCredits: usage.Total,
+			PeakCredits:  usage.Peak,
+			PeakDate:     usage.PeakDate,
+			Unit:         usage.Unit,
+			Daily:        toQoderCreditsUsageDays(usage.Daily),
+			UpdatedAt:    time.Now().Format(time.RFC3339),
+		}
+	}
 	return snapshot, nil
 }
 
+// toQoderCreditsUsageDays pkg 侧逐日消耗 → 快照形状。
+func toQoderCreditsUsageDays(in []qoder.CreditDay) []QoderCreditsUsageDay {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]QoderCreditsUsageDay, 0, len(in))
+	for _, d := range in {
+		out = append(out, QoderCreditsUsageDay{Date: d.Date, Value: d.Value})
+	}
+	return out
+}
+
 // writeQoderQuotaExtra 把额度快照写入 extra["qd_quota"] 并持久化（同步内存副本；
-// 存值拷贝而非指针，JSONB 反序列化后断言形状一致）。
+// 存值拷贝而非指针，JSONB 反序列化后断言形状一致）。积分消耗同时按
+// extra["qd_credits_usage"] 独立落一份（任务约定键名，便于单独消费）。
 func writeQoderQuotaExtra(ctx context.Context, repo AccountRepository, account *Account, snapshot *QoderQuotaSnapshot) error {
 	if account == nil || snapshot == nil {
 		return nil
@@ -421,10 +471,16 @@ func writeQoderQuotaExtra(ctx context.Context, repo AccountRepository, account *
 		account.Extra = map[string]any{}
 	}
 	account.Extra[qoderQuotaExtraKey] = value
+	extra := map[string]any{qoderQuotaExtraKey: value}
+	if snapshot.CreditsUsage != nil {
+		usage := *snapshot.CreditsUsage
+		account.Extra[qoderCreditsUsageExtraKey] = usage
+		extra[qoderCreditsUsageExtraKey] = usage
+	}
 	if repo == nil {
 		return nil
 	}
-	return repo.UpdateExtra(ctx, account.ID, map[string]any{qoderQuotaExtraKey: value})
+	return repo.UpdateExtra(ctx, account.ID, extra)
 }
 
 // recoverQoderNoCredit 积分恢复且账号是被 qd_no_credit 罚停的，清除错误状态并

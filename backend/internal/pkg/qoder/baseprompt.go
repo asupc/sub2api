@@ -240,6 +240,36 @@ func partImageURL(p map[string]any) string {
 	return ""
 }
 
+// partImageDetail 取图片精度档位（OpenAI `image_url.detail`，移植自
+// trae-workbuddy-switch 76a97c0 image_detail_of）。两种位置都认：嵌在 image_url
+// 对象里（chat 形态），或与 image_url 平级（Responses 的 input_image 把 detail 放
+// 在 part 顶层）。Anthropic 的 source 形态没有这个字段 ⇒ 空串（不编默认值）。
+// detail 是 OpenAI 的精度档位（low/high/auto），分辨率与 token 消耗都由它决定，
+// 归一化只该改形态、不该顺手摘掉语义字段（丢了等于偷偷掉画质）。
+func partImageDetail(p map[string]any) string {
+	if p == nil {
+		return ""
+	}
+	if d, ok := p["detail"].(string); ok && d != "" {
+		return d
+	}
+	if um, ok := p["image_url"].(map[string]any); ok {
+		if d, ok := um["detail"].(string); ok {
+			return d
+		}
+	}
+	return ""
+}
+
+// imagePartFrom 组装出站 image_url part（url + detail 跟随）。
+func imagePartFrom(url, detail string) map[string]any {
+	img := map[string]any{"url": url}
+	if detail != "" {
+		img["detail"] = detail
+	}
+	return map[string]any{"type": "image_url", "image_url": img}
+}
+
 // flattenContentText 把 OpenAI content（str 或 parts 列表）压成纯文本；
 // 图片另行收集（_flatten_content_text L3248-3275）。
 func flattenContentText(content any) (string, []string) {
@@ -316,10 +346,9 @@ func flattenContentParts(content any) (parts []any, text string, images []string
 					texts = append(texts, t)
 				case ptype == "image_url" || ptype == "image" || ptype == "input_image" || hasKey(p, "image_url"):
 					if us := partImageURL(p); us != "" {
-						out = append(out, map[string]any{
-							"type":      "image_url",
-							"image_url": map[string]any{"url": us},
-						})
+						// detail 跟随（trae-workbuddy-switch 76a97c0）：精度档位
+						// 丢了等于偷偷掉画质，归一化只改形态不摘语义字段。
+						out = append(out, imagePartFrom(us, partImageDetail(p)))
 						imgs = append(imgs, us)
 						hasImage = true
 					}
@@ -965,7 +994,7 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	body["request_id"] = nid
 	body["chat_record_id"] = nid
 	body["request_set_id"] = UUID4()
-	body["session_id"] = UUID4()
+	body["session_id"] = UUID4() // 占位；下方 AssignSessionID 可能按前缀亲和覆写
 	body["stream"] = true
 	body["agent_id"] = "agent_common"
 	aliyunUserType := session.UserType
@@ -1038,8 +1067,24 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 		params = map[string]any{}
 	}
 	maxTokens := firstNonZeroInt(openAIReq["max_tokens"], openAIReq["max_completion_tokens"])
-	if maxTokens > 0 {
-		params["max_tokens"] = maxTokens
+	// issue #101：出站前按已知上游输出上限钳制（学到的或 catalog 带的）。
+	//   - 客户端显式声明（含 0/负值）→ 一律压 1：上游 Range 恒为 [1, N]；
+	//   - max_completion_tokens 经 firstNonZeroInt 折叠后走同一路径；
+	//   - 未声明时沿用模板默认值（模板自带 32768）——已知更低上限时同样要压，
+	//     否则模板默认值会把低上限模型打成 400；
+	//   - 上限未学到时不猜（不预设 131072），区间内原样。
+	eff := maxTokens
+	have := hasMaxTokensRequest(openAIReq)
+	if !have {
+		if v, ok := params["max_tokens"].(float64); ok {
+			eff, have = int64(v), true
+		} else if v, ok := params["max_tokens"].(int); ok {
+			eff, have = int64(v), true
+		}
+	}
+	if have {
+		clamped, _ := ClampMaxTokens(eff, firstNonEmpty(modelKey, model), realm)
+		params["max_tokens"] = clamped
 	}
 	if effort := requestedEffort(openAIReq); effort != "" {
 		if norm, _ := catalogMeta.NormalizeReasoningEffort(effort); norm != "" {
@@ -1074,6 +1119,23 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	setDefault(biz, "type", "agent")
 	setDefault(biz, "stage", "start")
 	body["business"] = biz
+
+	// 前缀会话亲和（opt-in，issue: 前缀会话亲和）：同消息前缀优先复用稳定
+	// session_id，未命中生成并写入；默认关闭时行为不变（每次随机 UUID）。
+	// 放在 tools/parameters/agent_id 定稿之后（源 assign_prefix_session 在
+	// build_qoder_body 之后调用，context 含这三项）；作用域含账号/区域/模型/
+	// 客户端会话与工具参数配置，换号后重新查找该账号自己的映射。
+	AssignSessionID(body, AffinityScope{
+		AccountUID:       session.UID,
+		Realm:            realm,
+		ModelKey:         firstNonEmpty(modelKey, model),
+		ClientSessionKey: extractClientSessionKey(openAIReq),
+		Context: map[string]any{
+			"tools":      body["tools"],
+			"parameters": body["parameters"],
+			"agent_id":   body["agent_id"],
+		},
+	})
 
 	encoded := QoderEncode([]byte(marshalNoEscape(body)))
 	if len(encoded) > maxBodyBytes() {
@@ -1112,6 +1174,46 @@ func firstNonZeroInt(values ...any) int64 {
 		}
 	}
 	return 0
+}
+
+// hasMaxTokensRequest 报告客户端是否显式声明了输出上限（哪怕值为 0/负数）。
+// 与 firstNonZeroInt 配合：折叠取值走 firstNonZeroInt，是否下发 parameters.max_tokens
+// 走本函数——声明了才写（0/负值由 ClampMaxTokens 压到 1），未声明不注入。
+func hasMaxTokensRequest(req map[string]any) bool {
+	for _, k := range []string{"max_tokens", "max_completion_tokens"} {
+		if v, ok := req[k]; ok && v != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// firstNonEmpty 返回第一个非空白字符串（issue #101：clamp 的 model 优先用
+// 解析后的上游 key，缺省回落原始 model 名）。
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// extractClientSessionKey 提取客户端显式会话 ID（源 extract_session_key 的 payload
+// 半边；headers 半边 so 在此层拿不到）：conversation_id / session_id /
+// metadata.conversation_id 任一非空即用，用于前缀会话亲和的作用域隔离。
+func extractClientSessionKey(req map[string]any) string {
+	for _, k := range []string{"conversation_id", "session_id"} {
+		if s, _ := req[k].(string); strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	if meta, _ := req["metadata"].(map[string]any); meta != nil {
+		if s, _ := meta["conversation_id"].(string); strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 func setDefault(m map[string]any, key string, value any) {

@@ -731,3 +731,125 @@ func TestCleanupOrphanToolHistory(t *testing.T) {
 	}
 }
 
+
+// issue #101：出站 parameters.max_tokens 的钳制（超限压上限、0/负值压 1、缺省不注入）。
+func TestBuildAgentChatBodyMaxTokensClamp(t *testing.T) {
+	resetMaxOutLimits(t)
+	sess := mustSession(t)
+	LearnMaxOutputLimit(`Range of max_tokens should be [1, 131072]`, "qmodel_38max", "cn")
+
+	// 超限 → 压到上限。
+	req := map[string]any{
+		"model":      "qwen3.8-max",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": float64(200000),
+	}
+	body := decodeBody(t, mustBuild(t, req, sess, "cn"))
+	params, _ := body["parameters"].(map[string]any)
+	if params["max_tokens"] != float64(131072) {
+		t.Fatalf("clamped max_tokens = %v, want 131072", params["max_tokens"])
+	}
+
+	// 区间内原样。
+	req2 := map[string]any{
+		"model":      "qwen3.8-max",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": float64(256),
+	}
+	body2 := decodeBody(t, mustBuild(t, req2, sess, "cn"))
+	params2, _ := body2["parameters"].(map[string]any)
+	if params2["max_tokens"] != float64(256) {
+		t.Fatalf("passthrough max_tokens = %v", params2["max_tokens"])
+	}
+
+	// 0/负值 → 1（不依赖是否学到上限）。
+	req3 := map[string]any{
+		"model":      "unknown-model-x",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": float64(0),
+	}
+	body3 := decodeBody(t, mustBuild(t, req3, sess, "cn"))
+	params3, _ := body3["parameters"].(map[string]any)
+	if params3["max_tokens"] != float64(1) {
+		t.Fatalf("zero max_tokens = %v, want 1", params3["max_tokens"])
+	}
+
+	// 未声明 → 沿用模板默认值（模板自带 32768）；已知更低上限时同样压。
+	req4 := map[string]any{
+		"model":    "unknown-model-x",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	body4 := decodeBody(t, mustBuild(t, req4, sess, "cn"))
+	params4, _ := body4["parameters"].(map[string]any)
+	if params4["max_tokens"] != float64(32768) {
+		t.Fatalf("absent max_tokens must keep template default 32768, got %v", params4["max_tokens"])
+	}
+	// 模板默认值 32768 也要被学到的更低上限压住（否则模板默认会把低上限模型打成 400）。
+	LearnMaxOutputLimit(`Range of max_tokens should be [1, 1000]`, "unknown-model-x", "cn")
+	body4b := decodeBody(t, mustBuild(t, req4, sess, "cn"))
+	params4b, _ := body4b["parameters"].(map[string]any)
+	if params4b["max_tokens"] != float64(1000) {
+		t.Fatalf("template default must clamp to learned limit, got %v", params4b["max_tokens"])
+	}
+
+	// max_completion_tokens 经 firstNonZeroInt 折叠后走同一路径。
+	req5 := map[string]any{
+		"model":                "qwen3.8-max",
+		"messages":             []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_completion_tokens": float64(200000),
+	}
+	body5 := decodeBody(t, mustBuild(t, req5, sess, "cn"))
+	params5, _ := body5["parameters"].(map[string]any)
+	if params5["max_tokens"] != float64(131072) {
+		t.Fatalf("max_completion_tokens clamp = %v, want 131072", params5["max_tokens"])
+	}
+}
+
+func mustBuild(t *testing.T, req map[string]any, sess *CosySession, realm string) string {
+	t.Helper()
+	encoded, err := BuildAgentChatBody(req, sess, realm)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	return encoded
+}
+
+// 前缀会话亲和：关闭时每次随机（行为不变）；开启时同前缀复用。
+func TestBuildAgentChatBodySessionAffinity(t *testing.T) {
+	sess := mustSession(t)
+	msgs := []any{
+		map[string]any{"role": "system", "content": "sys"},
+		map[string]any{"role": "user", "content": "hello there"},
+	}
+
+	// 默认关闭：同前缀两次 session_id 不同。
+	t.Setenv("QD_SESSION_CACHE", "off")
+	ResetAffinityStoreForTest()
+	t.Cleanup(ResetAffinityStoreForTest)
+	req := map[string]any{"model": "qwen3.8-max", "messages": msgs}
+	body1 := decodeBody(t, mustBuild(t, req, sess, "cn"))
+	body2 := decodeBody(t, mustBuild(t, req, sess, "cn"))
+	if body1["session_id"] == body2["session_id"] {
+		t.Fatalf("disabled cache must randomize session_id: %v", body1["session_id"])
+	}
+
+	// 开启（memory）：同前缀复用稳定 session_id。
+	t.Setenv("QD_SESSION_CACHE", "memory")
+	t.Setenv("QD_SESSION_CACHE_TTL", "3600")
+	ResetAffinityStoreForTest()
+	body3 := decodeBody(t, mustBuild(t, req, sess, "cn"))
+	body4 := decodeBody(t, mustBuild(t, req, sess, "cn"))
+	if body3["session_id"] != body4["session_id"] {
+		t.Fatalf("enabled cache must reuse session_id: %v vs %v",
+			body3["session_id"], body4["session_id"])
+	}
+	if body3["session_id"] == "" {
+		t.Fatal("session_id must not be empty")
+	}
+	// 换模型不共享。
+	reqOther := map[string]any{"model": "kmodel", "messages": msgs}
+	body5 := decodeBody(t, mustBuild(t, reqOther, sess, "cn"))
+	if body5["session_id"] == body3["session_id"] {
+		t.Fatal("different model must not share session")
+	}
+}

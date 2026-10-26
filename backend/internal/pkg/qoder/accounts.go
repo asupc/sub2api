@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -75,6 +77,94 @@ func (c *Client) doJSON(ctx context.Context, method, url string, body []byte,
 		return fmt.Errorf("qoder: decode response: %w", err)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// openapi 基址候选（issue: 国际版签不到到；qoder_accounts.py _openapi_json）
+// ---------------------------------------------------------------------------
+
+// openapiMissingTTL 已知 404 的免探缓存有效期（源 _OPENAPI_404_TTL = 6h）。
+const openapiMissingTTL = 6 * time.Hour
+
+var (
+	openapiMissingMu sync.Mutex
+	openapiMissing   = map[string]time.Time{} // "realm\x00path" -> 判定时刻
+)
+
+func openapiMissingKey(realm, path string) string { return realm + "\x00" + path }
+
+// OpenAPIPathMissing 报告该 (区域, 路径) 是否已被判定为 404（TTL 6h）。
+func OpenAPIPathMissing(realm, path string) bool {
+	openapiMissingMu.Lock()
+	defer openapiMissingMu.Unlock()
+	ts, ok := openapiMissing[openapiMissingKey(realm, path)]
+	return ok && time.Since(ts) < openapiMissingTTL
+}
+
+func markOpenAPIPathMissing(realm, path string) {
+	openapiMissingMu.Lock()
+	defer openapiMissingMu.Unlock()
+	openapiMissing[openapiMissingKey(realm, path)] = time.Now()
+}
+
+// resetOpenAPIMissingCache 清空 404 免探缓存（测试换基址时调用）。
+func resetOpenAPIMissingCache() {
+	openapiMissingMu.Lock()
+	defer openapiMissingMu.Unlock()
+	openapiMissing = map[string]time.Time{}
+}
+
+// doJSONOpenAPI 按区域 openapi 基址候选依次请求（qoder_accounts.py _openapi_json
+// L2423-2465）。仅**连接失败或 404/405/410** 时换下一个基址；业务 4xx
+// （401/403/429）不换——那说明地址是对的，只是这次被拒。
+//
+// 已知 404 的 (区域,路径) 直接返回，不再探任何基址（否则 intl 的缺失端点每次都要
+// 0.x~10s 才失败；TTL 6h 后允许重探，端点上线仍能被发现）。fallback=false 时只探
+// 主基址（legacy 端点在国际版必然 404，多探一个基址就是白等一个 RTT）。
+func (c *Client) doJSONOpenAPI(ctx context.Context, realm, path, method string,
+	body []byte, headers http.Header, out any, fallback bool) error {
+	realm = normalizedRealm(realm)
+	if OpenAPIPathMissing(realm, path) {
+		return &StatusError{Code: http.StatusNotFound,
+			Body: "cached 404 (known missing in " + realm + ")"}
+	}
+	bases := OpenAPICandidates(realm)
+	if !fallback {
+		bases = bases[:1]
+	}
+	var last error = &StatusError{Code: 0, Body: "no openapi candidate"}
+	tried := 0
+	for _, base := range bases {
+		tried++
+		err := c.doJSON(ctx, method, base+path, body, headers, out)
+		if err == nil {
+			return nil
+		}
+		last = err
+		var se *StatusError
+		if errors.As(err, &se) {
+			if se.Code == http.StatusNotFound || se.Code == http.StatusMethodNotAllowed ||
+				se.Code == http.StatusGone {
+				// 首个基址 404：再试一个候选；第二个仍 404 即判定该路径本区域缺失。
+				if tried >= 2 {
+					markOpenAPIPathMissing(realm, path)
+					return last
+				}
+				continue
+			}
+			return last // 业务错误：地址是对的，不换基址
+		}
+		continue // 连接层失败（DNS/TCP/TLS/超时）：换下一个基址
+	}
+	return last
+}
+
+// normalizedRealm 与 Credentials.NormalizedRealm 同口径（未知/空回落 cn）。
+func normalizedRealm(realm string) string {
+	if ValidRealm(realm) {
+		return realm
+	}
+	return "cn"
 }
 
 // ---------------------------------------------------------------------------
@@ -552,8 +642,12 @@ type CheckinStatusResult struct {
 }
 
 // CheckinStatus 查询每日签到状态。
+//
+// issue: 国际版签不到到 —— 基址走候选（openapi.qoder.sh 在部分网络不可达），
+// 只在连接失败 / 404 时换下一个，业务 4xx 不换。fallback=false：该端点是
+// legacy（国际版必然 404），多探一个基址就是白等一个 RTT（源 _openapi_json）。
 func (c *Client) CheckinStatus(ctx context.Context, creds Credentials) (*CheckinStatusResult, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	realm := creds.NormalizedRealm()
 	var q struct {
 		Status             string `json:"status"`
 		CurrentStreakDays  int    `json:"currentStreakDays"`
@@ -564,11 +658,13 @@ func (c *Client) CheckinStatus(ctx context.Context, creds Credentials) (*Checkin
 		LastClaimedAt      int64  `json:"lastClaimedAt"`
 		RewardExpiresAt    int64  `json:"rewardExpiresAt"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, cfg.OpenAPI+PathCheckinStatus, nil,
-		creds.OpenAPIHeaders(), &q)
+	err := c.doJSONOpenAPI(ctx, realm, PathCheckinStatus, http.MethodGet, nil,
+		creds.OpenAPIHeaders(), &q, false)
 	if err != nil {
 		if se, ok := err.(*StatusError); ok &&
 			(se.Code == 404 || se.Code == 405 || se.Code == 410) {
+			// 本区域无此端点：记 404 缓存（TTL 6h 后允许重探，端点上线仍能被发现）。
+			markOpenAPIPathMissing(realm, PathCheckinStatus)
 			return nil, ErrCheckinUnavailable
 		}
 		return nil, err
@@ -618,15 +714,15 @@ func (c *Client) Checkin(ctx context.Context, creds Credentials) (*CheckinResult
 		// 不发起无意义的 claim，按"活动未开放"成功跳过。
 		return &CheckinResult{OK: true, Message: fmt.Sprintf("官方签到活动未开放 (status=%s)", st.Status)}, nil
 	}
-	cfg := Realm(creds.NormalizedRealm())
 	var res struct {
 		Success       *bool  `json:"success"`
 		Error         string `json:"error"`
 		RewardCredits int    `json:"rewardCredits"`
 		Result        string `json:"result"`
 	}
-	err = c.doJSON(ctx, http.MethodPost, cfg.OpenAPI+PathCheckinClaim, []byte("{}"),
-		creds.OpenAPIHeaders(), &res)
+	// 同上：基址走候选（fallback=false，legacy 端点只探主基址）。
+	err = c.doJSONOpenAPI(ctx, creds.NormalizedRealm(), PathCheckinClaim, http.MethodPost,
+		[]byte("{}"), creds.OpenAPIHeaders(), &res, false)
 	if err != nil {
 		if se, ok := err.(*StatusError); ok {
 			if se.Code == 409 || strings.Contains(se.Body, "ALREADY_CLAIMED") {
@@ -744,15 +840,16 @@ type campaignsPayload struct {
 // 被服务端拒绝（showCampaign=false）时清种子换新身份重试一次（campaigns
 // L2064-2072 的自愈：同种子下组件只会返回同一个被拒身份，不换种子自愈空转）。
 func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsStatus, error) {
-	cfg := Realm(creds.NormalizedRealm())
-	url := cfg.OpenAPI + PathCampaigns
+	realm := creds.NormalizedRealm()
 	headers, source := creds.DesktopHeadersIdentity()
 	var raw json.RawMessage
-	err := c.doJSON(ctx, http.MethodGet, url, nil, headers, &raw)
+	// 基址走候选（源 _campaigns_get -> _openapi_json：仅连接失败/404 换下一个）。
+	err := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil, headers, &raw, true)
 	if err != nil {
 		// 桌面端头被拒（401/403）时回退普通头，至少保留"能不能看到"的信息
 		if se, ok := err.(*StatusError); ok && (se.Code == 401 || se.Code == 403) {
-			err = c.doJSON(ctx, http.MethodGet, url, nil, creds.OpenAPIHeaders(), &raw)
+			err = c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil,
+				creds.OpenAPIHeaders(), &raw, true)
 		}
 	}
 	if err != nil {
@@ -772,8 +869,8 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 	// 可关。属于「让列表回来」的最小代价。
 	if !q.ShowCampaign && source == MachineIdentityOmitted && !machineMinimalDisabled() {
 		var retryRaw json.RawMessage
-		if rerr := c.doJSON(ctx, http.MethodGet, url, nil,
-			creds.desktopHeadersMinimal(), &retryRaw); rerr == nil {
+		if rerr := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil,
+			creds.desktopHeadersMinimal(), &retryRaw, true); rerr == nil {
 			var rq campaignsPayload
 			if jerr := json.Unmarshal(retryRaw, &rq); jerr == nil && rq.ShowCampaign {
 				raw = retryRaw
@@ -784,11 +881,10 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 	// 身份被拒自愈：原生身份 + showCampaign=false（服务端不认当前身份）→
 	// 清组件种子强制换新身份重试一次；重试仍不认则如实返回（等下次再试）。
 	if !q.ShowCampaign && source == MachineIdentityNative {
-		realm := creds.NormalizedRealm()
 		if ident := RefreshNativeIdentity(realm, creds.UID); ident.valid() {
 			var retryRaw json.RawMessage
-			if rerr := c.doJSON(ctx, http.MethodGet, url, nil,
-				creds.desktopHeadersWithIdentity(ident), &retryRaw); rerr == nil {
+			if rerr := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil,
+				creds.desktopHeadersWithIdentity(ident), &retryRaw, true); rerr == nil {
 				var rq campaignsPayload
 				if jerr := json.Unmarshal(retryRaw, &rq); jerr == nil && rq.ShowCampaign {
 					raw = retryRaw
@@ -1296,4 +1392,121 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 官方积分消耗（credits-summary / credits-heatmap，issue: 官方积分消耗）
+// ---------------------------------------------------------------------------
+
+// creditUsageTTL 积分消耗缓存有效期（源 CREDIT_USAGE_TTL = 300s：该接口是全量
+// 聚合，别跟着轮询打）。
+const creditUsageTTL = 5 * time.Minute
+
+// CreditDay 逐日积分消耗（heatmap 条目）。
+type CreditDay struct {
+	Date  string  `json:"date"`
+	Value float64 `json:"value"`
+}
+
+// CreditUsage 官方积分消耗（fetch_credit_usage L2351-2396 的返回形状）。
+type CreditUsage struct {
+	// Total 窗口内累计消耗积分（官方口径，不是我们的 token 估算）。
+	Total float64 `json:"total"`
+	// Peak 单日峰值；PeakDate 为对应日期。
+	Peak     float64    `json:"peak"`
+	PeakDate string     `json:"peak_date"`
+	Unit     string     `json:"unit"`
+	Daily    []CreditDay `json:"daily"`
+}
+
+type creditUsageCacheEntry struct {
+	at  time.Time
+	val CreditUsage
+}
+
+var (
+	creditUsageMu    sync.Mutex
+	creditUsageCache = map[string]creditUsageCacheEntry{} // uid -> 缓存
+)
+
+func creditUsageKey(creds Credentials) string {
+	return creds.NormalizedRealm() + "\x00" + creds.UID
+}
+
+// resetCreditUsageCache 清空积分消耗缓存（测试用）。
+func resetCreditUsageCache() {
+	creditUsageMu.Lock()
+	defer creditUsageMu.Unlock()
+	creditUsageCache = map[string]creditUsageCacheEntry{}
+}
+
+// FetchCreditUsage 官方积分消耗（GET credits-summary + credits-heatmap）。
+//
+// summary 形态 {totalCredits, peakCredits, peakDate, unit}；heatmap 365 天逐日。
+// 结果按账号缓存 5 分钟（CREDIT_USAGE_TTL：全量聚合接口，别跟着轮询打）。
+// summary 拉取失败时返回 ok=false 的错误信息（heatmap 不再请求）；heatmap 失败
+// 只丢弃 daily，summary 仍可用（源 _c2/_e2 被忽略）。
+//
+// days>0 时只保留最近 N 天（源 daily[-days:]）；days<=0 保留全部。
+func (c *Client) FetchCreditUsage(ctx context.Context, creds Credentials, days int) (CreditUsage, error) {
+	key := creditUsageKey(creds)
+	creditUsageMu.Lock()
+	if hit, ok := creditUsageCache[key]; ok && time.Since(hit.at) < creditUsageTTL {
+		creditUsageMu.Unlock()
+		return hit.val, nil
+	}
+	creditUsageMu.Unlock()
+
+	var sum struct {
+		TotalCredits float64 `json:"totalCredits"`
+		PeakCredits  float64 `json:"peakCredits"`
+		PeakDate     string  `json:"peakDate"`
+		Unit         string  `json:"unit"`
+	}
+	err := c.doJSONOpenAPI(ctx, creds.NormalizedRealm(), PathCreditsSummary,
+		http.MethodGet, nil, creds.DesktopHeaders(), &sum, true)
+	if err != nil {
+		// 源语义：summary 失败时整体 ok=false（即便缓存也记，避免反复打全量接口）。
+		out := CreditUsage{Unit: "credits"}
+		creditUsageMu.Lock()
+		creditUsageCache[key] = creditUsageCacheEntry{at: time.Now(), val: out}
+		creditUsageMu.Unlock()
+		return out, err
+	}
+
+	out := CreditUsage{
+		Total:    sum.TotalCredits,
+		Peak:     sum.PeakCredits,
+		PeakDate: sum.PeakDate,
+		Unit:     sum.Unit,
+	}
+	if out.Unit == "" {
+		out.Unit = "credits"
+	}
+	var heat struct {
+		Items []struct {
+			Date  string   `json:"date"`
+			Value *float64 `json:"value"`
+		} `json:"items"`
+	}
+	// heatmap 失败只丢 daily（源 _c2/_e2 被忽略，summary 仍可用）。
+	if herr := c.doJSONOpenAPI(ctx, creds.NormalizedRealm(), PathCreditsHeatmap,
+		http.MethodGet, nil, creds.DesktopHeaders(), &heat, true); herr == nil {
+		out.Daily = make([]CreditDay, 0, len(heat.Items))
+		for _, item := range heat.Items {
+			v := 0.0
+			if item.Value != nil {
+				v = *item.Value
+			}
+			out.Daily = append(out.Daily, CreditDay{Date: item.Date, Value: v})
+		}
+	}
+	if days > 0 && len(out.Daily) > days {
+		out.Daily = out.Daily[len(out.Daily)-days:]
+	}
+
+	creditUsageMu.Lock()
+	creditUsageCache[key] = creditUsageCacheEntry{at: time.Now(), val: out}
+	creditUsageMu.Unlock()
+	return out, nil
 }
