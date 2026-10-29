@@ -311,16 +311,21 @@ const gptMinMaxTokens = 16
 //  3. GPT 系过小 max_tokens 抬到下限 16；
 //  4. stream_options 缺省补 {include_usage:true}（官方 CLI 流式必发，上游据此在
 //     末帧返回 usage；显式带则不覆盖）；
-//  5. tool_choice 归一化（上游该字段是 string，对象形式 400 code=11101）；
-//  6. developer 角色归一为 system（上游 role 白名单不含 developer，命中 400
-//     code=11128）；
-//  7. image_url 字符串形态转对象形态（上游只认 OpenAI 对象形态，字符串 400
+//  5. tool_choice 归一化（上游该字段是 string，对象形式 400 code=11101；
+//     "none" 保留工具声明——删声明会让模型把调用降级成 DSML 文本、Agent 原地
+//     空转，hub v1.5.7 实测保留后走正常 tool_calls 通道更优）；
+//  6. tools/functions 声明规整（tool_schema.go：顶层 name 包装、parameters
+//     Schema 修复，防 400 code=11129）；
+//  7. stop 归一化（单字符串 → 单元素数组，空值删字段，防 400 code=11101）；
+//  8. developer 角色归一为 system（上游 role 白名单不含 developer，命中 400
+//     code=11-128）；
+//  9. image_url 字符串形态转对象形态（上游只认 OpenAI 对象形态，字符串 400
 //     code=11101）；
-//  8. global realm：reasoning_effort 按静态档位表降级（国际版模型多只认 high，
+//  10. global realm：reasoning_effort 按静态档位表降级（国际版模型多只认 high，
 //     发 low/max 是非法参数 400）；
-//  9. 指纹脱敏（sanitize.go：剥离 Claude Code 等客户端的 system prompt 指纹句，
-//     防上游渠道校验 400 code 11128）；
-//  10. 注入 prompt_cache_key（上游前缀缓存命中可降费 ~17x）。
+//  11. 指纹脱敏（sanitize.go：剥离 Claude Code 等客户端的 system prompt 指纹句，
+//     防上游渠道校验 400 code 11-128）；
+//  12. 注入 prompt_cache_key（上游前缀缓存命中可降费 ~17x）。
 //
 // body 不可解析时原样返回（坏 body 不在这里二次错误化，交给上游报真实参数错）。
 func PrepareChatBody(cred Credentials, body []byte, conversationID string) []byte {
@@ -338,6 +343,8 @@ func PrepareChatBody(cred Credentials, body []byte, conversationID string) []byt
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
 	normalizeToolChoice(obj)
+	normalizeTools(obj)
+	normalizeStop(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	if cred.IsGlobal() {
@@ -358,12 +365,14 @@ func PrepareChatBody(cred Credentials, body []byte, conversationID string) []byt
 			obj["messages"] = cleaned
 			msgs = cleaned
 		}
-		// 工具配对清理（源项目 tool_pairing.go 同位，无条件启用）：剔除无配对的
-		// tool_call↔tool 结果与空 function.name 脏条目（上游 400 code 11133/11148
-		// 会顶死整条会话），见 tool_pairing.go。放在脱敏之前——被删条目无需再净化。
-		if cleaned, ch := CleanupOrphanToolCalls(msgs); ch {
-			obj["messages"] = cleaned
-			msgs = cleaned
+		// 工具配对修复（hub build_upstream_body 同序：合并拆条 → 结果归批 → 孤儿
+		// 清理；先合并让 repack 看到完整批次）：相邻 assistant 拆条合并、结果块
+		// 移回所属批次（含插队消息后移，hub #420）、剔除无配对的 tool_call↔tool
+		// 结果与空 function.name 脏条目（上游 400 code 11133/11148 会顶死整条
+		// 会话），见 tool_pairing.go。放在脱敏之前——被删条目无需再净化。
+		if repaired, ch := RepairToolPairing(msgs); ch {
+			obj["messages"] = repaired
+			msgs = repaired
 		}
 		sanitizeMessages(msgs)
 	}
@@ -425,15 +434,15 @@ func clampGPTMinMaxTokens(obj map[string]any) {
 }
 
 // normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice：
-//   - "none" / {"type":"none"} → 删 tool_choice + 删 tools/functions；
+//   - "none" / {"type":"none"} → tool_choice="none"，**保留 tools/functions
+//     声明**（hub v1.5.7：删声明会让模型把调用降级成 DSML/伪 JSON 文本塞进
+//     content，Agent 解析不到调用原地空转、上下文线性膨胀；实测上游并不真正
+//     遵守 tool_choice="none"，保留声明后走正常 tool_calls 通道明显更好。
+//     确实要禁止调用时由客户端不传 tools）；
 //   - {"type":"auto"/"required"} → 字符串 "auto"/"required"；
 //   - {"type":"function","function":{"name":"x"}} → 字符串 "x"；
-//   - 其他对象/非标量 → 删 tool_choice。
+//   - 其他对象/非标量 → 删 tool_choice（tools 保留）。
 func normalizeToolChoice(obj map[string]any) {
-	suppress := func() {
-		delete(obj, "tools")
-		delete(obj, "functions")
-	}
 	tc, present := obj["tool_choice"]
 	if !present {
 		return
@@ -441,16 +450,14 @@ func normalizeToolChoice(obj map[string]any) {
 	switch v := tc.(type) {
 	case string:
 		if strings.EqualFold(strings.TrimSpace(v), "none") {
-			delete(obj, "tool_choice")
-			suppress()
+			obj["tool_choice"] = "none"
 		}
 	case map[string]any:
 		typ, _ := v["type"].(string)
 		typ = strings.ToLower(strings.TrimSpace(typ))
 		switch typ {
 		case "none":
-			delete(obj, "tool_choice")
-			suppress()
+			obj["tool_choice"] = "none"
 		case "auto", "required":
 			obj["tool_choice"] = typ
 		case "function":

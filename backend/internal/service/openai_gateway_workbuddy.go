@@ -105,14 +105,104 @@ func workbuddyEnsureConsoleSystem(body []byte) []byte {
 }
 
 // prepareWorkbuddyForwardBody 出站体归一化：PrepareChatBody（强制 stream / 参数
-// 归一 / prompt_cache_key）+ global 兜底 system。conversationID 留空：CC 漏斗的
-// body 不携带会话标识，cache key 回落按账号 uid 派生（源项目同款回落）。
-func prepareWorkbuddyForwardBody(cred workbuddy.Credentials, body []byte) []byte {
+// 归一 / prompt_cache_key）+ global 兜底 system + max_tokens 缺省兜底。
+// conversationID 留空：CC 漏斗的 body 不携带会话标识，cache key 回落按账号 uid
+// 派生（源项目同款回落）。
+func prepareWorkbuddyForwardBody(cred workbuddy.Credentials, account *Account, body []byte) []byte {
 	prepared := workbuddy.PrepareChatBody(cred, body, "")
 	if cred.IsGlobal() {
 		prepared = workbuddyEnsureConsoleSystem(prepared)
 	}
+	prepared = workbuddyApplyCatalogDefaults(account, prepared)
 	return prepared
+}
+
+// workbuddyApplyCatalogDefaults 按模型目录快照补两处出站缺省（hub #121/#542）：
+// max_tokens 缺省与 reasoning_effort 档位映射。显式值一律不覆盖。
+func workbuddyApplyCatalogDefaults(account *Account, body []byte) []byte {
+	body = workbuddyFillDefaultMaxTokens(account, body)
+	return workbuddyMapReasoningEffort(account, body)
+}
+
+// workbuddyMapReasoningEffort 请求档位不在目录 supported 里时改写为默认档
+// （hub map_reasoning_effort：DefaultReasoningLevel → 首个 supported）。目录
+// canDisableThinking 语义（off/none 回落）依赖上游目录字段，快照没有——保守透传。
+func workbuddyMapReasoningEffort(account *Account, body []byte) []byte {
+	if account == nil || len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	key := ""
+	if _, ok := obj["reasoning_effort"]; ok {
+		key = "reasoning_effort"
+	} else if _, ok := obj["reasoningEffort"]; ok {
+		key = "reasoningEffort"
+	} else {
+		return body
+	}
+	reqStr, ok := obj[key].(string)
+	if !ok || strings.TrimSpace(reqStr) == "" {
+		return body
+	}
+	model, _ := obj["model"].(string)
+	meta, ok := account.GetUpstreamModelMetadata(model)
+	if !ok || len(meta.SupportedReasoningLevels) == 0 {
+		return body
+	}
+	req := strings.ToLower(strings.TrimSpace(reqStr))
+	if req == "none" || req == "off" {
+		return body
+	}
+	for _, lv := range meta.SupportedReasoningLevels {
+		if strings.EqualFold(strings.TrimSpace(lv), req) {
+			return body
+		}
+	}
+	replacement := strings.TrimSpace(meta.DefaultReasoningLevel)
+	if replacement == "" {
+		replacement = meta.SupportedReasoningLevels[0]
+	}
+	obj[key] = replacement
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// workbuddyFillDefaultMaxTokens 客户端未显式给输出上限时补目录 maxOutputTokens
+// （hub #121）：Codex Responses 等客户端缺省 max_tokens 时上游按默认 32k 截断长
+// 推理（无正文只 reasoning 的输出被掐）；用模型目录宣告的 maxOutputTokens 兜底。
+// 显式 max_tokens / max_completion_tokens 一律不覆盖（PrepareChatBody 已把别名
+// 翻译为 max_tokens，此处只认最终形态，双检防翻译前置路径差异）。
+func workbuddyFillDefaultMaxTokens(account *Account, body []byte) []byte {
+	if account == nil || len(body) == 0 {
+		return body
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	if _, has := obj["max_tokens"]; has {
+		return body
+	}
+	if _, has := obj["max_completion_tokens"]; has {
+		return body
+	}
+	model, _ := obj["model"].(string)
+	meta, ok := account.GetUpstreamModelMetadata(model)
+	if !ok || meta.MaxOutputTokens <= 0 {
+		return body
+	}
+	obj["max_tokens"] = meta.MaxOutputTokens
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // applyWorkbuddyChatTransport 在 sendCCUpstreamRequest 构建的出站请求上注入
@@ -531,6 +621,15 @@ func (s *OpenAIGatewayService) applyWorkbuddyUpstreamErrorKind(
 		return true, s.newOpenAIAccountFailoverError(account, resp.StatusCode, resp.Header, respBody, upstreamMsg, false, false)
 
 	case kind == workbuddy.KindClient && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden):
+		// hub #440/#691 401 判定收紧：只有「JSON 业务体」或「带网关
+		// WWW-Authenticate」的 401 才是真凭证失效；中间层代理页/拦截页的 HTML 401
+		//（无 WWW-Authenticate、非 JSON 体）不触发刷新、不罚号、按上游原文透传
+		//——否则中间层一抽风就把好号标成 token 过期停用。
+		if resp.StatusCode == http.StatusUnauthorized && !workbuddyRealCredentialFailure(resp.Header, body) {
+			slog.Warn("workbuddy 401 without credential evidence (interstitial, pass-through)",
+				"account_id", account.ID, "message", upstreamMsg)
+			return true, nil
+		}
 		// 401/403 token 失效：触发一次强制 refresh；刷新失败由刷新侧置 error。
 		// 本次仍换号（新 token 下次请求生效）。
 		s.triggerWorkbuddyRequestPathRefresh(ctx, account)
@@ -566,6 +665,35 @@ func workbuddyWafCooldown(header http.Header) time.Time {
 		return time.Now().Add(d)
 	}
 	return time.Now().Add(workbuddyWafCooldownBase)
+}
+
+// workbuddyRealCredentialFailure 判定 401 是否为真凭证失效（hub #440/#691）：
+// 网关的真失效带 WWW-Authenticate 或 JSON 业务信封体；中间层代理页/拦截页是
+// HTML/纯文本且无 WWW-Authenticate。空 body 不算证据（交由 TokenRefresher 的
+// 到期前刷新兜底），语义与 hub「只有 JSON 凭证失效才走重新登录引导」一致。
+func workbuddyRealCredentialFailure(header http.Header, body string) bool {
+	if strings.TrimSpace(header.Get("Www-Authenticate")) != "" {
+		return true
+	}
+	trimmed := strings.TrimSpace(body)
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+}
+
+// clearWorkbuddySessionStrikes 成功路径清零 session dead 容忍计数（hub #630
+// note_success：真实请求成功即证明凭据/会话健康，误计的容忍数立即归零，
+// 与 workbuddy_oauth_service 刷新成功清零同口径）。
+func clearWorkbuddySessionStrikes(ctx context.Context, repo AccountRepository, account *Account) {
+	if repo == nil || account == nil || account.Extra == nil {
+		return
+	}
+	if _, has := account.Extra[workbuddySessionStrikesExtraKey]; !has {
+		return
+	}
+	if err := repo.UpdateExtra(ctx, account.ID, map[string]any{workbuddySessionStrikesExtraKey: 0}); err != nil {
+		slog.Warn("workbuddy clear session strikes failed", "account_id", account.ID, "error", err)
+		return
+	}
+	account.Extra[workbuddySessionStrikesExtraKey] = 0
 }
 
 // bumpWorkbuddySessionStrikes 递增并持久化 session dead 容忍计数。

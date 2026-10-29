@@ -217,7 +217,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 		if credErr != nil {
 			return nil, fmt.Errorf("parse workbuddy credentials: %w", credErr)
 		}
-		upstreamBody = prepareWorkbuddyForwardBody(workbuddyCred, upstreamBody)
+		upstreamBody = prepareWorkbuddyForwardBody(workbuddyCred, account, upstreamBody)
 		SetActualOpenAIUpstreamEndpoint(c, workbuddyChatEndpointPath)
 	}
 	// Record the final provider-normalized effort, so usage and pricing match

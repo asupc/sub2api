@@ -267,7 +267,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 		if credErr != nil {
 			return nil, fmt.Errorf("parse workbuddy credentials: %w", credErr)
 		}
-		body = prepareWorkbuddyForwardBody(cred, body)
+		body = prepareWorkbuddyForwardBody(cred, account, body)
 		SetActualOpenAIUpstreamEndpoint(c, workbuddyChatEndpointPath)
 	}
 	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
@@ -376,6 +376,10 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	// 透传；调用方期望非流式（stream=false）时在交回前本地聚合为 chat.completion
 	// JSON，使三条 raw CC 路径的既有 buffer 处理器无需平台特判。
 	if account.Platform == PlatformWorkbuddy {
+		// hub #630：成功响应立即清零 session dead 容忍计数（凭证健康自证）。
+		if resp.StatusCode < 400 {
+			clearWorkbuddySessionStrikes(ctx, s.accountRepo, account)
+		}
 		if wbErr := s.wrapWorkbuddyChatResponse(resp, stream, gjson.GetBytes(body, "model").String()); wbErr != nil {
 			_ = resp.Body.Close()
 			return nil, wbErr

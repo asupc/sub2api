@@ -138,7 +138,7 @@ func TestChatStreamContext(t *testing.T) {
 	if gotPath != chatCompletionsPath {
 		t.Errorf("path=%s want %s", gotPath, chatCompletionsPath)
 	}
-	if gotUA != "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1" {
+	if gotUA != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
 		t.Errorf("UA=%q", gotUA)
 	}
 	if gotAuth != "Bearer at" {
@@ -251,14 +251,24 @@ func TestPrepareChatBody(t *testing.T) {
 		t.Errorf("image_url 应转对象形态，got %v", imgPart["image_url"])
 	}
 
-	// tool_choice none 抑制 tools。
+	// tool_choice none 保留工具声明（hub v1.5.7：删声明会把模型调用降级成
+	// DSML 文本、Agent 原地空转；tool_choice 以字符串 "none" 表达「本轮不调用」）。
 	in = []byte(`{"model":"m","tool_choice":{"type":"none"},"tools":[{"type":"function"}]}`)
 	obj = parseObj(t, PrepareChatBody(Credentials{}, in, ""))
-	if _, has := obj["tool_choice"]; has {
-		t.Error("tool_choice none 应删除")
+	if obj["tool_choice"] != "none" {
+		t.Errorf("tool_choice none 应归一为字符串 \"none\"，got %v", obj["tool_choice"])
 	}
-	if _, has := obj["tools"]; has {
-		t.Error("tool_choice none 应连带删 tools")
+	if _, has := obj["tools"]; !has {
+		t.Error("tool_choice none 不应连带删 tools")
+	}
+	// 字符串 "none" 同款。
+	in = []byte(`{"model":"m","tool_choice":"NONE","tools":[{"type":"function"}]}`)
+	obj = parseObj(t, PrepareChatBody(Credentials{}, in, ""))
+	if obj["tool_choice"] != "none" {
+		t.Errorf("字符串 NONE 应归一为 \"none\"，got %v", obj["tool_choice"])
+	}
+	if _, has := obj["tools"]; !has {
+		t.Error("字符串 none 不应删 tools")
 	}
 
 	// 客户端自带 prompt_cache_key 不覆盖。

@@ -5,6 +5,9 @@
 package workbuddy
 
 import (
+	"os"
+	"runtime"
+
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,12 +19,18 @@ import (
 
 // 版本常量（出站 UA 与 X-IDE-Version 用）。
 const (
-	// defaultClientVersion 出站 WorkBuddy 客户端版本段，对齐官方 WorkBuddy Desktop
-	// 分发包版本（5.5.4）。Credentials.ClientVersion 可覆盖（空 = 内置默认）。
-	defaultClientVersion = "5.5.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本，对齐官方内置 CLI（2.137.1）。
-	// Credentials.CLIVersion 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.137.1"
+	// defaultClientVersionCN / defaultClientVersionGlobal 出站 WorkBuddy 桌面端
+	// 版本段，按 realm 切换（hub wb_identity.py _VERSION_DEFAULTS，2026-10-18 两区
+	// 桌面端实跑/抓包核对值）。Credentials.ClientVersion 可覆盖（空 = 内置默认）。
+	defaultClientVersionCN     = "5.8.3"
+	defaultClientVersionGlobal = "5.8.4"
+	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本 = 客户端内置 CLI 版本
+	//（hub desktop_cli）。Credentials.CLIVersion 可覆盖（空 = 内置默认）。
+	defaultCliVersion = "2.161.0"
+	// defaultSDKVersion / defaultNodeVersion 桌面 chat 兼容档（WB_DESKTOP_CHAT_COMPAT）
+	// 的 x-stainless-* SDK 指纹版本（hub sdk / node，OpenAI Node SDK 6.25.0 默认值）。
+	defaultSDKVersion  = "6.25.0"
+	defaultNodeVersion = "v22.21.1"
 )
 
 // Origin/Referer 基础域（按 realm 切换）。
@@ -48,12 +57,16 @@ func acceptLanguageFor(c Credentials) string {
 	return "zh-CN"
 }
 
-// clientVersion 生效的 WorkBuddy 客户端版本：Credentials.ClientVersion 非空则取之。
+// clientVersion 生效的 WorkBuddy 桌面端版本：Credentials.ClientVersion 非空则取之，
+// 否则按 realm 取内置默认（CN / global 版本号不同）。
 func clientVersion(c Credentials) string {
 	if c.ClientVersion != "" {
 		return c.ClientVersion
 	}
-	return defaultClientVersion
+	if c.IsGlobal() {
+		return defaultClientVersionGlobal
+	}
+	return defaultClientVersionCN
 }
 
 // cliVersion 生效的 CLI 版本：Credentials.CLIVersion 非空则取之。
@@ -64,18 +77,19 @@ func cliVersion(c Credentials) string {
 	return defaultCliVersion
 }
 
-// defaultWorkBuddyUA 组装默认客户端出站 UA（官方桌面端 RestOperations 层形状）：
+// defaultWorkBuddyUA 组装默认客户端出站 UA（官方桌面端 buildUserAgent 形状）：
 // `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
-// 平台段（第二段）品牌按 realm 切换——CN 用 applicationName 同值 `WorkBuddy`，
-// global 用官方国际版 productName `WorkBuddy AI`（intl 项目逆向证据：
-// `WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2`）。
+// 平台段（第二段）按 realm 切换——CN 用 applicationName 同值 `WorkBuddy`，
+// global 用官方国际版 applicationName `workbuddy-ai`（hub wb_identity.py
+// desktop_ua，5.8.4 国际版桌面客户端抓包：`WorkBuddy/5.8.4 workbuddy-ai/5.8.4
+// CLI/2.161.0`）。
 //
-// 风控注意：global 账号送错平台段（`WorkBuddy` 非 `WorkBuddy AI`）可能触发上游
-// 403 code 11140 "request illegal" 风控。官方无任何 UA 随机化，故默认确定性。
+// 风控注意：平台段送错可能触发上游 403 code 11140 "request illegal" 风控。
+// 官方无任何 UA 随机化，故默认确定性。
 func defaultWorkBuddyUA(c Credentials) string {
 	platform := "WorkBuddy"
 	if c.IsGlobal() {
-		platform = "WorkBuddy AI"
+		platform = "workbuddy-ai"
 	}
 	return "WorkBuddy/" + clientVersion(c) + " " + platform + "/" + clientVersion(c) + " CLI/" + cliVersion(c)
 }
@@ -123,17 +137,105 @@ func injectAccountStableHeaders(req *http.Request, c Credentials) {
 
 // CommonHeaders 设置所有 API 共享的请求头（chat/billing 域请求的基底）。
 func CommonHeaders(req *http.Request, c Credentials) {
+	commonHeaders(req, c, false)
+}
+
+// commonHeaders CommonHeaders 的兼容档实现。sdkProfile=true（桌面 chat 兼容档，
+// hub #643 WB_DESKTOP_CHAT_COMPAT）时**去掉浏览器系请求头**：X-Requested-With /
+// Origin / Referer / X-CodeBuddy-Request / Accept-Language / X-Machine-ID /
+// X-Session-ID——官方桌面 chat 由内置 CLI（OpenAI Node SDK）发出，浏览器头一个都
+// 没有。只影响 chat 出站；billing / refresh / 模型目录走 CommonHeaders 不变。
+func commonHeaders(req *http.Request, c Credentials, sdkProfile bool) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	origin := originRefererFor(c)
-	req.Header.Set("Origin", origin)
-	req.Header.Set("Referer", origin+"/")
+	if !sdkProfile {
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		origin := originRefererFor(c)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Referer", origin+"/")
+		// X-CodeBuddy-Request: 1（官方客户端风控闸门头，浏览器系请求必带）。
+		req.Header.Set("X-CodeBuddy-Request", "1")
+		req.Header.Set("Accept-Language", acceptLanguageFor(c))
+		injectAccountStableHeaders(req, c)
+	}
 	req.Header.Set("User-Agent", userAgent(c))
-	// X-CodeBuddy-Request: 1（官方客户端风控闸门头，所有 API 请求必带）。
-	req.Header.Set("X-CodeBuddy-Request", "1")
-	req.Header.Set("Accept-Language", acceptLanguageFor(c))
-	injectAccountStableHeaders(req, c)
+}
+
+// desktopChatCompatEnabled 桌面 chat 可选协议一致性开关（hub #643）：
+// 仅进程环境 WB_DESKTOP_CHAT_COMPAT=1 显式开启（默认关闭，行为与旧版一致）。
+// 开启后仅桌面 chat 出站改走 SDK profile（去浏览器头 + x-stainless-* + B3 parent）；
+// CLI/VSCode 形态、计费 REST、请求体、设备 token 与退避逻辑均不变。这是协议形态
+// 对齐，不是 TLS 指纹模拟、也不构成免封保证。
+func desktopChatCompatEnabled() bool {
+	return strings.TrimSpace(os.Getenv("WB_DESKTOP_CHAT_COMPAT")) == "1"
+}
+
+// privateDataValue X-Private-Data 取值（hub #516）：WB_PRIVATE_DATA=true|false
+// 显式覆盖；auto/缺省 = 官方桌面端默认 "true"（个人号 false / 企业号 true 的口径
+// 属 CLI 身份，本包只模拟桌面身份，取桌面默认）。
+func privateDataValue() string {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("WB_PRIVATE_DATA"))) {
+	case "true":
+		return "true"
+	case "false":
+		return "false"
+	}
+	return "true"
+}
+
+// identityOS / identityArch / identityNodeVersion x-stainless-* 的宿主元数据
+// （hub _identity_os/_identity_arch/node 版本）：环境变量 WB_IDENTITY_OS /
+// WB_IDENTITY_ARCH / WB_IDENTITY_NODE_VERSION 可覆盖（与 TLS/网络栈同源取宿主
+// 默认），固定值兜底保证确定性。
+func identityOS() string {
+	if v := strings.TrimSpace(os.Getenv("WB_IDENTITY_OS")); v != "" {
+		return v
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return "Windows"
+	case "darwin":
+		return "MacOS"
+	default:
+		return "Linux"
+	}
+}
+
+func identityArch() string {
+	if v := strings.TrimSpace(os.Getenv("WB_IDENTITY_ARCH")); v != "" {
+		return v
+	}
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x64"
+	case "arm64":
+		return "arm64"
+	case "386":
+		return "ia32"
+	default:
+		return "x64"
+	}
+}
+
+func identityNodeVersion() string {
+	if v := strings.TrimSpace(os.Getenv("WB_IDENTITY_NODE_VERSION")); v != "" {
+		return v
+	}
+	return defaultNodeVersion
+}
+
+// injectSDKRuntimeHeaders 注入 OpenAI Node SDK 的 x-stainless-* 指纹族（hub
+// cli_stainless_headers，桌面兼容档去掉 x-stainless-timeout——桌面请求预算未核实，
+// 不照抄 CLI 的值）。头名按官方 wire 小写（SDK Headers 迭代时键已小写化），
+// 直写 map 绕过 Go 的规范化。
+func injectSDKRuntimeHeaders(req *http.Request) {
+	req.Header["x-stainless-lang"] = []string{"js"}
+	req.Header["x-stainless-package-version"] = []string{defaultSDKVersion}
+	req.Header["x-stainless-os"] = []string{identityOS()}
+	req.Header["x-stainless-arch"] = []string{identityArch()}
+	req.Header["x-stainless-runtime"] = []string{"node"}
+	req.Header["x-stainless-runtime-version"] = []string{identityNodeVersion()}
+	req.Header["x-stainless-retry-count"] = []string{"0"}
 }
 
 // ChatMeta 一次 chat 出站的会话头族元数据（后台按 X-Conversation-Request-ID
@@ -155,9 +257,16 @@ type ChatMeta struct {
 // ChatHeaders 在 CommonHeaders 之上加 chat 专属的账号头。
 // 缺省字段用 X-No-* 约定（与 CodeBuddy 官方 CLI 一致）。
 func ChatHeaders(req *http.Request, c Credentials, meta ChatMeta) {
-	CommonHeaders(req, c)
-	// chat 流式 Accept 覆盖非流式默认。
-	req.Header.Set("Accept", "application/json, text/event-stream")
+	compat := desktopChatCompatEnabled()
+	commonHeaders(req, c, compat)
+	if compat {
+		// 兼容档：官方 SDK 的 Accept 是 application/json（上游仍按 stream 应答）。
+		req.Header.Set("Accept", "application/json")
+		injectSDKRuntimeHeaders(req)
+	} else {
+		// chat 流式 Accept 覆盖非流式默认。
+		req.Header.Set("Accept", "application/json, text/event-stream")
+	}
 	if c.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
 	} else {
@@ -193,19 +302,23 @@ func ChatHeaders(req *http.Request, c Credentials, meta ChatMeta) {
 	if c.DeviceToken != "" {
 		req.Header.Set("X-Device-Token", c.DeviceToken)
 	}
-	injectConversationHeaders(req, meta)
+	injectConversationHeaders(req, meta, compat)
 }
 
 // injectAttribution 注入用量归属头（X-Agent-Purpose / X-IDE-* / X-Product）。
 // 仅 chat/completions 路径生效。默认对齐官方桌面端：X-Agent-Purpose="conversation"
-// + X-IDE-Name/Type/Product="WorkBuddy" + X-IDE-Version=客户端版本。
-// （源项目支持显式 ClientName="SaaS" 还原旧归因，本包未移植该 config 开关。）
+// + X-IDE-Name/Type="WorkBuddy" + X-IDE-Version=客户端版本 + X-Product="SaaS"。
+// X-Product 官方值是 "SaaS"（hub wb_identity.py 三套身份统一；"WorkBuddy" 为旧
+// 自创组合，属渠道指纹差异，hub v1.5.0 修正）。
 func injectAttribution(req *http.Request, c Credentials) {
 	req.Header.Set("X-Agent-Purpose", "conversation")
 	req.Header.Set("X-IDE-Name", "WorkBuddy")
 	req.Header.Set("X-IDE-Type", "WorkBuddy")
 	req.Header.Set("X-IDE-Version", clientVersion(c))
-	req.Header.Set("X-Product", "WorkBuddy")
+	req.Header.Set("X-Product", "SaaS")
+	// X-Private-Data 数据用途声明（hub #516）：官方桌面端默认 "true"；
+	// WB_PRIVATE_DATA=true|false 显式覆盖（auto/缺省 = 官方默认）。
+	req.Header.Set("X-Private-Data", privateDataValue())
 }
 
 // injectConversationHeaders 注入官方客户端会话头族（后台聚合）。
@@ -222,7 +335,7 @@ func injectAttribution(req *http.Request, c Credentials) {
 //   - X-B3-TraceId / X-B3-SpanId / X-B3-Sampled：链路族。B3 规范只认 16/32 hex
 //     TraceId 与 16 hex SpanId；入站 conversationRequestID 非法时 TraceId 回落
 //     messageID（恒 32 hex），SpanId 取 messageID[:16]（每消息新）。
-func injectConversationHeaders(req *http.Request, meta ChatMeta) {
+func injectConversationHeaders(req *http.Request, meta ChatMeta, sdkProfile bool) {
 	convReqID := meta.ConversationRequestID
 	if convReqID == "" {
 		// 零值 meta 也要保证聚合主键必发：本级补一个 32 hex。
@@ -250,6 +363,17 @@ func injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	req.Header.Set("X-B3-TraceId", b3Trace)
 	req.Header.Set("X-B3-SpanId", messageID[:16])
 	req.Header.Set("X-B3-Sampled", "1")
+	if sdkProfile {
+		// 兼容档（hub trace_headers(with_parent=True)）：补 X-B3-ParentSpanId、
+		// 四段 b3 单头（<trace>-<span>-1-<parent>）与 traceparent（官方自身代码只
+		// 有第三方埋点库发 traceparent，仅兼容档发）。网关没有真实父子 span，
+		// 合成一个父 span id，保证 b3 尾段与 X-B3-ParentSpanId 同源。
+		span := messageID[:16]
+		parent := NewMessageID()[:16]
+		req.Header.Set("X-B3-ParentSpanId", parent)
+		req.Header["b3"] = []string{b3Trace + "-" + span + "-1-" + parent}
+		req.Header["traceparent"] = []string{"00-" + b3Trace + "-" + span + "-01"}
+	}
 }
 
 // NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方

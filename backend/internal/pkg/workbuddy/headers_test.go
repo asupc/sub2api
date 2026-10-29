@@ -18,10 +18,10 @@ func globalCred() Credentials {
 
 // TestDefaultWorkBuddyUA UA 三段式两态（CN / global 平台段切换）。
 func TestDefaultWorkBuddyUA(t *testing.T) {
-	if got, want := defaultWorkBuddyUA(cnCred()), "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1"; got != want {
+	if got, want := defaultWorkBuddyUA(cnCred()), "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"; got != want {
 		t.Errorf("CN UA=%q want %q", got, want)
 	}
-	if got, want := defaultWorkBuddyUA(globalCred()), "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1"; got != want {
+	if got, want := defaultWorkBuddyUA(globalCred()), "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"; got != want {
 		t.Errorf("global UA=%q want %q", got, want)
 	}
 	// 凭据版本覆盖。
@@ -39,7 +39,7 @@ func TestDefaultWorkBuddyUA(t *testing.T) {
 
 // TestBillingUA billing 域单段 UA。
 func TestBillingUA(t *testing.T) {
-	if got, want := billingUA(cnCred()), "WorkBuddy/5.5.4"; got != want {
+	if got, want := billingUA(cnCred()), "WorkBuddy/5.8.3"; got != want {
 		t.Errorf("billingUA=%q want %q", got, want)
 	}
 }
@@ -75,7 +75,7 @@ func TestInjectConversationHeaders(t *testing.T) {
 		ConversationRequestID: "0123456789abcdef0123456789abcdef",
 		TraceID:               "trace-in",
 	}
-	injectConversationHeaders(req, meta)
+	injectConversationHeaders(req, meta, false)
 	want := map[string]string{
 		"X-Conversation-ID":         "conv-in",
 		"X-Conversation-Request-ID": meta.ConversationRequestID,
@@ -104,7 +104,7 @@ func TestInjectConversationHeaders(t *testing.T) {
 
 	// 非法 convReqID（非 hex）→ B3 TraceId 回落 messageID（聚合主键本身仍原样透传）。
 	req2 := httptest.NewRequest(http.MethodPost, "/", nil)
-	injectConversationHeaders(req2, ChatMeta{ConversationRequestID: "not-hex-id!!"})
+	injectConversationHeaders(req2, ChatMeta{ConversationRequestID: "not-hex-id!!"}, false)
 	if got := req2.Header.Get("X-B3-TraceId"); got != req2.Header.Get("X-Conversation-Message-ID") {
 		t.Errorf("非法 convReqID 的 B3 TraceId 应回落 messageID，got %q", got)
 	}
@@ -114,7 +114,7 @@ func TestInjectConversationHeaders(t *testing.T) {
 	// 零值 meta：本级补发 32 hex 聚合主键与会话 ID，保证三元组恒发
 	//（缺 X-Conversation-ID 会被国际端点 400/11-128 conversation id missing）。
 	req3 := httptest.NewRequest(http.MethodPost, "/", nil)
-	injectConversationHeaders(req3, ChatMeta{})
+	injectConversationHeaders(req3, ChatMeta{}, false)
 	if got := req3.Header.Get("X-Conversation-Request-ID"); got == "" || !validTraceID(got) {
 		t.Errorf("零值 meta 应补发 32 hex 聚合主键，got %q", got)
 	}
@@ -138,7 +138,7 @@ func TestChatHeaders(t *testing.T) {
 		"X-CodeBuddy-Request": "1",
 		"X-Agent-Purpose":     "conversation",
 		"X-IDE-Name":          "WorkBuddy",
-		"X-IDE-Version":       "5.5.4",
+		"X-IDE-Version":       "5.8.3",
 		"X-Machine-ID":        deriveAccountStableID("uid-1", "machine"),
 		"X-Session-ID":        deriveAccountStableID("uid-1", "session"),
 		"Accept-Language":     "zh-CN",
@@ -180,7 +180,7 @@ func TestBillingAndRefreshHeaders(t *testing.T) {
 		"X-Enterprise-Id":     "ent-1",
 		"X-Tenant-Id":         "ent-1",
 		"X-Domain":            "copilot.tencent.com",
-		"User-Agent":          "WorkBuddy/5.5.4",
+		"User-Agent":          "WorkBuddy/5.8.3",
 		"X-CodeBuddy-Request": "1",
 	} {
 		if got := req.Header.Get(k); got != v {
@@ -198,7 +198,7 @@ func TestBillingAndRefreshHeaders(t *testing.T) {
 	if req2.Header.Get("X-Auth-Refresh-Source") != "plugin" {
 		t.Error("X-Auth-Refresh-Source 应为 plugin")
 	}
-	if req2.Header.Get("User-Agent") != "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1" {
+	if req2.Header.Get("User-Agent") != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
 		t.Errorf("refresh 应走三段式 UA，got %q", req2.Header.Get("User-Agent"))
 	}
 }

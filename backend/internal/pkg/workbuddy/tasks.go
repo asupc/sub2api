@@ -812,7 +812,7 @@ func (s CompensationStatus) Pending() bool { return s.Active && !s.Claimed && s.
 
 // GetCompensationStatus 查补偿活动状态。走 billingJSON（billingBase），与
 // ClaimCompensation 同域同头。只在传输失败 / 非 2xx / 业务 code 非 0 时返回 error
-//——active=false 是正常返回。
+// ——active=false 是正常返回。
 func (c *Client) GetCompensationStatus(ctx context.Context, cred Credentials) (CompensationStatus, error) {
 	data, err := c.billingJSON(ctx, cred, http.MethodPost, "/billing/meter/compensation-status", map[string]any{})
 	if err != nil {

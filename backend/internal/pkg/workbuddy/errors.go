@@ -388,6 +388,25 @@ func ClassifyError(statusCode int, body []byte) ErrorKind {
 }
 
 // classifyString ClassifyError 的字符串内部实现（与源项目 Classify 签名对齐）。
+// modelScoped5xxCodes hub MODEL_SCOPED_ERROR_CODES（#499）：这些业务码出现在 5xx
+// body 里时错误是**模型级**的（该后端/该参数对这个模型不成立），换任何账号都一样——
+// 不罚账号、不记 fails/熔断，把上游 5xx 原样透传（11158 除外：语义是账号类型权限，
+// 仍按模型锁处理）。普通 500 仍按账号故障走通用 failover。
+var modelScoped5xxCodes = []string{"11102", "11129", "11134", "11150", "11158"}
+
+// IsModelScopedServerError 报告 5xx 响应是否携带模型级业务码（hub #499）。
+func IsModelScopedServerError(status int, body string) bool {
+	if status < 500 || body == "" {
+		return false
+	}
+	for _, code := range modelScoped5xxCodes {
+		if hasBusinessCode(body, code) {
+			return true
+		}
+	}
+	return false
+}
+
 func classifyString(status int, body string) ErrorKind {
 	// 11102「该后端无此模型」须最先判：语义比计费/限流都更具体——若不先判，
 	// msg 里的 "service info not found" 会被更宽的 4xx 兜底归为 client。
@@ -461,6 +480,11 @@ func classifyString(status int, body string) ErrorKind {
 	}
 	if status == http.StatusNotFound {
 		return KindNotFound
+	}
+	// hub #499 模型级 5xx 不熔断整池：body 带模型级业务码的 5xx 归 KindModelBlocked
+	//（不罚账号；11158 子分支照旧写模型锁），普通 5xx 才按账号故障处理。
+	if IsModelScopedServerError(status, body) {
+		return KindModelBlocked
 	}
 	if status >= 500 {
 		return KindServer

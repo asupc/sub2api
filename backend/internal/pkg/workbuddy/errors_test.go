@@ -37,13 +37,13 @@ func TestClassifyError(t *testing.T) {
 		{400, `{"code":"11-128","msg":"request illegal","displayTips":{"en":"channel verification failed"}}`, KindChannelRefused},
 		{403, `{"code":"11-128","msg":"request illegal"}`, KindChannelRefused},
 		{400, `{"error":{"data":{"code":"11-128","msg":"request illegal"}}}`, KindChannelRefused},
-		{400, `{"code":11140,"msg":"request illegal"}`, KindAccountFault},                    // 11140 账号限制
+		{400, `{"code":11140,"msg":"request illegal"}`, KindAccountFault},                           // 11140 账号限制
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests."}`, KindSoftRate}, // 11140 限流变体不误判
-		{400, `{"code":"11-128","msg":"blocked by security policy"}`, KindContentBlocked},   // 11-128 审核变体不误判
+		{400, `{"code":"11-128","msg":"blocked by security policy"}`, KindContentBlocked},           // 11-128 审核变体不误判
 		// 第 5 层前置：6021 queue.full 渠道级繁忙（f14f374），先于 429 兜底。
 		{429, `{"code":6021,"msg":"queue.full.title"}`, KindUpstreamBusy},
 		{429, `{"error":{"data":{"code":"6021","msg":"queue.full.title"}}}`, KindUpstreamBusy},
-		{429, `queue full`, KindUpstreamBusy},   // 文案外卡（防上游换状态码/丢 code）
+		{429, `queue full`, KindUpstreamBusy}, // 文案外卡（防上游换状态码/丢 code）
 		{503, `{"code":6021,"msg":"queue.full.title"}`, KindUpstreamBusy},
 		{429, `{"code":1,"msg":"queueing, please wait"}`, KindSoftRate}, // 普通排队文案不误撞
 		// 第 4 层：429 + 14018 = 明确积分耗尽。

@@ -18,7 +18,7 @@ const (
 )
 
 func TestSanitizeIdentityRewritten(t *testing.T) {
-	out := sanitizeText(ccIdentity)
+	out := sanitizeText(ccIdentity, true)
 	if !strings.Contains(out, "official CLI tool for Claude.") {
 		t.Errorf("identity not rewritten: %q", out)
 	}
@@ -31,7 +31,7 @@ func TestSanitizeIdentityRewritten(t *testing.T) {
 // 回归：匹配串曾带结尾句号，导致该形态漏网、指纹原样发上游 → 400 code=11128。
 func TestSanitizeIdentityDesktopVariantRewritten(t *testing.T) {
 	in := "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
-	out := sanitizeText(in)
+	out := sanitizeText(in, true)
 	if strings.Contains(out, "official CLI for Claude") {
 		t.Errorf("desktop identity not rewritten: %q", out)
 	}
@@ -41,7 +41,7 @@ func TestSanitizeIdentityDesktopVariantRewritten(t *testing.T) {
 }
 
 func TestSanitizeBranchRewritten(t *testing.T) {
-	out := sanitizeText(ccBranch)
+	out := sanitizeText(ccBranch, true)
 	if !strings.Contains(out, "Default branch (you will usually use this for PRs)") {
 		t.Errorf("branch not rewritten: %q", out)
 	}
@@ -53,7 +53,7 @@ func TestSanitizeBranchRewritten(t *testing.T) {
 // 反馈句带 Anthropic 仓库链接，上游按整句拦截（实测只留链接或只留半边均不拦）。
 func TestSanitizeFeedbackSentenceRewritten(t *testing.T) {
 	in := "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues"
-	out := sanitizeText(in)
+	out := sanitizeText(in, true)
 	if strings.Contains(out, "To give feedback") {
 		t.Errorf("feedback sentence not rewritten: %q", out)
 	}
@@ -65,7 +65,7 @@ func TestSanitizeFeedbackSentenceRewritten(t *testing.T) {
 // 上游反探测：请求体里出现裸数字 11128 即整单拦截（与上下文无关）。
 func TestSanitizeUpstreamErrorCodeRewritten(t *testing.T) {
 	in := "upstream returned code=11128 for this request"
-	out := sanitizeText(in)
+	out := sanitizeText(in, true)
 	if strings.Contains(out, "11128") {
 		t.Errorf("error code not rewritten: %q", out)
 	}
@@ -97,7 +97,7 @@ func TestSanitizeToolCallArgumentsSanitized(t *testing.T) {
 }
 
 func TestSanitizeBillingHeaderStrippedValueIrrelevant(t *testing.T) {
-	out := sanitizeText(ccHeader)
+	out := sanitizeText(ccHeader, true)
 	if strings.Contains(out, "x-anthropic-billing-header") {
 		t.Errorf("header not stripped: %q", out)
 	}
@@ -105,14 +105,14 @@ func TestSanitizeBillingHeaderStrippedValueIrrelevant(t *testing.T) {
 
 func TestSanitizeBillingHeaderCaseInsensitive(t *testing.T) {
 	alt := "X-Anthropic-Billing-Header: cc_version=1.0;"
-	out := strings.ToLower(sanitizeText(alt))
+	out := strings.ToLower(sanitizeText(alt, true))
 	if strings.Contains(out, "billing") {
 		t.Errorf("case-insensitive header not stripped: %q", out)
 	}
 }
 
 func TestSanitizeTrailingKVStripped(t *testing.T) {
-	out := sanitizeText("...; cc_version=2.0; cc_entrypoint=cli;")
+	out := sanitizeText("...; cc_version=2.0; cc_entrypoint=cli;", true)
 	if strings.Contains(out, "cc_version") || strings.Contains(out, "cc_entrypoint") {
 		t.Errorf("trailing kv not stripped: %q", out)
 	}
@@ -122,13 +122,13 @@ func TestSanitizeTrailingKVStripped(t *testing.T) {
 // 但改写层只动精确匹配的整句——普通链接文本不该被改写。
 func TestSanitizeNormalAnthropicLinkNotRewritten(t *testing.T) {
 	in := "see https://github.com/anthropics/anthropic-cookbook for examples"
-	if out := sanitizeText(in); out != in {
+	if out := sanitizeText(in, true); out != in {
 		t.Errorf("normal anthropic link should be untouched: %q -> %q", in, out)
 	}
 }
 
 func TestSanitizeCodexInstructionsRewritten(t *testing.T) {
-	out := sanitizeText(codexInstructions)
+	out := sanitizeText(codexInstructions, true)
 	if strings.Contains(out, codexInstructions) {
 		t.Errorf("codex fingerprint still present: %q", out)
 	}
@@ -150,7 +150,7 @@ func TestSanitizeVariantNotTouched(t *testing.T) {
 		"please use main branch for this repo",
 		"ordinary user message",
 	} {
-		if out := sanitizeText(in); out != in {
+		if out := sanitizeText(in, true); out != in {
 			t.Errorf("variant should be untouched: %q -> %q", in, out)
 		}
 	}
@@ -180,7 +180,7 @@ func TestSanitizeMultimodalTextPartOnly(t *testing.T) {
 		map[string]any{"type": "text", "text": ccIdentity},
 		imgPart,
 	}
-	out, changed := sanitizeContent(content)
+	out, changed := sanitizeContent(content, true)
 	if !changed {
 		t.Fatal("expected change")
 	}

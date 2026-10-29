@@ -86,7 +86,7 @@ func TestWorkbuddyForward_StreamTransportAndSSERelay(t *testing.T) {
 	// URL：realm cn → copilot.tencent.com + /v2 单路径。
 	require.Equal(t, "https://copilot.tencent.com/v2/chat/completions", req.URL.String())
 	// UA 三段式（WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>）。
-	require.Equal(t, "WorkBuddy/5.5.4 WorkBuddy/5.5.4 CLI/2.137.1", req.Header.Get("User-Agent"))
+	require.Equal(t, "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0", req.Header.Get("User-Agent"))
 	// 头族：Bearer / X-CodeBuddy-Request / 稳定机器与会话 ID（36 hex）。
 	require.Equal(t, "Bearer wb-at", req.Header.Get("Authorization"))
 	require.Equal(t, "1", req.Header.Get("X-CodeBuddy-Request"))
@@ -131,7 +131,7 @@ func TestWorkbuddyForward_GlobalRealmRoutingAndUA(t *testing.T) {
 
 	require.Equal(t, "https://www.workbuddy.ai/v2/chat/completions", upstream.lastReq.URL.String())
 	// global 平台段品牌是 WorkBuddy AI。
-	require.Equal(t, "WorkBuddy/5.5.4 WorkBuddy AI/5.5.4 CLI/2.137.1", upstream.lastReq.Header.Get("User-Agent"))
+	require.Equal(t, "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0", upstream.lastReq.Header.Get("User-Agent"))
 	require.Equal(t, "www.workbuddy.ai", upstream.lastReq.Header.Get("X-Domain"))
 }
 
