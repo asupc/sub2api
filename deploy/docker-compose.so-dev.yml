@@ -1,7 +1,7 @@
 # =============================================================================
 # Sub2API 二开本地开发环境（sub2api-so）
 # =============================================================================
-# 三个服务全部容器化：PostgreSQL 16 + Redis 7 + 后端源码热跑（golang:1.27.2）
+# 三个服务全部容器化：PostgreSQL 16 + Redis 7 + 后端源码热跑（golang:1.27.3）
 # 数据卷复用工作区约定：sub2api_pgdata / sub2api_redisdata / sub2api_go_mod /
 # sub2api_go_cache（与手动 docker run 的 Go 工具链命令共享依赖缓存）。
 #
@@ -27,7 +27,7 @@
 
 services:
   backend:
-    image: golang:1.27.2
+    image: golang:1.27.3
     container_name: sub2api-backend-dev
     restart: unless-stopped
     working_dir: /app
