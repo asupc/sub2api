@@ -265,12 +265,14 @@ func TestAccountHandlerGetAvailableModels_GeminiOAuthUsesExplicitModelMapping(t 
 			name:      "plain oauth",
 			oauthType: "",
 			mapping: map[string]any{
-				"gemini-2.5-pro": "gemini-2.5-pro",
-				"my-gem":         "gemini-2.5-pro",
+				// 上游已把停用的 2.x 条目移出 DefaultModels（仅 Google One 清单保留），
+				// 这里改用现行 DefaultModels 条目验证映射请求侧 keys + 显示名回填。
+				"gemini-3-flash": "gemini-3-flash",
+				"my-gem":         "gemini-3-flash",
 			},
-			wantIDs: []string{"gemini-2.5-pro", "my-gem"},
+			wantIDs: []string{"gemini-3-flash", "my-gem"},
 			wantDisplay: map[string]string{
-				"gemini-2.5-pro": "Gemini 2.5 Pro",
+				"gemini-3-flash": "Gemini 3 Flash",
 				"my-gem":         "my-gem",
 			},
 		},

@@ -559,7 +559,7 @@ func TestGatewayModels_GeminiGroupFallsBackToGeminiModels(t *testing.T) {
 	var got gatewayModelsResponseForTest
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.Equal(t, "list", got.Object)
-	require.Contains(t, modelIDsForTest(got.Data), "gemini-2.5-flash")
+	require.Contains(t, modelIDsForTest(got.Data), "gemini-3.5-flash")
 	require.NotContains(t, modelIDsForTest(got.Data), "claude-sonnet-4-6")
 }
 
@@ -1576,8 +1576,8 @@ func TestGatewayModels_GeminiGroupFallsBackToStaticWhenAntigravityMappingUnset(t
 	var got gatewayModelsResponseForTest
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	ids := modelIDsForTest(got.Data)
-	// 回落到 geminicli 静态表
-	require.Contains(t, ids, "gemini-2.0-flash")
+	// 回落到 geminicli 静态表（上游已移除停用的 2.x 条目，改用现行静态清单条目断言）
+	require.Contains(t, ids, "gemini-3-flash")
 	for _, id := range ids {
 		require.True(t, strings.HasPrefix(id, "gemini-"), "unexpected non-gemini model on gemini group: %s", id)
 	}
