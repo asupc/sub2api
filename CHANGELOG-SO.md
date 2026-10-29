@@ -8,12 +8,12 @@
 
 | 项 | 状态 |
 |---|---|
-| 上游基准 | `UPSTREAM-BASE`=`b0a02a33`（v0.2.17）；`backend/cmd/server/VERSION`=0.2.17 |
+| 上游基准 | `UPSTREAM-BASE`=`a3298b46`（v0.2.19）；`backend/cmd/server/VERSION`=0.2.19 |
 | 移植源基准 | `PORTER-BASE` 文件：workbuddy `73a7560e`（上游 10-21 起停止维护）、qoder `0426c334`、trae `1707fae1` |
-| 后端 | 代码 = v0.2.17 + 二开（三平台源码集成、Antigravity 直接模型模式、复合分组同族多平台调度、推理档位全量透传、OpenCode reasoning 回放收口、账号/计费/网关定制，逐项见时间线）；模型能力测评已于 10-23 整体移除 |
+| 后端 | 代码 = v0.2.19 + 二开（三平台源码集成、Antigravity 直接模型模式、复合分组同族多平台调度、推理档位全量透传、OpenCode reasoning 回放收口、账号/计费/网关定制，逐项见时间线）；模型能力测评已于 10-23 整体移除 |
 | 前端 | 二开：功能入口裁剪 + UI/UX 体系重构 + 仪表盘/用量统计/账号表格增强；模型能力中心收敛为模型清单单页（无评分）；用量统计含「按 API 统计用量」与模型分布折叠 |
 | 数据库 | 官方迁移序列终态（裁剪期 drop 的表由 `deploy/restore-upstream-schema.sql` 恢复，可重放幂等）；二开迁移命名 `NNN_so_*.sql`，最新占用 250（测评表 DROP），后续从 251+ 起 |
-| 验证基线 | 2026-10-26：后端 `go build`/`go vet` 通过，unit 仅 5 个已知存量失败（Gemini thinking variant / 复合分组族 ×4）；前端 typecheck + vitest（287 文件 / 2131 用例）+ build 全绿 |
+| 验证基线 | 2026-10-29（同步 v0.2.19 后）：后端 `go build`/`go vet`/unit 仅 6 个已知存量失败（Gemini thinking variant / 复合分组族 ×2 / prompt-audit 路由覆盖 / antigravity 目录跳过 / effort 透传遗留，与 HEAD 基线一致）+ Trae 注册用例并行偶发；前端 typecheck + vitest（290 文件 / 2265 用例）+ build 全绿 |
 | 线上实例 | `sub2api:0.2.17-so-20261026-2`（本机 Compose `/vol2/1000/docker/sub2api/`；旧 tag 均保留作回滚点） |
 
 - **功能边界**：支付永久不同步（2026-10-08 用户指示；上游 #7881 EasyPay 回调签名修复未同步，启用支付前需补）；en 语言包永久跳过；前端已删入口的官方功能视为隐藏（后端接口与表随官方保留）。
@@ -84,6 +84,7 @@
 | v0.2.15 | 10-09 | `5fc0e48 → 3a6fd1c9` | 20/140 | Cline/Command Code 平台、provider profile 重构、平台清单驱动；go 1.27.2 |
 | v0.2.16（部分） | 10-13 | `3a6fd1c9 → 4d9ac3e4`（收口） | 51 非合并/213 | 移植 17 提交；未纳入项视为永久放弃（见 10-13 条目） |
 | v0.2.17 | 10-16 | `4d9ac3e4 → b0a02a33` | 48/153 | 支付链路整体跳过；composite OAuth 歧义路由、GPT-5.5 retirement、Gemini 4 Argon、共享容量 429 退避等；11 个冲突手工裁决（见当日条目） |
+| v0.2.19 | 10-29 | `b0a02a33 → a3298b46`（跨 v0.2.18） | 121/354 | 范围授权管理员密钥、Grok 目录诊断、按张计费、Gemini 生图开关/同账号重试可配/2.x 清单下线、流断开计费族、Vertex API Key 补齐（v0.2.17 漏项）、GPT-6.1 Terra、Go 1.27.3；15 冲突手工裁决（见当日条目） |
 
 ## 平台移植源同步（PORTER-BASE）
 
@@ -199,3 +200,15 @@
 - **审查修复（11 处）**：`DashboardAPIKeysUsageStats` 只解析日期（`parseAPIKeyStatsDateRange`：end_date-only 起点取当日、start>end/非法日期 400、`AddDate` 日历日推进兼容 DST，修夏令时漏/多计一小时与 end_date 回显错日）；`GetAPIKeyUsageStatsByUser` 明细子查询补 `u.user_id` 过滤、改用命名返回值使 `Close()` 失败可回传；前端密钥卡片达到 limit 时显式提示「仅显示前 N 个」、卡片在首屏统计完成后挂载（消除重复请求）、展开工具条仅在正常态渲染、模型分布恢复 `overflow-x-auto` 与明细限高、`modelsExpanded` 在数据源/日期/指标变化时复位。
 - **验证**：新增 `usage_handler_apikey_stats_test.go`（end_date-only、start_date-only、America/New_York 夏令时 25 小时日、倒序区间/非法日期 400、过滤参数被忽略）；后端 handler/repository 单测全绿；前端 vitest 287 文件 2131 用例全绿，typecheck/ESLint 通过。
 - **合并影响**：`usage_handler.go`、`routes/user.go`、`usage_service.go`、`usage_log_repo_apikey_stats.go` 为上游同名文件，同步需保留 ByUser 查询与 handler；其余为 so 私有。`UPSTREAM-BASE` 不变。
+
+### 同步 v0.2.19（2026-10-29，跨 v0.2.18）
+
+- **区间与规模**：`b0a02a33 → a3298b46`（121 提交 / 354 文件，+30277/-1217）。二开侧：117 个未改文件直接覆盖、129 个上游新增复制（另 4 个新增文件跳过/适配）、76 个三路自动合并、15 个冲突手工裁决、13 个二开已裁剪文件跳过。版本号 `VERSION`→0.2.19（tag 推导一致）。
+- **同步功能**：① 按操作/资源范围授权的管理员 API 密钥（`pkg/adminaccess` + `custom_admin_key_*` 全链路 + 迁移 247 + `AdminAccessKeysSettings.vue` + zh 语言包 + `docs/admin-api-keys.md`，step-up 依赖按二开裁剪改直调）；② Grok 账号模型目录诊断（`grok_model_catalog*`/`grok_model_diagnostics` + `GrokModelDiagnosticsPanel.vue`）；③ 多图按张计费（`image_billing_count` + 迁移 248）与 Gemini 生图分组开关（迁移 246）；④ Gemini `/v1beta/models` 声明映射应答（`DeclaredModelIDs`/`DeclaredModelsCover` 移植进 `gemini_messages_compat_service.go`，handler 保留二开 `SelectAccountForAIStudioEndpoints` 命名）；⑤ Gemini 同账号重试可配置（`gateway.max_same_account_retries_gemini` + `geminiMaxAttemptsPerAccount`）；⑥ Gemini 默认清单刷新（2.x 全线下线，`DefaultTestModel`→`gemini-3.5-flash`）；⑦ 流式客户端断开按已收集用量计费族；⑧ 计费修复（Grok 4.7 Fast 官方价、DeepSeek V4 Pro 保留、cache hit 计为缓存读取、按端点/计价模式限定按张计费）；⑨ OpenAI/Codex 修复（透传非流式 SSE 无 Content-Type、overload 重试保持、非流式 JSON 返回、GPT-6.1 Terra）；⑩ 限流/安全（Cloudflare 1010 不惩罚、国产频率型 429 秒级冷却、管理员保护规则 400、分页 offset 溢出、超大 multipart 拒绝、`golang.org/x/net` v0.62.0 / dompurify 3.4.17）；⑪ 性能（配额累加按周期维度选语句、调度快照常驻内存、限流快照 COW、模型映射签名零分配、singleflight 复查）。
+- **存量缺口补齐（v0.2.17 选择性同步漏项）**：`vertex_service_account.go` 覆盖为上游新版，补入 `IsVertexAPIKey`/`buildVertexGeminiAccountURL`/`setVertexGeminiAuth`（Vertex API Key Express 模式），并把 `gemini_messages_compat_service.go`（×2 处）与 `gemini_chat_completions_compat_service.go`（×1 处）的服务账号分支改为统一走上述构造/认证函数（原实现无条件要求 tokenProvider，API Key 账号无法转发）。
+- **冲突裁决（15 文件）**：README×3 保留二开赞助商清单不并入上游新增行；ent 生成代码×3 以「`schema/group.go` 合入 `image_count_billing` 后 `go generate ./ent` 全量重生成」替代手工合并；`gemini_v1beta_handler.go` 上游声明映射逻辑+二开方法名；`gemini_messages_compat_service.go`/`billing_service.go` 显式缓存相关维持二开裁剪（不引入 `boundCacheUpstreamPassthroughError`/`CacheStoragePricePerTokenHour`）但保留上游 `geminiMaxAttemptsPerAccount`；`upstream_models.go` 按上游重构为 `fetchUpstreamModelListRequest`（4 返回值 + Grok 目录观测）并保留二开 workbuddy/qoder/trae 三平台分支；前端 5 文件保留二开裁剪与 dense 样式、并入上游新功能（`supportsAccountQuota`、过滤持久化且路由平台参数优先、`AdminAccessKeysSettings` 挂载 `space-y-4`、移除 step-up/TOTP 依赖）。
+- **跳过项**：13 个二开已裁剪文件（`.github/workflows`、en 语言包、`ChannelsView.vue`、`gemini_cached_content.go` 等）；上游新增 `gemini_cached_content_bound_retry_test.go`（依赖裁剪符号 `GeminiExplicitCacheUpstreamCredentialKey`）与 `ChannelsView.webSearchEmulation.spec.ts`（视图已裁剪）；`upstream_models.go` 的 `fetchVertexGeminiUpstreamModels` 分支（属已裁剪的 `gemini_models_endpoints.go`，Vertex 账号模型同步维持通用路径，行为与 HEAD 一致）；`routes/payment.go` 按三路规则覆盖（仅新增 admin payment 组全局限流中间件，非支付业务链路，如需维持支付零变更可单独回退该文件）。
+- **测试适配**：`GrokModelDiagnosticsPanel.spec.ts`/`AdminAccessKeysSettings.spec.ts` en/zh 双语收敛为 zh 单语（删英文用例与 en 导入、补 zh 文案完整性用例、移除 step-up mock）；`gateway_models_test.go` 静态清单断言 `gemini-2.0-flash`→`gemini-3-flash`；`account_handler_available_models_test.go` plain oauth fixture `gemini-2.5-pro`→`gemini-3-flash`（2.x 移出 `DefaultModels`，Google One 清单仍保留 2.5）；`openai_gpt61_terra_test.go` 删 `openAICompatAnthropicReasoningEffort` 断言（该函数属 10-20 透传改造删除范围）；新增 `gemini_vertex_api_key_test_helpers_test.go`（自上游裁剪测试文件提取两个构造辅助，供生图开关/断开计费测试复用）。
+- **构建链**：Go 1.27.2→1.27.3（go.mod 随上游；根/`backend`/`deploy` Dockerfile 与 so-dev compose 同步换 `golang:1.27.3`）；`pnpm-lock.yaml` 直接采用上游版（package.json 二开未改，`--frozen-lockfile` 校验通过）。
+- **验证**：后端 `go build`/`go vet`/`go test -tags=unit ./...` 失败仅 6 个存量项（`TestApplyOpenAICompatModelNormalization`[10-20 透传遗留] / `TestResolveGeminiThinkingVariant` / 复合分组族 ×2 / `TestEveryGatewayPOSTRouteIsClassifiedForPromptAuditCoverage` / `TestConfiguredUpstreamModelsForCapabilitySyncSkipsInjectedAntigravityPassthroughs`，经 HEAD 工作树基线比对确认同步前即失败）；`TestTraeOpsService_Registration` 全量并行下偶发（全局注册表覆盖式设计，单跑必过，非本次引入）。前端 typecheck + build（i18n 完整性 + vue-tsc + vite）全绿、vitest 290 文件 / 2265 用例全过。版本号 tag 推导 0.2.19 == VERSION 0.2.19。ent 重生成后仅预期 9 文件变更。gofmt 漂移集与 HEAD 一致（无新增）。
+- **环境备注（NAS）**：前端 node_modules 在宿主 fs mode 000 下 esbuild 无法执行，`install`/`build`/`test` 一律在 `node:24-alpine` 容器执行（`corepack prepare pnpm@9.15.9 --activate` 固定版本，pnpm 12 会因 overrides 报错）；构建需挂整个 `sub2api-so`（LegalDocumentView 引用 `docs/legal/*.md`）；docker 挂载必须用 `/vol2` 宿主路径（`/tmp` 在 terminal-buddy 容器内，宿主 daemon 不可见）。
