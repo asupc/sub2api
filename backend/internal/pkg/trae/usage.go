@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -292,9 +293,17 @@ func ParseCreditPackages(packs []any, nowTs int64) []CreditPackage {
 
 		var base map[string]any
 		base, _ = object["entitlement_base_info"].(map[string]any)
+		// 包名在 **pack 顶层**（group_name / display_desc），不在 entitlement_base_info
+		// 里——旧实现只读后者，线上命中率恒 0，于是所有包都显示成「未命名包」
+		// （移植 trae-workbuddy-switch 27250bd / issue #143）。base 字段保留为
+		// 最后的兼容回退（旧版本/旧缓存可能真有这个形状）。
+		packageName := packString(object, "group_name", "display_desc")
+		if packageName == "" {
+			packageName = baseString(base, "package_name", "name")
+		}
 		packages = append(packages, CreditPackage{
 			PackageCode:  baseString(base, "package_code", "package_type"),
-			PackageName:  baseString(base, "package_name", "name"),
+			PackageName:  packageName,
 			Total:        round2(limit.value),
 			Remaining:    round2(remaining),
 			Used:         round2(used),
@@ -304,6 +313,16 @@ func ParseCreditPackages(packs []any, nowTs int64) []CreditPackage {
 		})
 	}
 	return packages
+}
+
+// packString 从积分包顶层依次尝试取非空字符串字段。
+func packString(pack map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := pack[key].(string); ok && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // baseString 从 entitlement_base_info 里依次尝试取非空字符串字段。

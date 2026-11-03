@@ -2,7 +2,9 @@ package qoder
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
+	"time"
 )
 
 // 失败治理三族（qoder_accounts.py L888-918 常量 + qoder_proxy.py
@@ -221,6 +223,63 @@ func IsQueuedReject(detail string) bool {
 
 // RetryAfterSeconds 导出的排队/限流等待秒数解析（detail 无该字段返回 0）。
 func RetryAfterSeconds(detail string) int { return parseRetryAfterSeconds(detail) }
+
+// 额度类 403（移植 qoder2api-hub 1033662 / issue #108）。
+//
+// 上游对「账号额度耗尽」（112 / pricingUrl）与「每日计费次数上限」（110 /
+// Billing daily count exceeded）也回 403，与「凭证被拒」同码不同因：重试和
+// 60s 冷却都不会变好，账号还会被反复挑中（每次白等 60-105s）。必须长冷却 +
+// 换号，且不能当鉴权失败去刷新 token。
+const (
+	// QuotaKindExhausted 112 额度耗尽。
+	QuotaKindExhausted = "exhausted"
+	// QuotaKindDaily 110 每日计费次数上限。
+	QuotaKindDaily = "daily"
+	// quota112Cooldown 112 的冷却时长（源 _QUOTA_112_COOLDOWN = 1800s）。
+	quota112Cooldown = 1800 * time.Second
+	// quotaDailyCap 110 冷却到次日 0 点的封顶（源 6h）。
+	quotaDailyCap = 6 * time.Hour
+)
+
+var (
+	quotaCode112Re = regexp.MustCompile(`"code"\s*:\s*"?112\b`)
+	quotaCode110Re = regexp.MustCompile(`"code"\s*:\s*"?110\b`)
+)
+
+// QuotaCooldown 识别额度类 403 的病因与冷却时长（源 _quota_cooldown）：
+//
+//	112 额度耗尽    -> 30 分钟
+//	110 每日次数上限 -> 到本地 0 点（封顶 6h，不短于 60s）
+//	其它            -> ("", 0)
+//
+// detail 可能被套在字符串里（转义形态 \"code\":\"112\"），先去掉反斜杠再匹配。
+func QuotaCooldown(detail string, now time.Time) (kind string, cooldown time.Duration) {
+	s := strings.ReplaceAll(detail, `\`, "")
+	if strings.Contains(s, "pricingUrl") || quotaCode112Re.MatchString(s) {
+		return QuotaKindExhausted, quota112Cooldown
+	}
+	if strings.Contains(s, "Billing daily count exceeded") || quotaCode110Re.MatchString(s) {
+		local := now.Local()
+		midnight := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location()).Add(24 * time.Hour)
+		d := midnight.Sub(now)
+		if d < time.Minute {
+			d = time.Minute
+		}
+		if d > quotaDailyCap {
+			d = quotaDailyCap
+		}
+		// +1s：向上取整到整秒，免得展示成 23:59。
+		return QuotaKindDaily, d + time.Second
+	}
+	return "", 0
+}
+
+// IsQuotaReject 报告 detail 是否为额度类 403（112/110）。
+func IsQuotaReject(detail string) bool {
+	kind, _ := QuotaCooldown(detail, time.Now())
+	return kind != ""
+}
+
 
 // EnvelopeCooldown 信封层错误的冷却时长（qoder_proxy.py L3882-3901）：
 //

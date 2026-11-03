@@ -1035,7 +1035,14 @@ type leakRecover struct {
 	holding  bool
 	holdN    int
 	finished *finishedFrame
-	meta     streamMeta
+	// tailUsage hold 期间到达的 usage 垫底帧（流末跟在收尾帧之后补发）。
+	// 移植 qoder2api-hub 7f949f5：此前这些帧掉进 hold 分支被静默吞掉，触发
+	// 回读/DSML 恢复的轮次调用方整轮收不到 usage（只剩客户端自估的输入 tokens）。
+	tailUsage []map[string]any
+	// failErr 流内 fail-closed 错误（如超限放行的 marker-only 空壳块）。
+	// pending 排空后由 Next 返回，交给上层合成错误帧让客户端重试。
+	failErr error
+	meta    streamMeta
 }
 
 type finishedFrame struct {
@@ -1056,12 +1063,35 @@ func (lr *leakRecover) emitContent(text string) {
 	lr.emit(lr.meta.frame(map[string]any{"content": text}, nil))
 }
 
+// emitContentCarry 合成正文帧 = content + 该帧原有的 tool_calls/reasoning_content
+// 增量（移植 qoder2api-hub a59f89e / issue #124）：只发 content 会把同一帧里的
+// tool_calls 起点（带 function.name）整个丢掉，下游只收到后续参数帧、index 上
+// 永远没有 name，ai-sdk 系客户端收尾时抛 "tool call delta is missing id or name"。
+func (lr *leakRecover) emitContentCarry(text string, delta map[string]any, fin any) {
+	d := map[string]any{"content": text}
+	if delta != nil {
+		if tcs, ok := delta["tool_calls"].([]any); ok && len(tcs) > 0 {
+			d["tool_calls"] = tcs
+		}
+		if rc, ok := delta["reasoning_content"].(string); ok && rc != "" {
+			d["reasoning_content"] = rc
+		}
+	}
+	lr.emit(lr.meta.frame(d, fin))
+}
+
 func (lr *leakRecover) Next() ([]byte, error) {
 	for {
 		if len(lr.pending) > 0 {
 			f := lr.pending[0]
 			lr.pending = lr.pending[1:]
 			return f, nil
+		}
+		if lr.failErr != nil {
+			err := lr.failErr
+			lr.failErr = nil
+			lr.done = true
+			return nil, err
 		}
 		if lr.done {
 			return nil, io.EOF
@@ -1120,6 +1150,27 @@ func (lr *leakRecover) process(raw []byte) {
 		fin = choice["finish_reason"]
 	}
 
+	// usage 垫底帧（choices 为空、顶层带 usage，移植 qoder2api-hub 7f949f5）：
+	//   - hold 期间到达：缓存到流末、跟在收尾帧之后补发，绝不再被静默吞掉；
+	//   - 其余情况下收尾帧被扣着（hold 为空、不可能再改写 finish_reason）：
+	//     先放行收尾帧再透传 usage，恢复 [finish] -> [usage] 标准顺序（按
+	//     「末帧 usage」解析的 OpenAI Chat 客户端才能读到输出/缓存 tokens）。
+	if choice == nil {
+		if u, ok := payload["usage"].(map[string]any); ok && len(u) > 0 {
+			if lr.holding {
+				lr.tailUsage = append(lr.tailUsage, payload)
+				return
+			}
+			if lr.finished != nil {
+				f := lr.finished
+				lr.finished = nil
+				lr.emit([]byte("data: " + marshalNoEscape(f.payload) + "\n\n"))
+			}
+			lr.emit(raw)
+			return
+		}
+	}
+
 	if hasContent && !pieceIsStr {
 		// 非字符串 content（罕见）：不参与暂存判断，原样透传
 		if lr.holding {
@@ -1135,8 +1186,22 @@ func (lr *leakRecover) process(raw []byte) {
 		lr.holdN++
 		if echoHoldCandidate(lr.hold) {
 			if pyLen(lr.hold) > holdMaxChars || lr.holdN > holdMaxFrames {
+				// issue #112（移植 qoder2api-hub f10c627）：超限放行前先补一次
+				// marker-only 判定 —— 只有标记的空壳块会被当正文发出去，绕过
+				// 流末 fail-closed（实测日志：released oversized leak hold）。
+				if len(lr.allowed) > 0 && isBareMarker(pyStrip(lr.hold)) {
+					lr.failErr = fmt.Errorf("qoder: bare tool-call marker released on hold overflow (%d chars/%d frames) — failing the turn closed",
+						pyLen(lr.hold), lr.holdN)
+					lr.holding = false
+					lr.holdN = 0
+					return
+				}
 				// issue #16 兜底：超限即 fail-open 放行
-				lr.emitContent(lr.hold)
+				carry := delta
+				if fin != nil {
+					carry = nil // 收尾帧稍后自带同帧增量，避免重复
+				}
+				lr.emitContentCarry(lr.hold, carry, nil)
 				lr.holding = false
 				lr.holdN = 0
 				if fin != nil {
@@ -1163,7 +1228,11 @@ func (lr *leakRecover) process(raw []byte) {
 			}
 			return
 		}
-		lr.emitContent(lr.hold)
+		carry := delta
+		if fin != nil {
+			carry = nil // 收尾帧稍后自带同帧增量，避免重复
+		}
+		lr.emitContentCarry(lr.hold, carry, nil)
 		lr.holding = false
 		lr.holdN = 0
 		if fin != nil {
@@ -1179,7 +1248,11 @@ func (lr *leakRecover) process(raw []byte) {
 		emit16, hold16 := findMarkerSplit(piece, true)
 		if hold16 != "" {
 			if emit16 != "" {
-				lr.emitContent(emit16)
+				carry := delta
+				if fin != nil {
+					carry = nil // 收尾帧稍后自带同帧增量，避免重复
+				}
+				lr.emitContentCarry(emit16, carry, nil)
 			}
 			lr.hold = hold16
 			lr.holding = true
@@ -1198,7 +1271,7 @@ func (lr *leakRecover) process(raw []byte) {
 			}
 			return
 		}
-		lr.emit(lr.meta.frame(map[string]any{"content": piece}, fin))
+		lr.emitContentCarry(piece, delta, fin)
 		return
 	}
 	lr.emit(raw)
@@ -1260,6 +1333,11 @@ func (lr *leakRecover) finishStream() {
 	} else if recovered {
 		lr.emit(lr.meta.frame(map[string]any{}, "tool_calls"))
 	}
+	// hold 期间暂存的 usage 垫底帧：跟在收尾帧之后补发（标准顺序）。
+	for _, u := range lr.tailUsage {
+		lr.emit([]byte("data: " + marshalNoEscape(u) + "\n\n"))
+	}
+	lr.tailUsage = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1343,6 +1421,129 @@ func (h *heartbeatIter) Next() ([]byte, error) {
 }
 
 // ---------------------------------------------------------------------------
+// 流末工具参数完整性守卫（移植 qoder2api-hub f10c627 / issue #112）
+// ---------------------------------------------------------------------------
+
+// truncatedArgsGuard 在流末校验 tool_calls 的 arguments 完整性：上游在参数
+// 还没写完时就干净 EOF 时，客户端只看到「半截调用 + 没有 finish_reason」，
+// coding agent 会把它当这一轮正常结束（静默中断，比报错更难查）。累计到过
+// tool_call 增量、没收到 finish_reason、且某个调用的 arguments 不是合法 JSON
+// -> 返回错误（fail-closed），上层合成错误帧让客户端重试。其余情况逐字节透传。
+type truncatedArgsGuard struct {
+	src     FrameIter
+	calls   map[int]*truncatedCall
+	finish  bool
+	checked bool
+	failErr error
+}
+
+type truncatedCall struct {
+	name string
+	args strings.Builder
+}
+
+// GuardTruncatedToolArgs 包装一个帧迭代器，追加流末参数完整性校验。
+func GuardTruncatedToolArgs(src FrameIter) FrameIter {
+	return &truncatedArgsGuard{src: src, calls: map[int]*truncatedCall{}}
+}
+
+func (g *truncatedArgsGuard) Next() ([]byte, error) {
+	if g.failErr != nil {
+		err := g.failErr
+		g.failErr = nil
+		return nil, err
+	}
+	frame, err := g.src.Next()
+	if err == io.EOF {
+		if g.checked {
+			return nil, io.EOF
+		}
+		g.checked = true
+		if len(g.calls) > 0 && !g.finish {
+			idxs := make([]int, 0, len(g.calls))
+			for idx := range g.calls {
+				idxs = append(idxs, idx)
+			}
+			sort.Ints(idxs)
+			for _, idx := range idxs {
+				call := g.calls[idx]
+				args := strings.TrimSpace(call.args.String())
+				if args == "" {
+					continue
+				}
+				if json.Valid([]byte(args)) {
+					continue
+				}
+				g.failErr = fmt.Errorf(
+					"qoder: stream ended without finish_reason and tool call %q has incomplete JSON arguments (%d chars) — failing the stream closed",
+					call.name, len(args))
+				err = g.failErr
+				g.failErr = nil
+				return nil, err
+			}
+		}
+		return nil, io.EOF
+	}
+	if err != nil {
+		return nil, err
+	}
+	g.observe(frame)
+	return frame, nil
+}
+
+// observe 累计 tool_call 增量与 finish_reason（解析失败忽略）。
+func (g *truncatedArgsGuard) observe(frame []byte) {
+	data := StripDataPrefix(string(frame))
+	if data == "" || data == "[DONE]" {
+		return
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(data), &payload) != nil {
+		return
+	}
+	choices := anyList(payload["choices"])
+	if len(choices) == 0 {
+		return
+	}
+	choice, _ := choices[0].(map[string]any)
+	if choice == nil {
+		return
+	}
+	if truthy(choice["finish_reason"]) {
+		g.finish = true
+	}
+	delta, _ := choice["delta"].(map[string]any)
+	if delta == nil {
+		return
+	}
+	for _, raw := range anyList(delta["tool_calls"]) {
+		tc, _ := raw.(map[string]any)
+		if tc == nil {
+			continue
+		}
+		idx := 0
+		if v, ok := tc["index"].(float64); ok {
+			idx = int(v)
+		}
+		call := g.calls[idx]
+		if call == nil {
+			call = &truncatedCall{}
+			g.calls[idx] = call
+		}
+		fn, _ := tc["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		if name, _ := fn["name"].(string); name != "" {
+			call.name = name
+		}
+		if args, _ := fn["arguments"].(string); args != "" {
+			call.args.WriteString(args)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 顶层转换器：私有 SSE 流 -> OpenAI chat.completion.chunk 流
 // ---------------------------------------------------------------------------
 
@@ -1371,9 +1572,10 @@ type chatStream struct {
 func NewChatStream(r io.Reader, opts ChatStreamOptions) FrameIter {
 	inner := NewInnerSSE(r, opts.Usage)
 	recovered := RecoverLeakedToolCalls(inner, opts.AllowedToolNames)
-	var src FrameIter = recovered
+	// issue #112：流末工具参数完整性守卫（上游中途 EOF 时 fail-closed）
+	var src FrameIter = GuardTruncatedToolArgs(recovered)
 	if opts.HeartbeatInterval > 0 {
-		src = WithHeartbeat(recovered, opts.HeartbeatInterval, opts.IdleLimit)
+		src = WithHeartbeat(src, opts.HeartbeatInterval, opts.IdleLimit)
 	}
 	return &chatStream{src: src}
 }

@@ -182,7 +182,10 @@ var modelAliases = map[string]string{
 	"glm-5.3-flash":       "gfmodel",
 	"glm-5.2":             "gm51model",
 	"kimi-k3":             "kmodel_latest",
-	"kimi-k2.8-preview":   "kmodel",
+	// 官方 2026-10 把 kmodel_latest 的显示名从 Kimi-K3 改为 Kimi-K3.1-Pro，
+	// 快照未跟上的窗口期用此别名离线兜底（移植 qoder2api-hub e53ca20 / PR #119）。
+	"kimi-k3.1-pro":     "kmodel_latest",
+	"kimi-k2.8-preview": "kmodel",
 	"kimi-k2.7":           "kmodel",
 	"kimi-k2.7-code":      "kmodel",
 	"minimax-m3":          "mmodel",
@@ -230,6 +233,54 @@ func displayIndex(realm string) map[string]string {
 		}
 	}
 	return idx
+}
+
+// 动态显示名索引（移植 qoder2api-hub e53ca20 / PR #119）。
+//
+// 官方把 kmodel_latest 的显示名从 Kimi-K3 改为 Kimi-K3.1-Pro 时，/v1/models
+// 动态清单广告新名而冻结快照仍停在旧名；不注册动态名的话，客户端用新名请求
+// 会被原样当成上游 key 发出、上游静默按 auto 路由。动态清单拉取成功后把
+// 「display_name -> key」注册进来；解析顺序：别名 -> 冻结显示名 -> 动态显示名。
+// 快照用 _refresh_catalog.py 跟上官方后，这里的注册自然与之同值。
+var (
+	liveDisplayMu    sync.Mutex
+	liveDisplayIndex = map[string]string{}
+)
+
+// registerLiveDisplayNames 注册动态清单的 (显示名, key) 对；同名后注册的覆盖
+// 先注册的（动态接口 > 本机缓存 > 快照的降级顺序由调用方保证）。
+func registerLiveDisplayNames(pairs map[string]string) {
+	liveDisplayMu.Lock()
+	defer liveDisplayMu.Unlock()
+	for name, key := range pairs {
+		n := strings.ToLower(strings.TrimSpace(name))
+		k := strings.TrimSpace(key)
+		if n == "" || k == "" {
+			continue
+		}
+		liveDisplayIndex[n] = k
+	}
+}
+
+// liveDisplayLookup 查动态显示名索引（小写名）。
+func liveDisplayLookup(name string) string {
+	if name == "" {
+		return ""
+	}
+	liveDisplayMu.Lock()
+	defer liveDisplayMu.Unlock()
+	return liveDisplayIndex[name]
+}
+
+// registerLiveNamesFromCatalog 把目录条目的显示名注册进动态索引。
+func registerLiveNamesFromCatalog(entries []CatalogEntry) {
+	pairs := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if strings.TrimSpace(e.DisplayName) != "" && e.Key != "" {
+			pairs[e.DisplayName] = e.Key
+		}
+	}
+	registerLiveDisplayNames(pairs)
 }
 
 // ResolveUpstreamKey 把客户端请求的模型名解析为上游 model key
@@ -283,6 +334,10 @@ func ResolveUpstreamKey(model, realm string) string {
 	if v, ok := dispIdx[low]; ok {
 		return v
 	}
+	// 动态清单显示名（官方改显示名、快照未跟上的窗口期，如 Kimi-K3.1-Pro）
+	if live := firstNonEmpty(liveDisplayLookup(tail), liveDisplayLookup(low)); live != "" {
+		return live
+	}
 	// 官方本地化名（zh.label）
 	target := low
 	if tail != low {
@@ -306,6 +361,9 @@ func ResolveUpstreamKey(model, realm string) string {
 		}
 		if v, ok := dispIdx[part]; ok {
 			return v
+		}
+		if live := liveDisplayLookup(part); live != "" {
+			return live
 		}
 	}
 	return mKey
@@ -446,9 +504,12 @@ func (c *Client) FetchModels(ctx context.Context, realm string, sess *CosySessio
 		if serr != nil {
 			return nil, fmt.Errorf("qoder: dynamic model list: %v; static catalog: %w", err, serr)
 		}
+		registerLiveNamesFromCatalog(static)
 		return static, nil
 	}
 	merged := mergeCatalog(staticOrdered(realm), dynamic)
+	// 动态清单到手即注册显示名（官方改名窗口期的解析兜底）
+	registerLiveNamesFromCatalog(merged)
 
 	modelsCacheMu.Lock()
 	modelsCache[realm] = modelsCacheEntry{at: time.Now(), entries: merged}

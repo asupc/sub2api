@@ -59,9 +59,13 @@ func TestBuildAgentChatBodyOverwrites(t *testing.T) {
 	if body["aliyun_user_type"] != "personal_professional_trial" {
 		t.Fatalf("aliyun_user_type = %v", body["aliyun_user_type"])
 	}
-	// request_id == chat_record_id，其余 id 各自独立
-	if body["request_id"] != body["chat_record_id"] {
-		t.Fatal("request_id must equal chat_record_id")
+	// issue #128：chat_record_id 复用会话身份（此处由历史摘要兜底生成），
+	// request_id 仍然逐请求唯一；request_set_id / session_id 各自独立 uuid。
+	if rid, _ := body["request_id"].(string); rid == "" {
+		t.Fatal("request_id must not be empty")
+	}
+	if body["request_id"] == body["chat_record_id"] {
+		t.Fatal("request_id must stay per-request unique (chat_record_id is session-stable)")
 	}
 	if body["request_set_id"] == body["session_id"] {
 		t.Fatal("request_set_id / session_id should be independent uuids")

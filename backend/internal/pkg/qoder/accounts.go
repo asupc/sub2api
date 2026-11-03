@@ -1183,9 +1183,51 @@ const defaultCampaignClaimGap = time.Second
 // CampaignCheckin 活动平台签到：列活动 → 分类 → 逐个领取 CLAIMABLE 目标类条目。
 // 判定链逐条对齐 qoder_accounts.py L2262-2390；本函数不抛业务错误（列表/领取
 // 失败均归入 Outcome 字段），仅 ctx 取消等传输层异常经 error 返回。
+// campaignListNeedsRetry 活动列表要不要重试（移植 qoder2api-hub fc8d46e /
+// issue #130）：只在「查询成功但**没有可领项**」时重试——空列表、
+// showCampaign=false 且不可领、或列表里没有任何 CLAIMABLE 且属于 OnlyKinds
+// 的活动。查询本身失败不在这里重试（上层有自己的错误路径）。
+func campaignListNeedsRetry(st *CampaignsStatus, onlyKinds []string) bool {
+	if st == nil || !st.OK {
+		return false
+	}
+	if len(st.Campaigns) == 0 {
+		return true
+	}
+	if !st.ShowCampaign && !st.Claimable {
+		return true
+	}
+	for _, item := range st.Campaigns {
+		if strings.ToUpper(strings.TrimSpace(item.ClaimStatus)) != "CLAIMABLE" {
+			continue
+		}
+		if onlyKinds != nil && !kindAllowed(onlyKinds, strings.ToUpper(strings.TrimSpace(item.BenefitKind))) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (*CampaignCheckinOutcome, error) {
 	out := &CampaignCheckinOutcome{BlockedMarks: map[string]int64{}}
 	st, err := c.Campaigns(ctx, in.Creds) // Go 无列表缓存，直接查最新（Python force=True 的对应物）
+	// issue #130（移植 qoder2api-hub fc8d46e）：同一请求上游偶发返回「没有每日
+	// 活动 / claimable=false」（报告者实测 10 次里 2 次），一次空结果就放弃会让
+	// 当天签到直接丢掉。对**空结果/无可领项**重试两次（0.8s、2.0s 退避），
+	// 拿到可领项即停；查询本身失败不在此重试（下方错误路径）。
+	for _, wait := range []time.Duration{800 * time.Millisecond, 2 * time.Second} {
+		if err != nil || !campaignListNeedsRetry(st, in.OnlyKinds) {
+			break
+		}
+		if serr := sleepCtx(ctx, wait); serr != nil {
+			break
+		}
+		retrySt, retryErr := c.Campaigns(ctx, in.Creds)
+		if retryErr == nil && retrySt != nil && retrySt.OK {
+			st, err = retrySt, nil
+		}
+	}
 	if err == nil && st != nil && st.OK {
 		out.Available = st.Available
 	} else {
