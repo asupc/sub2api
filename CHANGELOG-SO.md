@@ -9,7 +9,7 @@
 | 项 | 状态 |
 |---|---|
 | 上游基准 | `UPSTREAM-BASE`=`a3298b46`（v0.2.19）；`backend/cmd/server/VERSION`=0.2.19 |
-| 移植源基准 | `PORTER-BASE` 文件：workbuddy `a6a967ef`（workbuddy2api-hub v1.9.0，2026-10-29 自 panel 切换）、qoder `0426c334`、trae `1707fae1` |
+| 移植源基准 | `PORTER-BASE` 文件：workbuddy `a6a967ef`（workbuddy2api-hub v1.9.0，2026-10-29 自 panel 切换）、qoder `449e0daa`（v1.7.14）、trae `930d1495`（2026.11.31506） |
 | 后端 | 代码 = v0.2.19 + 二开（三平台源码集成、Antigravity 直接模型模式、复合分组同族多平台调度、推理档位全量透传、OpenCode reasoning 回放收口、账号/计费/网关定制，逐项见时间线）；模型能力测评已于 10-23 整体移除 |
 | 前端 | 二开：功能入口裁剪 + UI/UX 体系重构 + 仪表盘/用量统计/账号表格增强；模型能力中心收敛为模型清单单页（无评分）；用量统计含「按 API 统计用量」与模型分布折叠 |
 | 数据库 | 官方迁移序列终态（裁剪期 drop 的表由 `deploy/restore-upstream-schema.sql` 恢复，可重放幂等）；二开迁移命名 `NNN_so_*.sql`，最新占用 250（测评表 DROP），后续从 251+ 起 |
@@ -219,3 +219,16 @@
 - **构建链**：Go 1.27.2→1.27.3（go.mod 随上游；根/`backend`/`deploy` Dockerfile 与 so-dev compose 同步换 `golang:1.27.3`）；`pnpm-lock.yaml` 直接采用上游版（package.json 二开未改，`--frozen-lockfile` 校验通过）。
 - **验证**：后端 `go build`/`go vet`/`go test -tags=unit ./...` 失败仅 6 个存量项（`TestApplyOpenAICompatModelNormalization`[10-20 透传遗留] / `TestResolveGeminiThinkingVariant` / 复合分组族 ×2 / `TestEveryGatewayPOSTRouteIsClassifiedForPromptAuditCoverage` / `TestConfiguredUpstreamModelsForCapabilitySyncSkipsInjectedAntigravityPassthroughs`，经 HEAD 工作树基线比对确认同步前即失败）；`TestTraeOpsService_Registration` 全量并行下偶发（全局注册表覆盖式设计，单跑必过，非本次引入）。前端 typecheck + build（i18n 完整性 + vue-tsc + vite）全绿、vitest 290 文件 / 2265 用例全过。版本号 tag 推导 0.2.19 == VERSION 0.2.19。ent 重生成后仅预期 9 文件变更。gofmt 漂移集与 HEAD 一致（无新增）。
 - **环境备注（NAS）**：前端 node_modules 在宿主 fs mode 000 下 esbuild 无法执行，`install`/`build`/`test` 一律在 `node:24-alpine` 容器执行（`corepack prepare pnpm@9.15.9 --activate` 固定版本，pnpm 12 会因 overrides 报错）；构建需挂整个 `sub2api-so`（LegalDocumentView 引用 `docs/legal/*.md`）；docker 挂载必须用 `/vol2` 宿主路径（`/tmp` 在 terminal-buddy 容器内，宿主 daemon 不可见）。
+
+### 2026-11-03 移植源同步（qoder v1.7.6→v1.7.14、trae 2026.10.26→11.03）
+
+- **区间**：qoder `0426c334 → 449e0da`（39 提交，v1.7.7→v1.7.14，含 PR #104~#131）；trae-workbuddy-switch `1707fae1 → 930d149`（约 130 提交，含 P13 降级链、跨平台降级、issue #87/#88/#100~#154）。**已移植 8 项**（用户全选缺陷修复类；功能增强类经用户裁定「暂不需要」）：
+- **qoder 出站体（`pkg/qoder/baseprompt.go` + 新增 `conversation_identity.go`）**：① `business.model_key` 计费归因 + `business.version` 对齐 COSYVersion（PR #119/f686228：缺失时上游把 kmodel_latest 类静默记成 auto）；② 会话身份稳定化（747f83a #128）：`chat_record_id`/`business.id`/`begin_at` 按客户端会话键（conversation_id/session_id/metadata.conversation_id，缺失退化为「模型+系统+首条 user」sha1）在 LRU（4096/6h）内复用，`request_id` 仍逐请求唯一，`QD_CONVERSATION_SHARE=0` 可关闭——防一个 agent 回合被上游拆成几十条 <1min 对话撞 code 110 日上限；③ `type:"namespace"` 容器递归展开（深度 4，同名留首个）替代整块丢弃（6fdc252 #127）。
+- **qoder 模型解析（`pkg/qoder/models.go`）**：动态显示名索引（e53ca20/PR #119）——`FetchModels` 合并结果注册「display_name→key」，`ResolveUpstreamKey` 顺序变为 别名→冻结显示名→动态显示名；补 `kimi-k3.1-pro→kmodel_latest` 离线别名兜底。官方改名窗口期客户端新名不再被原样当上游 key 透传。
+- **qoder 错误分类（`pkg/qoder/errors.go` + `service/openai_gateway_qoder.go`）**：额度类 403 识别（1033662 #108）——112/pricingUrl → 冷却 30min，110/Billing daily count exceeded → 冷却到本地 0 点（封顶 6h）；建流前与流内两条处置路径均长冷却换号、不刷新 token、不禁用账号，单号池不被压成 3s；对外分类为 429 而非 401。
+- **qoder SSE 守卫族（`pkg/qoder/sse.go`，7f949f5/f10c627/a59f89e）**：① hold 期间到达的 usage 垫底帧缓存到流末、跟在收尾帧后补发（此前整轮被吞）；② 收尾帧被扣且无缓冲时先放行再透传 usage，恢复 `[finish]→[usage]` 标准顺序；③ 超限 fail-open 放行前补 marker-only 判定，命中即 fail-closed（新增 `failErr`）；④ 新增 `GuardTruncatedToolArgs`：流末「见过 tool_call 增量 + 无 finish_reason + 参数非法 JSON」→ 返回错误让客户端重试；⑤ 合成正文帧搬运同帧 `tool_calls`/`reasoning_content` 增量（#124，防下游 index 缺 name）。
+- **qoder 签到（`pkg/qoder/accounts.go`）**：活动列表空结果/无可领项时重试两次（0.8s/2.0s），避免一次抖动丢掉当天签到（fc8d46e #130 第 1 项；同人去重盖章本侧已有等价实现，不重复移植）。
+- **trae 积分包（`pkg/trae/usage.go`）**：包名改取 pack 顶层 `group_name`→`display_desc`，`entitlement_base_info.package_name/name` 仅作兼容回退（27250bd #143；线上顶层字段才存在，旧实现命中率恒 0 → 全部「未命名包」）。
+- **评估未移植（本次裁定）**：qoder effort clamp 双向化（本侧 `NormalizeReasoningEffort` 已双向）、额度 403 之外的面板/SSRF/白名单/Web 工具记账/i18n（面板专属或 Go 免疫）、签到 SAME_PERSON 盖章（已有 6h 冷却等价）、调度器 fired 持久化（自有 ops 调度）；trae 保活窗口/令牌家族兜底（本侧 30min 滑窗+持续轮询+缺过期即判刷+job 兜底 24h，架构免疫）、Anthropic 出口 usage 补齐与 Responses namespace/并行工具合并（本侧链路已完整/桥层已等价）、模型降级链 P13、跨平台降级、账号级 auto_failover、顺序选号档、冷却指纹自证、会话导出/导入、逐资源包明细、记忆迁移、桌面端 session/钥匙串/UI/CI 类。可选增强（上下文窗口可配置 #106、模型图片能力内置表 #142、粘性键读入站会话头 #150、模型降级链）经用户裁定本次不做。
+- **改动文件**：`pkg/qoder/{baseprompt,models,errors,sse,accounts}.go`、新增 `pkg/qoder/conversation_identity.go`、`pkg/trae/usage.go`、`service/openai_gateway_qoder.go`；测试新增 `pkg/qoder/porter_sync_test.go`、`pkg/trae/credit_pack_name_test.go`，更新 `pkg/qoder/baseprompt_test.go`（request_id 与 chat_record_id 分离断言）。**合并影响**：全部为二开文件（`pkg/qoder`/`pkg/trae`/`openai_gateway_qoder.go` 均在三平台源码集成时新增），无上游同步冲突面；不触碰 `UPSTREAM-BASE`。`PORTER-BASE`：qoder → `449e0daa`、trae → `930d1495`。
+- **验证**：本机 Docker `golang:1.27.3`（go.mod 实际要求 1.27.3）`go build ./...` 通过、`go vet` 目标包通过；`go test -tags=unit ./internal/...` 仅 6 个存量失败（与基线清单一致），`pkg/qoder`、`pkg/trae` 与 service 的 Qoder/Trae 相关用例全绿。
