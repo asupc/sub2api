@@ -940,7 +940,30 @@ func namespaceToolName(tool map[string]any) string {
 	return ""
 }
 
-// flattenNamespaceTools 把 type:"namespace" 容器递归展开成平铺工具（源
+// namespaceChildren 取容器的子工具列表（tools/children/functions 第一个非空）。
+func namespaceChildren(tool map[string]any) []any {
+	for _, key := range namespaceChildKeys {
+		if list, ok := tool[key].([]any); ok && len(list) > 0 {
+			return list
+		}
+	}
+	return nil
+}
+
+// isNamespaceTool 是不是 namespace 容器（源 _is_namespace_tool）：显式
+// type:"namespace"，或**省略 type** 但带非空 children/functions/tools 的形态。
+func isNamespaceTool(tool map[string]any) bool {
+	typ := strings.TrimSpace(anyString(tool["type"]))
+	if typ == "namespace" {
+		return true
+	}
+	if typ == "" && len(namespaceChildren(tool)) > 0 {
+		return true
+	}
+	return false
+}
+
+// flattenNamespaceTools 把 namespace 容器递归展开成平铺工具（源
 // _flatten_ns_tools / issue #127 F1）。返回 (flat, ns_map)，ns_map 记录
 // 工具名 → namespace（本函数内仅内部使用；直打 chat 路径不需要回程还原，
 // Responses 回程由 pkg/apicompat 桥处理）。
@@ -959,8 +982,7 @@ func flattenNamespaceTools(tools []any, depth int, seen map[string]bool) ([]any,
 		if !ok {
 			continue
 		}
-		typ, _ := tool["type"].(string)
-		if strings.TrimSpace(typ) == "namespace" {
+		if isNamespaceTool(tool) {
 			if depth >= namespaceMaxDepth {
 				continue
 			}
@@ -968,14 +990,7 @@ func flattenNamespaceTools(tools []any, depth int, seen map[string]bool) ([]any,
 			if ns == "" {
 				ns = strings.TrimSpace(anyString(tool["namespace"]))
 			}
-			var children []any
-			for _, key := range namespaceChildKeys {
-				if list, ok := tool[key].([]any); ok && len(list) > 0 {
-					children = list
-					break
-				}
-			}
-			sub, subMap := flattenNamespaceTools(children, depth+1, map[string]bool{})
+			sub, subMap := flattenNamespaceTools(namespaceChildren(tool), depth+1, map[string]bool{})
 			for k, v := range subMap {
 				nsMap[k] = v
 			}
@@ -1031,7 +1046,9 @@ func anyString(v any) string {
 // 经 ResolveUpstreamKey 解析（带 realm，对齐 Python resolve_upstream_key(model,
 // realm=realm)——不带区域会丢跨区显示名校验）；realm 供结构化工具历史门控
 // 判断（cn/intl）与目录元数据查取。
-func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm string) (string, error) {
+// 可选的 clientSessionKey 是上游会话键的 HTTP 头半边（X-Conversation-Id 等，
+// 源 extract_session_key 头优先）；为空时回落到请求体解析。
+func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm string, clientSessionKey ...string) (string, error) {
 	body, err := Baseprompt()
 	if err != nil {
 		return "", err
@@ -1091,7 +1108,15 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	// issue #128：同一客户端会话复用稳定身份（chat_record_id / business.id /
 	// begin_at），避免一个 agent 回合被上游记成几十条对话撞 code 110 日上限。
 	// request_id / request_set_id 仍逐请求唯一（计费与限额按请求计数）。
-	conv := ConversationIdentity(extractClientSessionKey(openAIReq), openAIReq)
+	// 会话键头优先（源 extract_session_key），缺失时回落到请求体解析。
+	clientKey := ""
+	if len(clientSessionKey) > 0 {
+		clientKey = strings.TrimSpace(clientSessionKey[0])
+	}
+	if clientKey == "" {
+		clientKey = extractClientSessionKey(openAIReq)
+	}
+	conv := ConversationIdentity(clientKey, openAIReq)
 
 	nid := UUID4()
 	body["request_id"] = nid

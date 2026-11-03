@@ -5,6 +5,7 @@ package qoder
 import (
 	"container/list"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,69 @@ func TestConversationIdentityHistoryFallback(t *testing.T) {
 	}
 	if c := ConversationIdentity("", other); c != nil && c.id == a.id {
 		t.Fatal("different histories must not share identity")
+	}
+}
+
+func TestConversationIdentitySplitsPerTurn(t *testing.T) {
+	resetConversationCache()
+	t.Setenv("QD_CONVERSATION_SHARE", "1")
+	first := map[string]any{
+		"model": "auto",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "第一问"},
+		},
+	}
+	toolStep := map[string]any{
+		"model": "auto",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "第一问"},
+			map[string]any{"role": "assistant", "content": "", "tool_calls": []any{}},
+			map[string]any{"role": "tool", "content": "结果"},
+		},
+	}
+	second := map[string]any{
+		"model": "auto",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "第一问"},
+			map[string]any{"role": "assistant", "content": "答"},
+			map[string]any{"role": "user", "content": "第二问"},
+		},
+	}
+	a := ConversationIdentity("sess-turn", first)
+	b := ConversationIdentity("sess-turn", toolStep) // 同一提问内的工具步进
+	c := ConversationIdentity("sess-turn", second)   // 下一次用户提问
+	if a == nil || b == nil || c == nil {
+		t.Fatal("nil identity")
+	}
+	if a.id != b.id {
+		t.Fatal("tool steps within one question must share identity")
+	}
+	if a.id == c.id {
+		t.Fatal("a new user question must start a new conversation identity")
+	}
+}
+
+func TestConversationIdentityDisabledVariants(t *testing.T) {
+	resetConversationCache()
+	for _, v := range []string{"0", "false", "False", "no"} {
+		t.Setenv("QD_CONVERSATION_SHARE", v)
+		if got := ConversationIdentity("sess", map[string]any{}); got != nil {
+			t.Fatalf("QD_CONVERSATION_SHARE=%q should disable sharing", v)
+		}
+	}
+}
+
+func TestConversationTTLEnvOverride(t *testing.T) {
+	if got := conversationTTL(); got != conversationTTLDefault {
+		t.Fatalf("default TTL = %d", got)
+	}
+	t.Setenv("QD_CONVERSATION_TTL", "120")
+	if got := conversationTTL(); got != 120 {
+		t.Fatalf("env TTL = %d, want 120", got)
+	}
+	t.Setenv("QD_CONVERSATION_TTL", "bogus")
+	if got := conversationTTL(); got != conversationTTLDefault {
+		t.Fatalf("invalid env TTL should fall back, got %d", got)
 	}
 }
 
@@ -205,14 +269,33 @@ func TestRecoverUsageNotSwallowedDuringHold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sawUsage := false
+	// 顺序必须是「恢复块 … FINISH(tool_calls) → USAGE」：usage 不能被吞，
+	// 也不能被补发到收尾帧之前。
+	var order []string
 	for _, f := range frames {
-		if strings.Contains(string(f), `"usage"`) {
-			sawUsage = true
+		data := StripDataPrefix(string(f))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) != nil {
+			continue
+		}
+		if _, ok := m["usage"]; ok {
+			order = append(order, "usage")
+			continue
+		}
+		if chs, _ := m["choices"].([]any); len(chs) > 0 {
+			ch, _ := chs[0].(map[string]any)
+			if truthy(ch["finish_reason"]) {
+				order = append(order, "finish")
+			} else if delta, _ := ch["delta"].(map[string]any); truthy(delta["tool_calls"]) {
+				order = append(order, "tool_call")
+			}
 		}
 	}
-	if !sawUsage {
-		t.Fatalf("usage frame swallowed during hold recovery: %q", frames)
+	if len(order) < 2 || order[len(order)-1] != "usage" || order[len(order)-2] != "finish" {
+		t.Fatalf("recovery frame order = %v, want ... finish,usage", order)
 	}
 }
 
@@ -258,6 +341,280 @@ func TestCampaignListNeedsRetry(t *testing.T) {
 	}
 }
 
+func TestConversationIdentityTTLBoundary(t *testing.T) {
+	resetConversationCache()
+	t.Setenv("QD_CONVERSATION_SHARE", "1")
+	base := time.Unix(1_700_000_000, 0)
+	old := conversationClock
+	defer func() { conversationClock = old }()
+	conversationClock = func() time.Time { return base }
+
+	req := map[string]any{"messages": []any{map[string]any{"role": "user", "content": "边界"}}}
+	a := ConversationIdentity("sess-boundary", req)
+	// 恰好 6h 空闲：仍有效（源 TTL 判据 <=，且命中会刷新 at——滑动过期）
+	conversationClock = func() time.Time { return base.Add(6 * time.Hour) }
+	b := ConversationIdentity("sess-boundary", req)
+	if b == nil || b.id != a.id {
+		t.Fatal("identity must still be valid at exactly TTL")
+	}
+	// 自上次使用起超过 TTL：过期换新
+	conversationClock = func() time.Time { return base.Add(12*time.Hour + time.Second) }
+	if c := ConversationIdentity("sess-boundary", req); c == nil || c.id == a.id {
+		t.Fatal("identity must expire after TTL of inactivity")
+	}
+}
+
+func TestQuotaCooldownDailyLowerBound(t *testing.T) {
+	// 临近日界：冷却不得短于 60s（源 max(60, ...)）。
+	now := time.Date(2026, 11, 3, 23, 59, 30, 0, time.Local)
+	kind, cd := QuotaCooldown(`{"code":"110"}`, now)
+	if kind != QuotaKindDaily {
+		t.Fatalf("kind = %q", kind)
+	}
+	if cd < time.Minute {
+		t.Fatalf("110 cooldown near midnight = %v, want >= 1m", cd)
+	}
+}
+
+func TestQuotaCooldownIgnoresEmptyUsage(t *testing.T) {
+	// 空 usage 字典同样算 usage 垫底帧：不得破坏 [finish] -> [usage]。
+	src := FramesOf(
+		rawFrame(t, map[string]any{}, "stop", nil),
+		usageFrame(t, map[string]any{}),
+	)
+	frames, err := collectFrames(t, RecoverLeakedToolCalls(src, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, f := range frames {
+		data := StripDataPrefix(string(f))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) != nil {
+			continue
+		}
+		if _, ok := m["usage"]; ok {
+			order = append(order, "usage")
+			continue
+		}
+		if chs, _ := m["choices"].([]any); len(chs) > 0 {
+			ch, _ := chs[0].(map[string]any)
+			if truthy(ch["finish_reason"]) {
+				order = append(order, "finish")
+			}
+		}
+	}
+	if strings.Join(order, ",") != "finish,usage" {
+		t.Fatalf("empty-usage frame order = %v, want [finish usage]", order)
+	}
+}
+
+func TestRecoverMarkerOnlyOverflowFailsClosed(t *testing.T) {
+	frames := [][]byte{rawFrame(t, map[string]any{"content": LeakMarker}, nil, nil)}
+	for i := 0; i <= holdMaxFrames+2; i++ {
+		frames = append(frames, rawFrame(t, map[string]any{}, nil, nil))
+	}
+	_, err := collectFrames(t, RecoverLeakedToolCalls(FramesOf(frames...), map[string]bool{"terminal": true}))
+	if err == nil {
+		t.Fatal("bare marker overflow must fail the stream closed")
+	}
+	if !strings.Contains(err.Error(), "marker") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRecoverSameFrameToolCallsCarried(t *testing.T) {
+	// 证伪路径把暂存补发为正文时，必须搬运同帧的 tool_calls 增量（#124）。
+	tc := []any{map[string]any{
+		"index": 0, "id": "call_1", "type": "function",
+		"function": map[string]any{"name": "terminal", "arguments": `{"a"`},
+	}}
+	src := FramesOf(
+		rawFrame(t, map[string]any{"content": LeakMarker}, nil, nil),
+		rawFrame(t, map[string]any{"content": "hello", "tool_calls": tc}, nil, nil),
+	)
+	frames, err := collectFrames(t, RecoverLeakedToolCalls(src, map[string]bool{"terminal": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	carried := false
+	for _, f := range frames {
+		data := StripDataPrefix(string(f))
+		var m map[string]any
+		if json.Unmarshal([]byte(data), &m) != nil {
+			continue
+		}
+		chs, _ := m["choices"].([]any)
+		if len(chs) == 0 {
+			continue
+		}
+		ch, _ := chs[0].(map[string]any)
+		delta, _ := ch["delta"].(map[string]any)
+		content, _ := delta["content"].(string)
+		if !strings.HasSuffix(content, "hello") {
+			continue
+		}
+		if tcl, _ := delta["tool_calls"].([]any); len(tcl) > 0 {
+			carried = true
+		}
+	}
+	if !carried {
+		t.Fatalf("same-frame tool_calls not carried into synthesized content frame: %q", frames)
+	}
+}
+
+func TestGuardNamelessToolCallsBuffersUntilName(t *testing.T) {
+	src := FramesOf(
+		rawFrame(t, map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "id": "call_9", "type": "function",
+			"function": map[string]any{"arguments": `{"a":`},
+		}}}, nil, nil),
+		rawFrame(t, map[string]any{"tool_calls": []any{map[string]any{
+			"index":    0,
+			"function": map[string]any{"name": "terminal", "arguments": `1}`},
+		}}}, nil, nil),
+	)
+	frames, err := collectFrames(t, GuardNamelessToolCalls(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("expected single merged tool_call frame, got %d: %q", len(frames), frames)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(StripDataPrefix(string(frames[0]))), &m); err != nil {
+		t.Fatal(err)
+	}
+	chs, _ := m["choices"].([]any)
+	ch, _ := chs[0].(map[string]any)
+	delta, _ := ch["delta"].(map[string]any)
+	tcs, _ := delta["tool_calls"].([]any)
+	tc, _ := tcs[0].(map[string]any)
+	fn, _ := tc["function"].(map[string]any)
+	if tc["id"] != "call_9" || fn["name"] != "terminal" || fn["arguments"] != `{"a":1}` {
+		t.Fatalf("merged frame missing id/name/args: %v", tc)
+	}
+}
+
+func TestGuardNamelessToolCallsDowngradesUnnamed(t *testing.T) {
+	src := FramesOf(
+		rawFrame(t, map[string]any{"tool_calls": []any{map[string]any{
+			"index": 0, "function": map[string]any{"arguments": `{"a":1}`},
+		}}}, nil, nil),
+		rawFrame(t, map[string]any{}, "tool_calls", nil),
+	)
+	frames, err := collectFrames(t, GuardNamelessToolCalls(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range frames {
+		if strings.Contains(string(f), `"tool_calls"`) {
+			t.Fatalf("unnamed tool call must be dropped: %s", f)
+		}
+	}
+	if len(frames) != 1 || !strings.Contains(string(frames[0]), `"finish_reason":"stop"`) {
+		t.Fatalf("finish_reason must downgrade to stop: %q", frames)
+	}
+}
+
+func TestNewChatStreamWiresTruncatedGuard(t *testing.T) {
+	var b strings.Builder
+	inner := map[string]any{
+		"id": "c1", "model": "m", "created": 1,
+		"choices": []any{map[string]any{
+			"index":         0,
+			"finish_reason": nil,
+			"delta": map[string]any{
+				"tool_calls": []any{map[string]any{
+					"index": 0, "id": "call_1", "type": "function",
+					"function": map[string]any{"name": "terminal", "arguments": `{"cmd":"`},
+				}},
+			},
+		}},
+	}
+	b.Write(envFrame(t, inner))
+	it := NewChatStream(strings.NewReader(b.String()), ChatStreamOptions{
+		AllowedToolNames: map[string]bool{"terminal": true},
+	})
+	if _, err := collectFrames(t, it); err == nil {
+		t.Fatal("NewChatStream must apply the truncated-args guard")
+	}
+}
+
+func TestNormalizeToolsDepthLimit(t *testing.T) {
+	// 4 层 namespace 嵌套可展开到叶子；第 5 层容器（depth=4）被丢弃。
+	build := func(namespaces int) map[string]any {
+		var node map[string]any = map[string]any{
+			"type": "function", "name": "leaf", "description": "d",
+			"parameters": map[string]any{"type": "object"},
+		}
+		for i := 1; i <= namespaces; i++ {
+			node = map[string]any{
+				"type": "namespace", "name": fmt.Sprintf("ns%d", i),
+				"tools": []any{node},
+			}
+		}
+		return node
+	}
+	names := func(tools []any) []string {
+		norm := normalizeTools(tools)
+		out := make([]string, 0, len(norm))
+		for _, item := range norm {
+			m, _ := item.(map[string]any)
+			if fn, ok := m["function"].(map[string]any); ok {
+				out = append(out, fn["name"].(string))
+			}
+		}
+		return out
+	}
+	if got := names([]any{build(namespaceMaxDepth)}); strings.Join(got, ",") != "leaf" {
+		t.Fatalf("4-level nesting should keep leaf, got %v", got)
+	}
+	if got := names([]any{build(namespaceMaxDepth + 1)}); len(got) != 0 {
+		t.Fatalf("5-level nesting must be dropped, got %v", got)
+	}
+}
+
+func TestNormalizeToolsNamespaceWithoutType(t *testing.T) {
+	// 省略 type、只给 name + children 的容器也要展开（源 _is_namespace_tool）。
+	tools := []any{map[string]any{
+		"name": "mcp",
+		"children": []any{map[string]any{
+			"type": "function", "name": "child_tool", "description": "d",
+			"parameters": map[string]any{"type": "object"},
+		}},
+	}}
+	norm := normalizeTools(tools)
+	if len(norm) != 1 {
+		t.Fatalf("norm len = %d: %+v", len(norm), norm)
+	}
+	fn, _ := norm[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "child_tool" {
+		t.Fatalf("child tool not flattened: %+v", norm[0])
+	}
+}
+
+func TestToolNamesIncludeNamespaceChildren(t *testing.T) {
+	payload := map[string]any{"tools": []any{
+		map[string]any{"type": "function", "name": "plain"},
+		map[string]any{"type": "namespace", "name": "mcp", "tools": []any{
+			map[string]any{"type": "function", "name": "child_tool"},
+			map[string]any{"type": "namespace", "name": "inner", "tools": []any{
+				map[string]any{"type": "function", "name": "grandchild"},
+			}},
+		}},
+	}}
+	names := ToolNamesFromPayload(payload)
+	for _, want := range []string{"plain", "child_tool", "grandchild"} {
+		if !names[want] {
+			t.Fatalf("tool %q missing from %v", want, names)
+		}
+	}
+}
+
 func TestNormalizeToolsFlattensNamespace(t *testing.T) {
 	tools := []any{
 		map[string]any{
@@ -289,6 +646,37 @@ func TestNormalizeToolsFlattensNamespace(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "echo,inner" {
 		t.Fatalf("flattened names = %v", names)
+	}
+}
+
+func TestBuildAgentChatBodyHeaderSessionKeyPriority(t *testing.T) {
+	resetConversationCache()
+	t.Setenv("QD_CONVERSATION_SHARE", "1")
+	sess := mustSession(t)
+	mk := func(bodyConv string) map[string]any {
+		return map[string]any{
+			"model":           "qwen3.8-max",
+			"conversation_id": bodyConv,
+			"messages":        []any{map[string]any{"role": "user", "content": "同一问"}},
+		}
+	}
+	build := func(req map[string]any, headerKey string) string {
+		encoded, err := BuildAgentChatBody(req, sess, "", headerKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := decodeBody(t, encoded)
+		id, _ := body["chat_record_id"].(string)
+		return id
+	}
+	a := build(mk("body-a"), "hdr-1")
+	b := build(mk("body-b"), "hdr-1") // 头优先：body 里的会话 id 被忽略
+	c := build(mk("body-a"), "hdr-2")
+	if a != b {
+		t.Fatalf("header session key must take priority: %q vs %q", a, b)
+	}
+	if a == c {
+		t.Fatal("different header session keys must not share identity")
 	}
 }
 

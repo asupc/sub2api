@@ -253,7 +253,7 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 	qoderOrigBody := body
 	if account.Platform == PlatformQoder {
 		var qdErr error
-		body, qdErr = applyQoderChatBody(account, body)
+		body, qdErr = applyQoderChatBody(account, body, qoderClientSessionKey(c))
 		if qdErr != nil {
 			return nil, fmt.Errorf("rewrite qoder chat body: %w", qdErr)
 		}

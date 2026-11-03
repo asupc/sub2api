@@ -336,6 +336,21 @@ var leakMarkerRe = regexp.MustCompile(`[\[<(]*\s*assistant\s*请求调用工具\
 // dsmlCloseRe 流中 DSML 闭合标签（issue #51：泄漏块可能以闭标签开头）。
 var dsmlCloseRe = regexp.MustCompile(`^(?:\s*</[^>]*DSML[^>]*>)+`)
 
+// dsmlCloseTailRe 尾部连续 DSML 闭合标签（源 _DSML_CLOSE_TAG_RE，issue #36 后续）。
+var dsmlCloseTailRe = regexp.MustCompile(`</[^>]*DSML[^>]*>\s*$`)
+
+// stripDsmlCloseTail 反复剥掉正文尾部连续的 DSML 闭合标签 + 空白（源
+// _strip_dsml_close_tail）。hold 判定候选前先剥，避免协议残片把合法回声块
+// 判成「证伪」按正文 fail-open 放出。
+func stripDsmlCloseTail(text string) string {
+	prev := ""
+	for prev != text {
+		prev = text
+		text = dsmlCloseTailRe.ReplaceAllString(text, "")
+	}
+	return text
+}
+
 // leakMarkerCore marker 去空白主体（markerKey 的比对基准）。
 const leakMarkerCore = "assistant请求调用工具"
 
@@ -346,6 +361,7 @@ const leakMarkerOpenCanonical = "[assistant 请求调用工具"
 func markerKey(text string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(text, " ", ""), "\u3000", "")
 }
+
 // markerPrefixOK text 是否是某个 marker 变体的**前半截**（跨帧/截断用）。
 func markerPrefixOK(text string) bool {
 	raw := pyLStrip(text)
@@ -944,13 +960,28 @@ func echoHoldCandidate(text string) bool {
 
 // ToolNamesFromPayload 取客户端本次请求声明的工具名集合
 // （_tool_names_from_payload L2845-2855：兼容 chat 与 responses 两种形态）。
+// namespace 容器递归收集子工具名，与出站展平口径一致（issue #127）。
 // 未声明 tools 时返回 nil。
 func ToolNamesFromPayload(payload map[string]any) map[string]bool {
 	names := map[string]bool{}
-	tools, _ := payload["tools"].([]any)
+	collectToolNames(anyList(payload["tools"]), names, 0)
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+// collectToolNames 递归收集工具名（namespace 容器展开到子工具）。
+func collectToolNames(tools []any, names map[string]bool, depth int) {
 	for _, t := range tools {
 		tm, ok := t.(map[string]any)
 		if !ok {
+			continue
+		}
+		if isNamespaceTool(tm) {
+			if depth < namespaceMaxDepth {
+				collectToolNames(namespaceChildren(tm), names, depth+1)
+			}
 			continue
 		}
 		fn, ok := tm["function"].(map[string]any)
@@ -961,10 +992,6 @@ func ToolNamesFromPayload(payload map[string]any) map[string]bool {
 			names[name] = true
 		}
 	}
-	if len(names) == 0 {
-		return nil
-	}
-	return names
 }
 
 // streamMeta 从上游帧捕获的 (id, model, created)，用于合成帧沿用上游标识。
@@ -1156,7 +1183,9 @@ func (lr *leakRecover) process(raw []byte) {
 	//     先放行收尾帧再透传 usage，恢复 [finish] -> [usage] 标准顺序（按
 	//     「末帧 usage」解析的 OpenAI Chat 客户端才能读到输出/缓存 tokens）。
 	if choice == nil {
-		if u, ok := payload["usage"].(map[string]any); ok && len(u) > 0 {
+		// 源判定是 isinstance(usage, dict)：空 usage 字典同样算 usage 垫底帧
+		//（此前要求非空会让 `usage:{}` 掉进 hold 被吞 / 破坏 [finish]->[usage] 顺序）。
+		if _, ok := payload["usage"].(map[string]any); ok {
 			if lr.holding {
 				lr.tailUsage = append(lr.tailUsage, payload)
 				return
@@ -1183,7 +1212,19 @@ func (lr *leakRecover) process(raw []byte) {
 	}
 	if lr.holding {
 		lr.hold += piece
-		lr.holdN++
+		// 源 issue #36 后续：帧上限只防**空转**（连续空帧不增长），有增长的合法
+		// 回声块（每帧 1 字符也会推进长度）交给字符上限兜底——否则 201 字符的
+		// 合法块在 1 字符/帧下会在 200 帧处被误伤 fail-open。
+		if piece != "" {
+			lr.holdN = 0
+		} else {
+			lr.holdN++
+		}
+		// issue #36 后续：尾部 DSML 闭合标签是上游协议残片，剥掉再判候选；
+		// 只有剥掉后仍是候选时才采纳（讨论 DSML 的普通散文不被误伤）。
+		if stripped := stripDsmlCloseTail(lr.hold); stripped != lr.hold && stillLeakCandidate(stripped) {
+			lr.hold = stripped
+		}
 		if echoHoldCandidate(lr.hold) {
 			if pyLen(lr.hold) > holdMaxChars || lr.holdN > holdMaxFrames {
 				// issue #112（移植 qoder2api-hub f10c627）：超限放行前先补一次
@@ -1421,6 +1462,189 @@ func (h *heartbeatIter) Next() ([]byte, error) {
 }
 
 // ---------------------------------------------------------------------------
+// 无名工具调用守卫（移植 qoder2api-hub a59f89e / issue #124）
+// ---------------------------------------------------------------------------
+
+// namelessToolGuard 扣住「没拿到 name 的 tool_call 起点」（issue #124）：
+// OpenAI 流式语义里一个 index 的首帧必须同时带 id 与 name，ai-sdk 这类客户端
+// 收尾仍不完整就抛 "tool call delta is missing id or name"，整轮作废。
+//   - name 未到 -> 扣住 arguments，不发这一条；
+//   - name 到   -> 立刻发「id + name + 攒下的 arguments」一次；
+//   - 流结束仍无名 -> 丢弃，并把 finish_reason: tool_calls 降级为 stop。
+type namelessToolGuard struct {
+	src     FrameIter
+	pending map[int]*namelessSlot
+}
+
+type namelessSlot struct {
+	id     string
+	typ    string
+	name   string
+	args   []string
+	opened bool
+}
+
+// GuardNamelessToolCalls 包装一个帧迭代器，扣住无名工具调用直至 name 到达。
+func GuardNamelessToolCalls(src FrameIter) FrameIter {
+	return &namelessToolGuard{src: src, pending: map[int]*namelessSlot{}}
+}
+
+func (g *namelessToolGuard) Next() ([]byte, error) {
+	for {
+		frame, err := g.src.Next()
+		if err != nil {
+			return nil, err
+		}
+		if out, emit := g.rewrite(frame); emit {
+			return out, nil
+		}
+		// 整帧只有无名 tool_calls：扣住不再下发，继续取下一帧。
+	}
+}
+
+// rewrite 按守卫语义改写单帧；emit=false 表示该帧应被丢弃。
+func (g *namelessToolGuard) rewrite(frame []byte) ([]byte, bool) {
+	data := StripDataPrefix(string(frame))
+	if data == "" || data == "[DONE]" {
+		return frame, true
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(data), &payload) != nil {
+		return frame, true
+	}
+	choices := anyList(payload["choices"])
+	var choice map[string]any
+	if len(choices) > 0 {
+		choice, _ = choices[0].(map[string]any)
+	}
+	delta, _ := choice["delta"].(map[string]any)
+	if delta == nil {
+		delta = map[string]any{}
+	}
+	var fin any
+	if choice != nil {
+		fin = choice["finish_reason"]
+	}
+	idx := 0
+	if choice != nil {
+		if v, ok := choice["index"].(float64); ok {
+			idx = int(v)
+		}
+	}
+	tcs, _ := delta["tool_calls"].([]any)
+	if len(tcs) == 0 {
+		if truthy(fin) && g.hasUnopened() {
+			return rebuildChoiceFrame(payload, idx, map[string]any{}, "stop"), true
+		}
+		return frame, true
+	}
+
+	forwarded := make([]any, 0, len(tcs))
+	for _, raw := range tcs {
+		tc, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		tcIdx := 0
+		if v, ok := tc["index"].(float64); ok {
+			tcIdx = int(v)
+		}
+		fn, _ := tc["function"].(map[string]any)
+		name := ""
+		args := ""
+		if fn != nil {
+			name, _ = fn["name"].(string)
+			args, _ = fn["arguments"].(string)
+		}
+		slot := g.pending[tcIdx]
+		if slot == nil {
+			slot = &namelessSlot{}
+			if typ, _ := tc["type"].(string); typ != "" {
+				slot.typ = typ
+			}
+			g.pending[tcIdx] = slot
+		}
+		if id, _ := tc["id"].(string); id != "" {
+			slot.id = id
+		}
+		if name != "" {
+			slot.name = name
+		}
+		if slot.name == "" {
+			slot.args = append(slot.args, args) // 扣住，等 name
+			continue
+		}
+		typ := slot.typ
+		if typ == "" {
+			typ = "function"
+		}
+		if !slot.opened {
+			slot.opened = true
+			id := slot.id
+			if id == "" {
+				id = newCallID()
+			}
+			forwarded = append(forwarded, map[string]any{
+				"index": tcIdx,
+				"id":    id,
+				"type":  typ,
+				"function": map[string]any{
+					"name":      slot.name,
+					"arguments": strings.Join(slot.args, "") + args,
+				},
+			})
+			slot.args = nil
+		} else {
+			forwarded = append(forwarded, map[string]any{
+				"index": tcIdx,
+				"id":    slot.id,
+				"type":  typ,
+				"function": map[string]any{
+					"arguments": args,
+				},
+			})
+		}
+	}
+
+	body := make(map[string]any, len(delta))
+	for k, v := range delta {
+		if k != "tool_calls" {
+			body[k] = v
+		}
+	}
+	if len(forwarded) > 0 {
+		body["tool_calls"] = forwarded
+		return rebuildChoiceFrame(payload, idx, body, fin), true
+	}
+	if len(body) > 0 {
+		// 这一帧还有正文/思考：只把无名 tool_calls 剥掉，其余照发。
+		return rebuildChoiceFrame(payload, idx, body, fin), true
+	}
+	return nil, false
+}
+
+// hasUnopened 是否还有扣住未发的调用。
+func (g *namelessToolGuard) hasUnopened() bool {
+	for _, slot := range g.pending {
+		if !slot.opened {
+			return true
+		}
+	}
+	return false
+}
+
+// rebuildChoiceFrame 复制一帧并把首个 choice 的 delta/finish_reason 换成给定值。
+func rebuildChoiceFrame(payload map[string]any, index int, delta map[string]any, fin any) []byte {
+	out := copyShallow(payload)
+	out["choices"] = []any{map[string]any{
+		"index":         index,
+		"delta":         delta,
+		"finish_reason": fin,
+	}}
+	return []byte("data: " + marshalNoEscape(out) + "\n\n")
+}
+
+// ---------------------------------------------------------------------------
 // 流末工具参数完整性守卫（移植 qoder2api-hub f10c627 / issue #112）
 // ---------------------------------------------------------------------------
 
@@ -1572,8 +1796,10 @@ type chatStream struct {
 func NewChatStream(r io.Reader, opts ChatStreamOptions) FrameIter {
 	inner := NewInnerSSE(r, opts.Usage)
 	recovered := RecoverLeakedToolCalls(inner, opts.AllowedToolNames)
+	// issue #124：无名工具调用守卫（name 未到先扣住）
+	nameless := GuardNamelessToolCalls(recovered)
 	// issue #112：流末工具参数完整性守卫（上游中途 EOF 时 fail-closed）
-	var src FrameIter = GuardTruncatedToolArgs(recovered)
+	var src FrameIter = GuardTruncatedToolArgs(nameless)
 	if opts.HeartbeatInterval > 0 {
 		src = WithHeartbeat(src, opts.HeartbeatInterval, opts.IdleLimit)
 	}

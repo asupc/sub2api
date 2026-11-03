@@ -49,3 +49,26 @@ func TestParseCreditPackagesPackageNameFromTopLevel(t *testing.T) {
 		t.Fatalf("entitlement_base_info compat fallback: %q", pkgs[2].PackageName)
 	}
 }
+
+// TestParseCreditPackagesBlankName 纯空白的包名视为无名（与源 Rust 的
+// 最终 filter(!trim.is_empty()) 对齐），不得把空白当成有效名称展示。
+func TestParseCreditPackagesBlankName(t *testing.T) {
+	now := int64(1_700_000_000)
+	packs := []any{
+		map[string]any{
+			"entitlement_base_info": map[string]any{
+				"package_name": "   ",
+				"quota":        map[string]any{"credits_limit": 10.0},
+			},
+			"group_name": "",
+			"usage":      map[string]any{"credits_amount": 1.0},
+		},
+	}
+	pkgs := ParseCreditPackages(packs, now)
+	if len(pkgs) != 1 {
+		t.Fatalf("packages = %d", len(pkgs))
+	}
+	if pkgs[0].PackageName != "" {
+		t.Fatalf("blank package name should be empty, got %q", pkgs[0].PackageName)
+	}
+}

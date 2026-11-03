@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"math"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -186,11 +186,11 @@ var modelAliases = map[string]string{
 	// 快照未跟上的窗口期用此别名离线兜底（移植 qoder2api-hub e53ca20 / PR #119）。
 	"kimi-k3.1-pro":     "kmodel_latest",
 	"kimi-k2.8-preview": "kmodel",
-	"kimi-k2.7":           "kmodel",
-	"kimi-k2.7-code":      "kmodel",
-	"minimax-m3":          "mmodel",
-	"minimax-m2.7":        "mmodel",
-	"minimax-m2.5":        "mmodel",
+	"kimi-k2.7":         "kmodel",
+	"kimi-k2.7-code":    "kmodel",
+	"minimax-m3":        "mmodel",
+	"minimax-m2.7":      "mmodel",
+	"minimax-m2.5":      "mmodel",
 }
 
 // officialLabels 官方本地化显示名（zh.label，如 Ultimate -> 极致），

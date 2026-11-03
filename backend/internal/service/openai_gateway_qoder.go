@@ -85,10 +85,26 @@ func qoderAccountRealm(account *Account) string {
 	return "cn"
 }
 
+// qoderClientSessionKey 取入站会话头的会话键（源 extract_session_key 的头半边：
+// X-Conversation-Id / Conversation-Id / X-Session-Id / Session-Id）。
+// 用于上游会话身份稳定化（chat_record_id/business.id 会话内复用）。
+func qoderClientSessionKey(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	for _, key := range []string{"X-Conversation-Id", "Conversation-Id", "X-Session-Id", "Session-Id"} {
+		if v := strings.TrimSpace(c.Request.Header.Get(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // applyQoderChatBody 把标准 OpenAI CC 请求体改写为 agent_chat_generation 请求体
 // （BuildAgentChatBody：baseprompt 骨架 + 消息压平/脱敏 + 模型 key 解析 +
-// qoder_encode）。返回值是上游的编码载荷（不透明字符串）。
-func applyQoderChatBody(account *Account, body []byte) ([]byte, error) {
+// qoder_encode）。clientSessionKey 为入站会话头解析出的会话键（可为空）。
+// 返回值是上游的编码载荷（不透明字符串）。
+func applyQoderChatBody(account *Account, body []byte, clientSessionKey string) ([]byte, error) {
 	var openAIReq map[string]any
 	if err := json.Unmarshal(body, &openAIReq); err != nil {
 		return nil, fmt.Errorf("parse openai body for qoder: %w", err)
@@ -98,7 +114,7 @@ func applyQoderChatBody(account *Account, body []byte) ([]byte, error) {
 		return nil, err
 	}
 	realm := qoderAccountRealm(account)
-	encoded, err := qoder.BuildAgentChatBody(openAIReq, sess, realm)
+	encoded, err := qoder.BuildAgentChatBody(openAIReq, sess, realm, clientSessionKey)
 	if err != nil {
 		return nil, fmt.Errorf("build qoder agent chat body: %w", err)
 	}
@@ -476,15 +492,16 @@ func qoderLearnStreamError(account *Account, model string, err error) (int, stri
 //	其余（瞬时错/未知）       → 502（既有 failover 链）
 func classifyQoderUpstreamFailure(code int, detail string) int {
 	switch {
-	case qoder.SessionDead(detail):
-		return http.StatusUnauthorized
 	case qoder.IsQueuedReject(detail):
 		// 10605 排队：403 信封但语义是"服务暂不可用，N 秒后重试"。
 		return http.StatusTooManyRequests
 	case code == http.StatusForbidden && qoder.IsQuotaReject(detail):
 		// issue #108：额度类 403（112 额度耗尽 / 110 每日次数上限）不是鉴权失败，
-		// 长冷却 + 换号；对外按软限流（可重试）而非 401。
+		// 长冷却 + 换号；对外按软限流（可重试）而非 401。判定顺序与两个处置函数
+		// 一致（排队 → 额度 → 凭证失效）：detail 同时含 TOKEN_EXPIRE 时按额度处理。
 		return http.StatusTooManyRequests
+	case qoder.SessionDead(detail):
+		return http.StatusUnauthorized
 	case code == http.StatusUnauthorized || code == http.StatusForbidden:
 		return http.StatusUnauthorized
 	case code == http.StatusPaymentRequired:

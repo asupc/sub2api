@@ -301,6 +301,10 @@ func ParseCreditPackages(packs []any, nowTs int64) []CreditPackage {
 		if packageName == "" {
 			packageName = baseString(base, "package_name", "name")
 		}
+		// 与源 Rust 的最终 filter(!trim.is_empty()) 对齐：纯空白的包名视为无名。
+		if strings.TrimSpace(packageName) == "" {
+			packageName = ""
+		}
 		packages = append(packages, CreditPackage{
 			PackageCode:  baseString(base, "package_code", "package_type"),
 			PackageName:  packageName,
