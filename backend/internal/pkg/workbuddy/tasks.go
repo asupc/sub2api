@@ -38,6 +38,12 @@ const (
 	buddyInfoPath      = "/activity/growth/buddy/info"
 	buddyFirstPath     = "/activity/growth/buddy/first"
 	buddyAgreementPath = "/activity/growth/buddy/agreement"
+
+	// 盲盒走 /v2 前缀形态（hub do_buddy_open 原文 CHAT_BASE +
+	// "/v2/activity/growth/buddy/{quota,open}"，与 tasks 族同形、与 travel 族
+	// 的裸路径形态不同，实测两种前缀并存）。
+	buddyQuotaPath = "/v2/activity/growth/buddy/quota"
+	buddyOpenPath  = "/v2/activity/growth/buddy/open"
 	streakPath         = "/activity/growth/streak"
 	streakRedeemPath   = "/activity/growth/redeem"
 	lotterySummaryPath = "/activity/growth/lottery/summary"
@@ -1178,4 +1184,290 @@ func (c *Client) RunGrowthAction(ctx context.Context, cred Credentials, code str
 		}
 	}
 	return res, nil
+}
+
+// ---------------------------------------------------------------------------
+// 小程序链式任务族与 Buddy 盲盒（porter 同步 2026-11-04，hub 937c179；任务事件
+// 模型与小程序埋点指纹参考 L0NE-6/WorkBuddy-Daily，盲盒生命周期参考
+// 88lin/workbuddy-auto-signin，均 MIT）。
+// ---------------------------------------------------------------------------
+
+// mpKnownTaskCodes 小程序限定任务码（hub MP_TASK_SPECS 的键集合）。已知编号
+// 之外、Sequential_Tasks_ 前缀的新任务按对话类事件处理（hub 同款宽容策略，
+// 上游新上链式任务无需发版即可点亮）。
+var mpKnownTaskCodes = map[string]bool{
+	"Sequential_Tasks_1": true, // 小程序对话
+	"Sequential_Tasks_2": true, // 小程序专家对话
+	"Sequential_Tasks_3": true, // 小程序对话 5 次
+	"Sequential_Tasks_4": true, // 小程序定时任务
+	"Sequential_Tasks_5": true, // 小程序 GLM5.2
+	"Sequential_Tasks_6": true, // 小程序对话 10 次
+	"school_season":      true, // 校园日活动
+}
+
+// isMPTaskCode 是否小程序任务族（已知码或 Sequential_Tasks_ 前缀）。
+func isMPTaskCode(code string) bool {
+	return mpKnownTaskCodes[code] || strings.HasPrefix(code, "Sequential_Tasks_")
+}
+
+// mpEventBase 小程序埋点事件的公共底座字段（hub mp_base）：伪装微信小程序
+// 运行环境（ideType WorkBuddy_MP / platform mini_program / android arm64）。
+// machineId 按 UID 派生稳定值（uid 空用 guest）。
+func (c *Client) mpEventBase(cred Credentials) map[string]any {
+	uid := cred.UID
+	uid16 := uid
+	if uid16 == "" {
+		uid16 = "guest"
+	} else if len(uid16) > 16 {
+		uid16 = uid16[:16]
+	}
+	return map[string]any{
+		"timestamp":     c.Now().UnixMilli(),
+		"ideType":       "WorkBuddy_MP",
+		"ideVersion":    "2.4.0",
+		"extName":       "workbuddy-mp",
+		"extVersion":    "2.4.0",
+		"product":       "SaaS",
+		"ideName":       "wx_app_cloud",
+		"platform":      "mini_program",
+		"source":        "mini_program",
+		"os":            "android",
+		"osVersion":     "14",
+		"arch":          "arm64",
+		"machineId":     "mp-" + uid16,
+		"timezone":      "Asia/Shanghai",
+		"userId":        uid,
+		"userNickname":  cred.Nickname,
+	}
+}
+
+// reportMPEvents 小程序口径事件批量上报（hub report_mp_events）：每条事件
+// 叠加 mpEventBase 底座（事件字段覆盖同名字段），POST /v2/report（billing 域，
+// 与桌面口径 ReportChatActivity 同端点），叠加小程序产品头族
+//（X-Client-Product: workbuddy-mp / X-Client-Platform: mp-weixin /
+// X-Platform: wechatmp）。doJSON 校验信封 code==0。
+func (c *Client) reportMPEvents(ctx context.Context, cred Credentials, events []map[string]any) error {
+	base := c.mpEventBase(cred)
+	arr := make([]map[string]any, 0, len(events))
+	for _, e := range events {
+		m := make(map[string]any, len(base)+len(e))
+		for k, v := range base {
+			m[k] = v
+		}
+		for k, v := range e {
+			m[k] = v
+		}
+		arr = append(arr, m)
+	}
+	raw, err := json.Marshal(arr)
+	if err != nil {
+		return err
+	}
+	req, err := c.newJSONRequest(ctx, http.MethodPost, c.billingBase(cred)+reportPath, json.RawMessage(raw))
+	if err != nil {
+		return err
+	}
+	BillingHeaders(req, cred)
+	req.Header.Set("X-Client-Product", "workbuddy-mp")
+	req.Header.Set("X-Client-Version", "2.4.0")
+	req.Header.Set("X-Client-Platform", "mp-weixin")
+	req.Header.Set("X-Platform", "wechatmp")
+	_, err = c.doJSON(ctx, req)
+	return err
+}
+
+// mpTaskEvents 构造一个小程序任务的判据事件（hub run_miniprogram_tasks 的
+// 分派表，按任务码四类）：
+//
+//	Sequential_Tasks_1/3/6、school_season、未知 Sequential_ 前缀 → mp 对话
+//	  （chat_request_send + agentName "mp" + codebuddy.* 会话标识）
+//	Sequential_Tasks_2 → 专家对话（expert_actual_use，WorkspaceBuilder）
+//	Sequential_Tasks_4 → 定时任务创建（automated_task_create_suc，云端日程）
+//	Sequential_Tasks_5 → GLM5.2 模型对话（mp 对话 + requestModelId glm-5.2）
+//
+// need 为还需点亮的次数（target - current，至少 1）；每次一个事件。
+func mpTaskEvents(code string, need int, now time.Time) []map[string]any {
+	events := make([]map[string]any, 0, need)
+	for i := 0; i < need; i++ {
+		cid := fmt.Sprintf("wb-mp-%d-%s-%d", now.UnixMilli(), code, i)
+		rid := fmt.Sprintf("req-%d-%s-%d", now.UnixMilli(), code, i)
+		switch {
+		case code == "Sequential_Tasks_2":
+			events = append(events, map[string]any{
+				"eventCode": "expert_actual_use", "id": "WorkspaceBuilder",
+				"name": "WorkspaceBuilder", "expertTitle": "工作台搭建师",
+				"type": "send_message", "characterCount": 12,
+				"expertType": "agent", "extVersion": "2.2.8",
+			})
+		case code == "Sequential_Tasks_4":
+			events = append(events, map[string]any{
+				"eventCode": "automated_task_create_suc", "mode": "CLOUD",
+				"name": "每日任务提醒", "source": "manually", "skills": "",
+				"skillCount": 0, "scheduleType": "daily",
+			})
+		default:
+			// 对话类（含 GLM5.2：多带 requestModelId/Name）。
+			ev := map[string]any{
+				"eventCode": "chat_request_send", "mode": "chat", "inputLength": 12,
+				"isPlan": false, "isAutoExecuteTerminal": false, "isAutoModify": false,
+				"codebaseEnable": false, "maxToken": 0, "maxSteps": 500, "temperature": 0,
+				"maxRetries": 0, "mentionContexts": []any{}, "knowledgeId": []any{},
+				"knowledgeName": []any{}, "codebaseId": "", "mentionContextCount": 0,
+				"command": "", "requestId": rid, "traceId": rid, "rootRequestId": rid,
+				"parentConversationId": cid, "conversationId": cid,
+				"messageId": fmt.Sprintf("msg-%d-%d", now.UnixMilli(), i),
+				"agentName": "mp", "agentType": "main",
+				"codebuddy.session_id":                cid,
+				"codebuddy.conversation_request_id":   rid,
+			}
+			if code == "Sequential_Tasks_5" {
+				ev["requestModelId"] = "glm-5.2"
+				ev["requestModelName"] = "GLM-5.2"
+			}
+			events = append(events, ev)
+		}
+	}
+	return events
+}
+
+// RunMPSequentialTasks 小程序链式任务族闭环（hub run_miniprogram_tasks）：
+// mp 口径列表 → 接取未接单 → 按任务码构造判据事件上报 → 达标领奖。
+// 仅 CN realm（hub 同款；国际版无小程序成长体系）。返回自动领奖积分与过程
+// 摘要（失败项留待下一轮，不中断整体）。
+func (c *Client) RunMPSequentialTasks(ctx context.Context, cred Credentials) (int64, []string, error) {
+	var notes []string
+	var earned int64
+	if cred.RealmNormalized() != RealmCN {
+		return 0, notes, nil
+	}
+	tasks, err := c.ListTasksMP(ctx, cred)
+	if err != nil {
+		return 0, notes, err
+	}
+	supported := make([]Task, 0, len(tasks))
+	for _, t := range tasks {
+		if isMPTaskCode(t.TaskCode) {
+			supported = append(supported, t)
+		}
+	}
+	if len(supported) == 0 {
+		return 0, notes, nil
+	}
+	// 接取未接单的任务（未接单的上报不计分），随后回读。
+	var unaccepted []string
+	for _, t := range supported {
+		if t.AcceptStatus == "" || t.AcceptStatus == "not_accepted" {
+			unaccepted = append(unaccepted, t.TaskCode)
+		}
+	}
+	if len(unaccepted) > 0 {
+		if err := c.AcceptTasksMP(ctx, cred, unaccepted); err == nil {
+			notes = append(notes, fmt.Sprintf("已接取小程序任务 %d 个", len(unaccepted)))
+		}
+		if tasks, err = c.ListTasksMP(ctx, cred); err != nil {
+			return earned, notes, err
+		}
+	}
+	for _, t := range tasks {
+		if !isMPTaskCode(t.TaskCode) {
+			continue
+		}
+		if t.Claimed {
+			continue
+		}
+		// 达标（或上游已判完成）→ 直接领奖。
+		if t.Claimable || t.Current >= t.Target {
+			credit, _, cerr := c.ClaimRewardMP(ctx, cred, t.TaskCode)
+			if cerr == nil {
+				earned += credit
+				notes = append(notes, fmt.Sprintf("小程序任务 %s 领奖 +%.0f 积分", t.TaskCode, float64(credit)))
+			} else {
+				notes = append(notes, fmt.Sprintf("小程序任务 %s 领奖失败: %v", t.TaskCode, cerr))
+			}
+			continue
+		}
+		if t.AcceptStatus == "" || t.AcceptStatus == "not_accepted" {
+			continue // 接取失败（或上游拒绝），留待下轮。
+		}
+		need := int(t.Target - t.Current)
+		if need < 1 {
+			need = 1
+		}
+		events := mpTaskEvents(t.TaskCode, need, c.Now())
+		if len(events) == 0 {
+			continue
+		}
+		if err := c.reportMPEvents(ctx, cred, events); err != nil {
+			notes = append(notes, fmt.Sprintf("小程序任务 %s 上报失败: %v", t.TaskCode, err))
+			continue
+		}
+		// 上报后等异步计分落定（有界轮询），达标即领奖；未落定留待下轮。
+		after, _ := c.WaitTaskClaimable(ctx, cred, t.TaskCode, true)
+		if after != nil && after.Claimable {
+			credit, _, cerr := c.ClaimRewardMP(ctx, cred, t.TaskCode)
+			if cerr == nil {
+				earned += credit
+				notes = append(notes, fmt.Sprintf("小程序任务 %s 点亮并领奖 +%.0f 积分", t.TaskCode, float64(credit)))
+			}
+		}
+		select {
+		case <-time.After(reportGap):
+		case <-ctx.Done():
+			return earned, notes, ctx.Err()
+		}
+	}
+	return earned, notes, nil
+}
+
+// RunBuddyOpen 成长能量开 Buddy 盲盒（hub do_buddy_open，对齐
+// 88lin/workbuddy-auto-signin 的开盒流程）：查可开数（affordable /
+// max_open_count）→ 携幂等 client_token 开盒。affordable <= 0 是正常空闲
+// 状态（返回 opened=0, err=nil）；企业账号无成长体系由调用方跳过。
+// 返回实际开盒数与新 Buddy 名称。
+func (c *Client) RunBuddyOpen(ctx context.Context, cred Credentials) (int, string, error) {
+	data, err := c.growthJSON(ctx, cred, http.MethodGet, buddyQuotaPath, nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("buddy quota: %w", err)
+	}
+	var quota struct {
+		Affordable  int64 `json:"affordable"`
+		MaxOpenCnt  int64 `json:"max_open_count"`
+	}
+	if err := json.Unmarshal(data, &quota); err != nil {
+		return 0, "", fmt.Errorf("buddy quota parse: %w", err)
+	}
+	if quota.Affordable <= 0 {
+		return 0, "", nil
+	}
+	count := quota.Affordable
+	if quota.MaxOpenCnt < 1 {
+		quota.MaxOpenCnt = 1
+	}
+	if count > quota.MaxOpenCnt {
+		count = quota.MaxOpenCnt
+	}
+	openBody := map[string]any{"count": count, "client_token": clientToken()}
+	resData, err := c.growthJSON(ctx, cred, http.MethodPost, buddyOpenPath, openBody)
+	if err != nil {
+		return 0, "", fmt.Errorf("buddy open: %w", err)
+	}
+	var opened struct {
+		Buddy   any      `json:"buddy"`
+		Name    string   `json:"name"`
+		Buddies []string `json:"buddies"`
+	}
+	_ = json.Unmarshal(resData, &opened)
+	name := opened.Name
+	if name == "" {
+		if s, ok := opened.Buddy.(string); ok {
+			name = s
+		}
+	}
+	if name == "" && len(opened.Buddies) > 0 {
+		name = strings.Join(opened.Buddies, ", ")
+	}
+	if name == "" {
+		name = "新 Buddy"
+	}
+	return int(count), name, nil
 }

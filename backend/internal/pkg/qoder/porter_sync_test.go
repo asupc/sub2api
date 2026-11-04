@@ -306,8 +306,12 @@ func TestGuardTruncatedToolArgs(t *testing.T) {
 			"function": map[string]any{"name": "terminal", "arguments": `{"cmd":"`},
 		}}}, nil, nil),
 	)
-	if _, err := collectFrames(t, GuardTruncatedToolArgs(truncated)); err == nil {
+	if _, err := collectFrames(t, GuardTruncatedToolArgs(truncated, false)); err == nil {
 		t.Fatal("truncated tool arguments must fail the stream closed")
+	}
+	// lenient（hub #135）：同款残片流按正常完成收尾，不报错。
+	if _, err := collectFrames(t, GuardTruncatedToolArgs(truncated, true)); err != nil {
+		t.Fatalf("lenient mode must finish normally, got %v", err)
 	}
 
 	complete := FramesOf(
@@ -317,7 +321,7 @@ func TestGuardTruncatedToolArgs(t *testing.T) {
 		}}}, nil, nil),
 		rawFrame(t, map[string]any{}, "tool_calls", nil),
 	)
-	if _, err := collectFrames(t, GuardTruncatedToolArgs(complete)); err != nil {
+	if _, err := collectFrames(t, GuardTruncatedToolArgs(complete, false)); err != nil {
 		t.Fatalf("complete tool call should pass, got %v", err)
 	}
 }
@@ -541,6 +545,18 @@ func TestNewChatStreamWiresTruncatedGuard(t *testing.T) {
 	})
 	if _, err := collectFrames(t, it); err == nil {
 		t.Fatal("NewChatStream must apply the truncated-args guard")
+	}
+	// ToolEchoLenient：同一输入按正常完成收尾（hub #135），且末帧仍为 [DONE]。
+	stream := NewChatStream(strings.NewReader(b.String()), ChatStreamOptions{
+		AllowedToolNames: map[string]bool{"terminal": true},
+		ToolEchoLenient:  true,
+	})
+	frames, err := collectFrames(t, stream)
+	if err != nil {
+		t.Fatalf("lenient stream must finish normally, got %v", err)
+	}
+	if len(frames) == 0 || !strings.Contains(string(frames[len(frames)-1]), "[DONE]") {
+		t.Fatalf("lenient stream must end with [DONE], got %v", frames)
 	}
 }
 

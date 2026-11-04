@@ -293,6 +293,7 @@ func (s *OpenAIGatewayService) wrapQoderChatResponse(ctx context.Context, accoun
 		upstreamBody := resp.Body
 		it := qoder.NewChatStream(upstreamBody, qoder.ChatStreamOptions{
 			AllowedToolNames:  allowed,
+			ToolEchoLenient:   qoder.ToolEchoLenient(),
 			HeartbeatInterval: qoderHeartbeatInterval,
 		})
 		// 首帧同步探测（qoder_proxy.py should_retry_envelope L3917-3934：401/403/429
@@ -928,7 +929,14 @@ func (s *AccountTestService) testQoderAccountConnection(c *gin.Context, account 
 				continue
 			}
 			if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && s.accountRepo != nil {
-				_ = s.accountRepo.SetError(ctx, account.ID, fmt.Sprintf("qoder chat authentication failed (%d): %s", resp.StatusCode, string(body)))
+				detail := string(body)
+				// 额度类 403（112 额度耗尽 / 110 每日次数上限，qoder.IsQuotaReject）
+				// 不是凭证问题（hub #134：测试连接不应把额度耗尽误报成认证失败、
+				// 也不该给账号叠加错误标记）——只报告测试结论，不动账号状态。
+				if resp.StatusCode == http.StatusForbidden && qoder.IsQuotaReject(detail) {
+					return s.sendErrorAndEnd(c, fmt.Sprintf("qoder 账号额度受限（凭证有效，额度耗尽或达到每日上限）: %s", detail))
+				}
+				_ = s.accountRepo.SetError(ctx, account.ID, fmt.Sprintf("qoder chat authentication failed (%d): %s", resp.StatusCode, detail))
 			}
 			return s.sendErrorAndEnd(c, fmt.Sprintf("qoder chat API returned %d: %s", resp.StatusCode, string(body)))
 		}

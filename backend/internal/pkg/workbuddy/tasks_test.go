@@ -492,3 +492,202 @@ func TestRunGrowthAction(t *testing.T) {
 		t.Fatalf("未知任务应安全跳过: %+v err=%v", res, err)
 	}
 }
+
+// --- 小程序链式任务族与 Buddy 盲盒（porter 2026-11-04，hub 937c179） ---
+
+// TestMPTaskEventsDispatch 四类判据事件的构造分派与 need 计数。
+func TestMPTaskEventsDispatch(t *testing.T) {
+	now := time.Unix(1730000000, 0)
+
+	chat := mpTaskEvents("Sequential_Tasks_3", 5, now)
+	if len(chat) != 5 {
+		t.Fatalf("对话 5 次应构造 5 个事件, got %d", len(chat))
+	}
+	if chat[0]["eventCode"] != "chat_request_send" || chat[0]["agentName"] != "mp" {
+		t.Errorf("对话事件形态: %+v", chat[0])
+	}
+	if _, ok := chat[0]["codebuddy.session_id"]; !ok {
+		t.Error("对话事件应带 codebuddy.session_id 会话标识")
+	}
+	if _, ok := chat[0]["requestModelId"]; ok {
+		t.Error("普通对话不应带模型字段")
+	}
+
+	expert := mpTaskEvents("Sequential_Tasks_2", 1, now)
+	if expert[0]["eventCode"] != "expert_actual_use" || expert[0]["id"] != "WorkspaceBuilder" {
+		t.Errorf("专家事件形态: %+v", expert[0])
+	}
+
+	sched := mpTaskEvents("Sequential_Tasks_4", 1, now)
+	if sched[0]["eventCode"] != "automated_task_create_suc" || sched[0]["mode"] != "CLOUD" {
+		t.Errorf("定时任务事件形态: %+v", sched[0])
+	}
+
+	glm := mpTaskEvents("Sequential_Tasks_5", 1, now)
+	if glm[0]["requestModelId"] != "glm-5.2" || glm[0]["requestModelName"] != "GLM-5.2" {
+		t.Errorf("GLM5.2 事件应带模型字段: %+v", glm[0])
+	}
+
+	// 未知 Sequential_ 前缀按对话类处理。
+	unknown := mpTaskEvents("Sequential_Tasks_9", 1, now)
+	if unknown[0]["eventCode"] != "chat_request_send" {
+		t.Errorf("未知编号应按对话类: %+v", unknown[0])
+	}
+
+	if !isMPTaskCode("Sequential_Tasks_9") || !isMPTaskCode("school_season") || isMPTaskCode("chat_5") {
+		t.Error("isMPTaskCode 判定错误")
+	}
+}
+
+// TestRunMPSequentialTasks 闭环：mp 列表 → 接取 → 上报（mp 产品头 + 底座字段）
+// → 回读达标 → mp 领奖。
+func TestRunMPSequentialTasks(t *testing.T) {
+	defer shortenGaps()()
+	var gotProduct, gotMPPlatform, gotXPlatform string
+	var reported []map[string]any
+	var accepted []string
+	listCalls := 0
+	mux := http.NewServeMux()
+	mpList := func(w http.ResponseWriter) {
+		listCalls++
+		w.Header().Set("Content-Type", "application/json")
+		status := "progressing"
+		acceptStatus := "accepted"
+		if listCalls == 1 { // 首轮：未接单
+			status, acceptStatus = "not_accepted", "not_accepted"
+		} else if listCalls >= 3 { // 上报后的回读：达标
+			status, acceptStatus = "completed", "accepted"
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"tasks":[` +
+			`{"task_code":"Sequential_Tasks_1","name":"小程序对话","progress":{"current":` +
+			func() string {
+				if listCalls >= 3 {
+					return "1"
+				}
+				return "0"
+			}() + `,"target":1},"accept_status":"` + acceptStatus + `","status":"` + status + `"},` +
+			`{"task_code":"chat_5","progress":{"current":5,"target":5},"accept_status":"claimed"}` +
+			`]}}`))
+	}
+	mux.HandleFunc("GET /v2/activity/growth/tasks", func(w http.ResponseWriter, r *http.Request) {
+		mpList(w)
+	})
+	mux.HandleFunc("POST /v2/activity/growth/tasks/accept", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, c := range body["task_codes"].([]any) {
+			accepted = append(accepted, c.(string))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"results":[]}}`))
+	})
+	mux.HandleFunc("POST /v2/report", func(w http.ResponseWriter, r *http.Request) {
+		gotProduct = r.Header.Get("X-Client-Product")
+		gotMPPlatform = r.Header.Get("X-Client-Platform")
+		gotXPlatform = r.Header.Get("X-Platform")
+		_ = json.NewDecoder(r.Body).Decode(&reported)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0}`))
+	})
+	mux.HandleFunc("POST /activity/growth/tasks/Sequential_Tasks_1/claim", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"credit":100,"energy":5}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(srv)
+
+	earned, notes, err := c.RunMPSequentialTasks(context.Background(), cnCred())
+	if err != nil {
+		t.Fatalf("RunMPSequentialTasks: %v (notes=%v)", err, notes)
+	}
+	if len(accepted) != 1 || accepted[0] != "Sequential_Tasks_1" {
+		t.Errorf("应接取 Sequential_Tasks_1, got %v", accepted)
+	}
+	if gotProduct != "workbuddy-mp" || gotMPPlatform != "mp-weixin" || gotXPlatform != "wechatmp" {
+		t.Errorf("mp 上报产品头: product=%q platform=%q xplatform=%q", gotProduct, gotMPPlatform, gotXPlatform)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("应上报 1 个事件, got %d", len(reported))
+	}
+	if reported[0]["ideType"] != "WorkBuddy_MP" || reported[0]["platform"] != "mini_program" {
+		t.Errorf("事件底座字段缺失: %+v", reported[0])
+	}
+	if reported[0]["userId"] != "uid-1" {
+		t.Errorf("底座 userId 应取凭证: %v", reported[0]["userId"])
+	}
+	if earned != 100 {
+		t.Errorf("领奖积分=%d want 100", earned)
+	}
+}
+
+// TestRunMPSequentialTasksRealmSkip 非 CN realm 零上游请求直接跳过。
+func TestRunMPSequentialTasksRealmSkip(t *testing.T) {
+	defer shortenGaps()()
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0}`))
+	}))
+	defer srv.Close()
+	c := newTestClient(srv)
+	earned, _, err := c.RunMPSequentialTasks(context.Background(), globalCred())
+	if err != nil || earned != 0 || called {
+		t.Errorf("global realm 应静默跳过: err=%v earned=%d called=%v", err, earned, called)
+	}
+}
+
+// TestRunBuddyOpen 盲盒：能量充足开盒（count 钳制 max_open_count）+ 幂等 token；
+// 能量不足为正常空闲。
+func TestRunBuddyOpen(t *testing.T) {
+	defer shortenGaps()()
+	var openBody map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/activity/growth/buddy/quota", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"affordable":3,"max_open_count":2}}`))
+	})
+	mux.HandleFunc("POST /v2/activity/growth/buddy/open", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&openBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"buddies":["橘猫","蓝猫"]}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(srv)
+
+	opened, buddy, err := c.RunBuddyOpen(context.Background(), cnCred())
+	if err != nil {
+		t.Fatalf("RunBuddyOpen: %v", err)
+	}
+	if opened != 2 {
+		t.Errorf("开盒数=%d want 2（affordable 3 钳制到 max 2）", opened)
+	}
+	if buddy != "橘猫, 蓝猫" {
+		t.Errorf("buddy=%q", buddy)
+	}
+	if openBody["count"] != float64(2) {
+		t.Errorf("open body count=%v want 2", openBody["count"])
+	}
+	if tok, _ := openBody["client_token"].(string); len(tok) < 30 {
+		t.Errorf("client_token 应为 uuid: %v", openBody["client_token"])
+	}
+}
+
+// TestRunBuddyOpenIdle 能量不足：opened=0、err=nil（正常空闲态）。
+func TestRunBuddyOpenIdle(t *testing.T) {
+	defer shortenGaps()()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v2/activity/growth/buddy/quota", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"affordable":0,"max_open_count":1}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := newTestClient(srv)
+	opened, _, err := c.RunBuddyOpen(context.Background(), cnCred())
+	if err != nil || opened != 0 {
+		t.Errorf("能量不足应为空闲态: err=%v opened=%d", err, opened)
+	}
+}

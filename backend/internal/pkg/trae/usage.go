@@ -169,12 +169,14 @@ type CreditPackage struct {
 	ExpireAt int64 `json:"expire_at"`
 	// Expired 是否已过期（expire_at 存在且 < now）。
 	Expired bool `json:"expired"`
-	// ExpiringSoon 是否 7 天内到期（未过期且 expire_at - now <= 7 天）。
+	// ExpiringSoon 是否 14 天内到期（未过期且 expire_at - now <= 14 天）。
 	ExpiringSoon bool `json:"expiring_soon"`
 }
 
-// expiringSoonWindow 「7 天内到期」的判定窗口（秒）。
-const expiringSoonWindow int64 = 7 * 24 * 3600
+// expiringSoonWindow 「14 天内到期」的判定窗口（秒）。镜像 Trae 后端
+// EXPIRING_SOON_SECS 口径（trae-workbuddy-switch #144 复核确认为 14 天，
+// 2026-11-04 对齐；旧值 7 天会把 10~14 天内到期的包漏标临期）。
+const expiringSoonWindow int64 = 14 * 24 * 3600
 
 // Entitlements 剩余积分查询结果。
 type Entitlements struct {

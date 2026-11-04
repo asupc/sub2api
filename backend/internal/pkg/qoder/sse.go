@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -1658,6 +1659,7 @@ type truncatedArgsGuard struct {
 	calls   map[int]*truncatedCall
 	finish  bool
 	checked bool
+	lenient bool
 	failErr error
 }
 
@@ -1667,8 +1669,9 @@ type truncatedCall struct {
 }
 
 // GuardTruncatedToolArgs 包装一个帧迭代器，追加流末参数完整性校验。
-func GuardTruncatedToolArgs(src FrameIter) FrameIter {
-	return &truncatedArgsGuard{src: src, calls: map[int]*truncatedCall{}}
+// lenient 见 ChatStreamOptions.ToolEchoLenient（hub #135）。
+func GuardTruncatedToolArgs(src FrameIter, lenient bool) FrameIter {
+	return &truncatedArgsGuard{src: src, calls: map[int]*truncatedCall{}, lenient: lenient}
 }
 
 func (g *truncatedArgsGuard) Next() ([]byte, error) {
@@ -1683,7 +1686,9 @@ func (g *truncatedArgsGuard) Next() ([]byte, error) {
 			return nil, io.EOF
 		}
 		g.checked = true
-		if len(g.calls) > 0 && !g.finish {
+		// lenient（hub #135）：残片按正常完成收尾——跳过校验直接 EOF，
+		// 上层 chatStream 正常发 [DONE]，已产出正文全部保留。
+		if !g.lenient && len(g.calls) > 0 && !g.finish {
 			idxs := make([]int, 0, len(g.calls))
 			for idx := range g.calls {
 				idxs = append(idxs, idx)
@@ -1776,6 +1781,14 @@ type ChatStreamOptions struct {
 	// AllowedToolNames 客户端本次请求声明的工具名（泄漏回读守卫）；
 	// nil 表示未声明 tools。
 	AllowedToolNames map[string]bool
+	// ToolEchoLenient 工具协议残片的兜底收尾模式（hub #135，对应其
+	// QD_TOOL_ECHO_MODE）：false（默认 strict）= fail-closed，流末 tool_call
+	// 参数为非法 JSON 时以错误收尾，让客户端知道这一轮没有完成；true
+	// （lenient）= 遇到该情况按正常完成收尾（保留已产出正文），用于上游
+	// 爱吐协议残片的模型（实测 Qwen3.8-Flash），避免 Codex 这类客户端在
+	// 收到失败后直接静默结束对话。生产侧由 ToolEchoLenient() 读环境变量
+	// QODER_TOOL_ECHO_MODE=lenient 打开。
+	ToolEchoLenient bool
 	// Usage usage 透传容器（可为 nil）。
 	Usage *UsageHolder
 	// HeartbeatInterval 心跳间隔；<= 0 关闭心跳。
@@ -1798,12 +1811,30 @@ func NewChatStream(r io.Reader, opts ChatStreamOptions) FrameIter {
 	recovered := RecoverLeakedToolCalls(inner, opts.AllowedToolNames)
 	// issue #124：无名工具调用守卫（name 未到先扣住）
 	nameless := GuardNamelessToolCalls(recovered)
-	// issue #112：流末工具参数完整性守卫（上游中途 EOF 时 fail-closed）
-	var src FrameIter = GuardTruncatedToolArgs(nameless)
+	// issue #112：流末工具参数完整性守卫（上游中途 EOF 时 fail-closed；
+	// ToolEchoLenient 时按正常完成收尾，hub #135）
+	var src FrameIter = GuardTruncatedToolArgs(nameless, opts.ToolEchoLenient)
 	if opts.HeartbeatInterval > 0 {
 		src = WithHeartbeat(src, opts.HeartbeatInterval, opts.IdleLimit)
 	}
 	return &chatStream{src: src}
+}
+
+// toolEchoLenientMode QODER_TOOL_ECHO_MODE 的进程级缓存（hub #135 的
+// QD_TOOL_ECHO_MODE 同款开关，进程启动后不重读）。
+var (
+	toolEchoLenientOnce sync.Once
+	toolEchoLenientMode bool
+)
+
+// ToolEchoLenient 报告 QODER_TOOL_ECHO_MODE 是否为 lenient（默认 strict）。
+// 值非法时回落 strict（不猜）。
+func ToolEchoLenient() bool {
+	toolEchoLenientOnce.Do(func() {
+		mode := strings.ToLower(strings.TrimSpace(os.Getenv("QODER_TOOL_ECHO_MODE")))
+		toolEchoLenientMode = mode == "lenient"
+	})
+	return toolEchoLenientMode
 }
 
 func (s *chatStream) Next() ([]byte, error) {

@@ -133,9 +133,11 @@ const (
 const (
 	// workbuddy：deepseek-v4.1-flash 在 CN 与 global 两个 realm 的静态兜底表中均有登记。
 	DefaultWorkbuddyTestModel = "deepseek-v4.1-flash"
-	// qoder：默认测试模型取对外显示名口径（cn 目录 auto 条目 display_name="Auto"，
-	// 上游自动路由语义，双区通用；ResolveUpstreamKey 对显示名/key/别名均可解析）。
-	DefaultQoderTestModel = "Auto"
+	// qoder：测试连接默认模型用**免费模型**（porter 同步 2026-11-04，hub #134：
+	// Auto 非免费，零额度账号测试必然 403 code 112，看起来像凭证坏了；免费模型
+	// 成本 0 最适合探活）。Qwen3.8-Flash = qfmodel，cn/intl 目录均 price_factor
+	// 0.0；ResolveUpstreamKey 对显示名/key/别名均可解析。目录价格变动时需复核。
+	DefaultQoderTestModel = "Qwen3.8-Flash"
 	// trae：与 pkg/trae.DefaultModel 同值（testTraeAccountConnection 的默认模型）。
 	DefaultTraeTestModel = "deepseek-v4.1-flash"
 )

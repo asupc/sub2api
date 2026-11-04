@@ -299,6 +299,53 @@ func TestNormalizeToolsSchemaRepair(t *testing.T) {
 	}
 }
 
+// --- 工具名字合法性过滤（hub #726/b04868e，400 code 11133） ---
+
+// 纯服务端声明（web_search 等）经 normalizeTools 强改 type 后没有 function
+// 对象，原样送上游整单 400；非法字符名 / 空名 / 超长名同样触发。全部丢弃。
+func TestNormalizeToolsDropsUnusable(t *testing.T) {
+	obj := map[string]any{
+		"tools": []any{
+			map[string]any{"type": "web_search"},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bad.name", "parameters": map[string]any{}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "斜杠/名", "parameters": map[string]any{}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "sp ace", "parameters": map[string]any{}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "", "parameters": map[string]any{}}},
+			map[string]any{"type": "function", "function": map[string]any{"parameters": map[string]any{}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": strings.Repeat("x", 65), "parameters": map[string]any{}}},
+		},
+	}
+	normalizeTools(obj)
+	if _, has := obj["tools"]; has {
+		t.Errorf("全部不可用时应删除 tools 键，got %#v", obj["tools"])
+	}
+}
+
+// 合法工具逐字保留；同名只留第一条；混合场景只清掉不可用条目。
+// Codex namespace 展开名（js / spawn_agent / _get_profile）全部合法。
+func TestNormalizeToolsKeepsValidDropsBad(t *testing.T) {
+	obj := map[string]any{
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "_get_profile", "description": "keep", "parameters": map[string]any{"type": "object", "properties": map[string]any{}}}},
+			map[string]any{"type": "web_search"},
+			map[string]any{"type": "function", "function": map[string]any{"name": "_get_profile", "description": "dup", "parameters": map[string]any{}}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "spawn_agent", "parameters": map[string]any{}}},
+		},
+	}
+	normalizeTools(obj)
+	tools, ok := obj["tools"].([]any)
+	if !ok || len(tools) != 2 {
+		t.Fatalf("tools 数量=%d want 2（合法 2 条 + 声明 1 丢 + 重名 1 丢）", len(tools))
+	}
+	first := tools[0].(map[string]any)["function"].(map[string]any)
+	if first["name"] != "_get_profile" || first["description"] != "keep" {
+		t.Errorf("同名应留第一条且逐字不变: %#v", first)
+	}
+	if name := tools[1].(map[string]any)["function"].(map[string]any)["name"]; name != "spawn_agent" {
+		t.Errorf("第二条应为 spawn_agent, got %v", name)
+	}
+}
+
 // --- 拆条合并（hub merge_adjacent_tool_calls） ---
 
 func TestMergeAdjacentToolCalls(t *testing.T) {

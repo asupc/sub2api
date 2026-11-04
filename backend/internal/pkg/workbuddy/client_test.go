@@ -253,7 +253,9 @@ func TestPrepareChatBody(t *testing.T) {
 
 	// tool_choice none 保留工具声明（hub v1.5.7：删声明会把模型调用降级成
 	// DSML 文本、Agent 原地空转；tool_choice 以字符串 "none" 表达「本轮不调用」）。
-	in = []byte(`{"model":"m","tool_choice":{"type":"none"},"tools":[{"type":"function"}]}`)
+	// 注意工具条目须带合法 function.name（无 function 对象的条目会被 #726
+	// 名字校验丢弃、连带给空 tools 键，与本测试意图无关）。
+	in = []byte(`{"model":"m","tool_choice":{"type":"none"},"tools":[{"type":"function","function":{"name":"keepme","parameters":{}}}]}`)
 	obj = parseObj(t, PrepareChatBody(Credentials{}, in, ""))
 	if obj["tool_choice"] != "none" {
 		t.Errorf("tool_choice none 应归一为字符串 \"none\"，got %v", obj["tool_choice"])
@@ -262,7 +264,7 @@ func TestPrepareChatBody(t *testing.T) {
 		t.Error("tool_choice none 不应连带删 tools")
 	}
 	// 字符串 "none" 同款。
-	in = []byte(`{"model":"m","tool_choice":"NONE","tools":[{"type":"function"}]}`)
+	in = []byte(`{"model":"m","tool_choice":"NONE","tools":[{"type":"function","function":{"name":"keepme","parameters":{}}}]}`)
 	obj = parseObj(t, PrepareChatBody(Credentials{}, in, ""))
 	if obj["tool_choice"] != "none" {
 		t.Errorf("字符串 NONE 应归一为 \"none\"，got %v", obj["tool_choice"])

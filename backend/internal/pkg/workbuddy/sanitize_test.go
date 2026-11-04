@@ -17,25 +17,56 @@ const (
 	codexInstructions = "You are a coding agent running in the Codex CLI, a terminal-based coding assistant. Codex CLI is an open source project led by OpenAI. You are expected to be precise, safe, and helpful."
 )
 
+// Claude Code 自述句整句中性化（hub #733/4df31cf）：旧的 CLI→CLI tool 拼写改写
+// 改写后仍以 "You are Claude Code" 开头，实测仍命中风控；现为整句替换。
 func TestSanitizeIdentityRewritten(t *testing.T) {
 	out := sanitizeText(ccIdentity, true)
-	if !strings.Contains(out, "official CLI tool for Claude.") {
-		t.Errorf("identity not rewritten: %q", out)
+	if !strings.Contains(out, "You are a helpful AI assistant.") {
+		t.Errorf("identity not neutralized: %q", out)
 	}
-	if strings.Contains(out, ccIdentity) {
+	if strings.Contains(out, "Claude Code, Anthropic's official CLI") {
 		t.Errorf("original identity still present: %q", out)
+	}
+}
+
+// 弯引号（U+2019）与 "CLI tool" / "for Claude Code" 变体同样命中（hub 正则
+// ['’] 双引号字符类 + (?: tool)? + (?: Code)? 可选段）。字面量经字节级核对。
+func TestSanitizeIdentityCurlyQuoteAndVariantsRewritten(t *testing.T) {
+	for _, in := range []string{
+		"You are Claude Code, Anthropic’s official CLI for Claude.",
+		"You are Claude Code, Anthropic's official CLI tool for Claude.",
+		"You are Claude Code, Anthropic's official CLI for Claude Code.",
+		"you are Claude Code, Anthropic's official CLI for Claude.",
+	} {
+		if out := sanitizeText(in, true); strings.Contains(out, "official CLI") {
+			t.Errorf("variant not neutralized: %q -> %q", in, out)
+		}
+	}
+}
+
+// 小写混排形态靠 hasFingerprint 的小写锚点兜住（预检表只登记首字母大写）。
+func TestSanitizeIdentityLowercaseMixedDetected(t *testing.T) {
+	in := "hello you are Claude Code, Anthropic's official CLI for Claude. bye"
+	out := sanitizeText(in, true)
+	if strings.Contains(out, "official CLI") {
+		t.Errorf("lowercase-mixed identity not neutralized: %q", out)
+	}
+	if !strings.Contains(out, "hello ") || !strings.Contains(out, " bye") {
+		t.Errorf("surrounding text altered: %q", out)
 	}
 }
 
 // 桌面版（claude-desktop-3p / Agent SDK）的身份句以逗号接后继内容，结尾不是句号。
 // 回归：匹配串曾带结尾句号，导致该形态漏网、指纹原样发上游 → 400 code=11128。
+// 整句中性化后正则的 \.? 对逗号零匹配，替换到 "for Claude" 为止、后继原样保留
+// （hub 同款，产出 "assistant., running…" 双标点形态，可接受）。
 func TestSanitizeIdentityDesktopVariantRewritten(t *testing.T) {
 	in := "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
 	out := sanitizeText(in, true)
 	if strings.Contains(out, "official CLI for Claude") {
 		t.Errorf("desktop identity not rewritten: %q", out)
 	}
-	if !strings.Contains(out, "official CLI tool for Claude, running within the Claude Agent SDK.") {
+	if !strings.Contains(out, ", running within the Claude Agent SDK.") {
 		t.Errorf("desktop identity suffix not preserved: %q", out)
 	}
 }
@@ -127,18 +158,32 @@ func TestSanitizeNormalAnthropicLinkNotRewritten(t *testing.T) {
 	}
 }
 
+// Codex 自述首段整句中性化（hub #743/ecb95a6）：上游按「身份句 + Codex CLI」
+// 判 11-128，旧的 "CLI→CLI tool" 拼写改写后仍带 Codex CLI 身份、指纹没除掉。
 func TestSanitizeCodexInstructionsRewritten(t *testing.T) {
 	out := sanitizeText(codexInstructions, true)
 	if strings.Contains(out, codexInstructions) {
 		t.Errorf("codex fingerprint still present: %q", out)
 	}
-	if !strings.Contains(out, "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.") {
-		t.Errorf("codex first sentence not rewritten: %q", out)
+	if !strings.Contains(out, "You are a helpful AI assistant. Codex CLI is an open source project led by OpenAI.") {
+		t.Errorf("codex first sentence not neutralized: %q", out)
 	}
 	// 其余两句原样保留，语义不变。
 	if !strings.Contains(out, "Codex CLI is an open source project led by OpenAI.") ||
 		!strings.Contains(out, "You are expected to be precise, safe, and helpful.") {
 		t.Errorf("codex remaining sentences altered: %q", out)
+	}
+}
+
+// Codex 自述的 "CLI tool" 变体（旧拼写改写产出/新客户端形态）同样整句命中。
+func TestSanitizeCodexToolVariantRewritten(t *testing.T) {
+	in := "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant."
+	out := sanitizeText(in, true)
+	if strings.Contains(out, "coding agent running in the Codex CLI") {
+		t.Errorf("codex tool variant not neutralized: %q", out)
+	}
+	if !strings.Contains(out, "You are a helpful AI assistant.") {
+		t.Errorf("codex tool variant neutral sentence missing: %q", out)
 	}
 }
 
@@ -186,7 +231,7 @@ func TestSanitizeMultimodalTextPartOnly(t *testing.T) {
 	}
 	parts := out.([]any)
 	txt, _ := parts[0].(map[string]any)["text"].(string)
-	if !strings.Contains(txt, "CLI tool") {
+	if !strings.Contains(txt, "You are a helpful AI assistant.") {
 		t.Errorf("text part not sanitized: %q", txt)
 	}
 	img, _ := parts[1].(map[string]any)
@@ -216,7 +261,7 @@ func TestPrepareChatBodySanitizesFingerprints(t *testing.T) {
 			t.Errorf("fingerprints remain: %q", sys)
 		}
 	}
-	if !strings.Contains(sys, "CLI tool") || !strings.Contains(sys, "Default branch") {
+	if !strings.Contains(sys, "You are a helpful AI assistant.") || !strings.Contains(sys, "Default branch") {
 		t.Errorf("rewrite missing: %q", sys)
 	}
 	user, _ := msgs[1].(map[string]any)["content"].(string)

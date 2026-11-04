@@ -11,7 +11,14 @@
 //     Go struct field Request.stop of type []string）。
 package workbuddy
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// toolNameRe 上游 Go 校验器只接受 ^[A-Za-z0-9_-]{1,64}$ 形态的 function.name
+// （hub #726/b04868e 实测：tools[N].function.name 不合法即整单 400 code 11133）。
+var toolNameRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
 // schemaTypeMap / schemaValidTypes 类型名归一表（hub _SCHEMA_TYPE_MAP 同款）。
 var schemaTypeMap = map[string]string{
@@ -262,11 +269,47 @@ func normalizeTools(obj map[string]any) {
 		}
 		norm = append(norm, item)
 	}
+	norm = dropUnusableTools(norm)
 	if len(norm) > 0 {
 		obj["tools"] = norm
 	} else {
 		delete(obj, "tools")
 	}
+}
+
+// dropUnusableTools 归一化后的名字合法性过滤（hub normalize_tools 尾段，#726）：
+//
+// 上游 Go 校验器只接受 ^[A-Za-z0-9_-]{1,64}$ 的 function.name，其余整单 400
+// code 11133（param: tools[N].function.name）。两类条目过不了这道门：
+//   - 服务端工具声明（如 {"type":"web_search"}）：normalizeTools 把任何非
+//     function 的 type 强改成 "function"，但条目没有 function 对象——空手
+//     抵达上游即 400；
+//   - 名字含方括号外字符（点号/斜杠/CJK/空格）、空名或缺失、超 64 字符。
+//
+// 只丢弃、不改名：改名会让模型吐出的 tool_calls 名与客户端声明对不上，把一次
+// 400 换成一个静默失效的工具。同名只留第一条（与 namespace 展开的去重策略
+// 一致）。合法工具逐字不变。
+func dropUnusableTools(norm []any) []any {
+	valid := make([]any, 0, len(norm))
+	seen := map[string]bool{}
+	for _, t := range norm {
+		item, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, ok := item["function"].(map[string]any)
+		if !ok {
+			continue // 无 function 对象（纯服务端声明改写产物），丢弃。
+		}
+		name, _ := fn["name"].(string)
+		name = strings.TrimSpace(name)
+		if !toolNameRe.MatchString(name) || seen[name] {
+			continue
+		}
+		seen[name] = true
+		valid = append(valid, item)
+	}
+	return valid
 }
 
 // normalizeStop 归一化 stop 停止序列（hub normalize_stop，v1.7.0）。

@@ -441,6 +441,24 @@ func (s *WorkbuddyOpsService) runGrowth(ctx context.Context, account *Account) (
 			results = append(results, fmt.Sprintf("%s: %s", code, res.Message))
 		}
 	}
+	// 小程序链式任务族（porter 2026-11-04，hub 937c179）：mp 口径列表/接取/
+	// 事件上报/领奖闭环；非 CN realm 或无任务时静默跳过。
+	var mpEarned int64
+	mpEarned, mpNotes, err := client.RunMPSequentialTasks(ctx, cred)
+	if err != nil {
+		results = append(results, fmt.Sprintf("mp_tasks: %v", err))
+	} else {
+		results = append(results, mpNotes...)
+		if mpEarned > 0 {
+			results = append(results, fmt.Sprintf("mp_tasks: +%.0f 积分", float64(mpEarned)))
+		}
+	}
+	// Buddy 盲盒（hub 937c179）：成长能量充足则开盒（affordable<=0 为正常空闲）。
+	if opened, buddy, err := client.RunBuddyOpen(ctx, cred); err != nil {
+		results = append(results, fmt.Sprintf("buddy_open: %v", err))
+	} else if opened > 0 {
+		results = append(results, fmt.Sprintf("buddy_open: ×%d（%s）", opened, buddy))
+	}
 	note := fmt.Sprintf("accepted=%d %s", accepted, strings.Join(results, "; "))
 	log.Printf("[WorkbuddyOps] growth account %d %s", account.ID, note)
 	return note, nil

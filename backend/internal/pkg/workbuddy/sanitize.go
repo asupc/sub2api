@@ -61,25 +61,13 @@ var sanitizeKvRe = regexp.MustCompile(`(?i)\bcc_[a-z0-9_]+=[^;\n]*;?\s*`)
 // sanitizeRewrites 改写层：全模板句逐字替换（每句只改一个词，语义不变）。
 // 对全角色生效（user/tool 内的同串同样命中上游逐字匹配，hub 同款）。
 //
-// 身份句的匹配串**不带结尾标点**（只到 "…for Claude" 为止）：
-// CLI 版这句以句号收尾（"…for Claude."），桌面版（claude-desktop-3p / Agent SDK）
-// 以逗号接后继内容（"…for Claude, running within the Claude Agent SDK."）。
-// 带句号的整句只匹配前者，桌面版会漏网、指纹原样发上游 → 400 code=11-128。
-// 去掉结尾标点后两种形态一并覆盖（替换串同样不带标点，让原有标点原样保留）。
-// 注意仍要求 "You are Claude Code, " 前缀，不做更宽的子串替换，
-// 以免误伤 TestExactMatchOnlyVariantNotTouched 所保护的零散文本。
+// Claude Code / Codex CLI 自述句的旧「拼写改写」条目已删除（hub #733/#743，
+// ecb95a6 + 4df31cf）：改写后仍保留平台身份串、实测仍命中风控，由上面的
+// sanitizeClaudeCodeIntroRe / sanitizeCodexIntroRe 整句中性化取代。
 var sanitizeRewrites = [][2]string{
-	{
-		"You are Claude Code, Anthropic's official CLI for Claude",
-		"You are Claude Code, Anthropic's official CLI tool for Claude",
-	},
 	{
 		"Main branch (you will usually use this for PRs)",
 		"Default branch (you will usually use this for PRs)",
-	},
-	{
-		"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
-		"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
 	},
 	{
 		// 反馈句：整句带 Anthropic 仓库链接，上游按整句拦截（只留链接或只留半边均不拦，
@@ -144,6 +132,34 @@ var sanitizeOmoRe = regexp.MustCompile("(?i)" + "Sisyphus-Junior - Focused execu
 // sanitizeOmoReplacement OmO 指纹的最小改写。
 const sanitizeOmoReplacement = "Sisyphus-Junior - Focused executor"
 
+// ---------------------------------------------------------------------------
+// Claude Code 自述首段整句中性化（hub SANITIZE_CLAUDE_CODE_INTRO_RE，#733 /
+// 4df31cf）：报告者实测把提示词模式改成「替换」后 400 消失——说明该句本身是
+// 风控指纹，旧的 CLI→CLI tool 拼写改写（改写后仍以 "You are Claude Code" 开头）
+// 不够。整句换为中性句，只锚定这一句，其余 Claude Code 提示词原样保留。
+// 正则字面量由脚本从 hub wb_proxy.py 字节级提取（['’] 含直引号与 U+2019 弯引号
+// 两种形态）；RE2 语法兼容，无环视。
+var sanitizeClaudeCodeIntroRe = regexp.MustCompile(`(?i)You are Claude Code,\s*Anthropic['’]s official CLI(?: tool)? for Claude(?: Code)?\.?`)
+
+// sanitizeClaudeCodeIntroReplacement Claude Code 自述首段的中性替换句。
+const sanitizeClaudeCodeIntroReplacement = "You are a helpful AI assistant."
+
+// sanitizeClaudeCodeIntroLower 小写锚点（hub SANITIZE_CLAUDE_CODE_LOWER）：
+// 预检表 sanitizeFeatures 只登记首字母大写形态，大小写混排的 system 文本
+// （"you are Claude Code, …"）靠该锚点兜住，命中后才进入 sanitizeText 的正则。
+const sanitizeClaudeCodeIntroLower = "you are claude code,"
+
+// ---------------------------------------------------------------------------
+// Codex CLI 自述首段整句中性化（hub SANITIZE_CODEX_INTRO_RE，#743 / ecb95a6）：
+// 上游按「身份句 + Codex CLI」判 11-128，旧规则把句子改写成 "Codex CLI tool"
+// 变体——改写后仍带 Codex CLI 身份，指纹没除掉。整句换为中性句；[^.\n]*\. 覆盖
+// 句中任意非句号内容直到第一个句号（"a terminal-based coding assistant." 等）。
+var sanitizeCodexIntroRe = regexp.MustCompile(`(?i)You are a coding agent running in the Codex CLI(?: tool)?[^.\n]*\.`)
+
+// sanitizeCodexIntroReplacement Codex 自述首段的中性替换句（与
+// sanitizeClaudeCodeIntroReplacement 同值但独立维护，对齐 hub 双常量形态）。
+const sanitizeCodexIntroReplacement = "You are a helpful AI assistant."
+
 // sanitizeText 单段文本净化。identity=true 时应用身份句族（通用身份句正则 /
 // DSH GUI 段 / DSH 文件引用段——仅 system/developer/assistant 角色传 true）；
 // 固定句改写 / 11-128 / header 剥离 / OmO 对全角色生效。预检不中 → 返回原串。
@@ -153,6 +169,10 @@ func sanitizeText(text string, identity bool) string {
 	}
 	text = sanitizeOmoRe.ReplaceAllString(text, sanitizeOmoReplacement)
 	if identity {
+		// Claude Code / Codex 自述首段先整句换掉：它们本身就是预检表里的指纹，
+		// 必须在通用身份句正则之前处理（hub 同款顺序）。
+		text = sanitizeClaudeCodeIntroRe.ReplaceAllString(text, sanitizeClaudeCodeIntroReplacement)
+		text = sanitizeCodexIntroRe.ReplaceAllString(text, sanitizeCodexIntroReplacement)
 		text = sanitizeIdentityRe.ReplaceAllString(text, sanitizeIdentityReplacement+"$2")
 		// DSH GUI 描述段单独一条规则：锚定整句，只调整句尾语序。
 		text = sanitizeDshGUIRe.ReplaceAllString(text, sanitizeDshGUIReplacement)
@@ -200,13 +220,18 @@ func hasFingerprint(text string, identity bool) bool {
 	if !identity {
 		return false
 	}
+	// 预检表只登记首字母大写的 "You are Claude Code"；小写锚点补齐大小写
+	// 混排的 system 文本（hub SANITIZE_CLAUDE_CODE_LOWER 同款）。
+	low := strings.ToLower(text)
+	if strings.Contains(low, sanitizeClaudeCodeIntroLower) {
+		return true
+	}
 	if sanitizeDshGUIRe.MatchString(text) {
 		return true
 	}
 	if sanitizeDshFilerefRe.MatchString(text) {
 		return true
 	}
-	low := strings.ToLower(text)
 	for _, v := range sanitizeIdentityVerbs {
 		if strings.Contains(low, v) {
 			return sanitizeIdentityRe.MatchString(text)

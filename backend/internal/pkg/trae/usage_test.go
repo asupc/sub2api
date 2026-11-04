@@ -201,7 +201,9 @@ func TestBuildEntitlementsPurchasedToday(t *testing.T) {
 	}
 }
 
-// TestParseCreditPackagesExpiryFields 到期字段三态（过期 / 7 天内临期 / 正常）。
+// TestParseCreditPackagesExpiryFields 到期字段三态（过期 / 14 天内临期 / 正常）。
+// 临期窗口镜像 Trae 后端 EXPIRING_SOON_SECS = 14 天：10 天后到期的包必须
+// 标临期（旧 7 天口径会漏标，porter 同步 2026-11-04 对齐）。
 func TestParseCreditPackagesExpiryFields(t *testing.T) {
 	now := time.Now().Unix()
 	packs := []any{
@@ -215,6 +217,14 @@ func TestParseCreditPackagesExpiryFields(t *testing.T) {
 		},
 		map[string]any{
 			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 10.0}},
+			"expire_time":           float64(now + 10*24*3600),
+		},
+		map[string]any{
+			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 10.0}},
+			"expire_time":           float64(now + 20*24*3600),
+		},
+		map[string]any{
+			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 10.0}},
 		},
 	}
 	packages := ParseCreditPackages(packs, now)
@@ -224,8 +234,14 @@ func TestParseCreditPackagesExpiryFields(t *testing.T) {
 	if packages[1].Expired || !packages[1].ExpiringSoon {
 		t.Errorf("临期包 = %+v", packages[1])
 	}
-	if packages[2].Expired || packages[2].ExpiringSoon {
-		t.Errorf("无到期包 = %+v", packages[2])
+	if packages[2].Expired || !packages[2].ExpiringSoon {
+		t.Errorf("10 天临期包 = %+v（14 天口径应命中）", packages[2])
+	}
+	if packages[3].Expired || packages[3].ExpiringSoon {
+		t.Errorf("20 天包 = %+v（不应标临期）", packages[3])
+	}
+	if packages[4].Expired || packages[4].ExpiringSoon {
+		t.Errorf("无到期包 = %+v", packages[4])
 	}
 }
 
