@@ -15,9 +15,14 @@ import (
 // TraeOpsService 是 trae 平台的运营任务调度器（克隆 CNProviderBalanceCheckService
 // 的 Start/Stop/runOnce + ticker 骨架），任务注册表：
 //   - checkin         每日 09 点签到（账号时区）；
-//   - credits_monitor 每日 10 点积分到期监控：临期 7 天内写
+//   - credits_monitor 每日 10 点积分到期监控：临期 14 天内写
 //     extra["trae_quota"]["expiring_soon"]=true 并告警；
 //   - usage_refresh   每 6 小时刷新积分快照到 extra["trae_quota"]。
+//
+// credits_monitor / usage_refresh 与手动查询共用 storeTraeQuotaSnapshot：快照落库后
+// 顺带做 trae_no_credit 恢复判定（积分恢复即解冻），三条路径语义只有一份。
+// 三个任务全部 IncludeDisabled：积分耗尽罚停后账号不再是 active，若跳过它就再也
+// 没有恢复入口（签到 / 积分刷新正是解冻通道，与 qoder/workbuddy 同款口径）。
 //
 // 手动触发与状态记录复用 platform_ops.go 的共享基建（账号锁 / ops_state / 退避）；
 // 构造时经 RegisterPlatformOpsRunner 自注册，通用 /admin/platform-ops 端点按
@@ -49,9 +54,9 @@ func NewTraeOpsService(accountRepo AccountRepository, oauthService *TraeOAuthSer
 		stopCh:       make(chan struct{}),
 	}
 	s.tasks = []PlatformOpsTask{
-		{ID: "checkin", Platform: PlatformTrae, Name: "每日签到", Hours: []int{9}, RunOne: s.runCheckin},
-		{ID: "credits_monitor", Platform: PlatformTrae, Name: "积分到期监控", Hours: []int{10}, RunOne: s.runCreditsMonitor},
-		{ID: "usage_refresh", Platform: PlatformTrae, Name: "积分额度刷新", Interval: 6 * time.Hour, RunOne: s.runUsageRefresh},
+		{ID: "checkin", Platform: PlatformTrae, Name: "每日签到", Hours: []int{9}, IncludeDisabled: true, RunOne: s.runCheckin},
+		{ID: "credits_monitor", Platform: PlatformTrae, Name: "积分到期监控", Hours: []int{10}, IncludeDisabled: true, RunOne: s.runCreditsMonitor},
+		{ID: "usage_refresh", Platform: PlatformTrae, Name: "积分额度刷新", Interval: 6 * time.Hour, IncludeDisabled: true, RunOne: s.runUsageRefresh},
 	}
 	RegisterPlatformOpsRunner(s)
 	return s
@@ -122,7 +127,8 @@ func (s *TraeOpsService) runOnce() {
 		account := &accounts[i]
 		loc := platformOpsTimezone(account)
 		for _, task := range s.tasks {
-			// 运营任务只跑激活账号（签到 / 积分监控对停用账号无意义）。
+			// 默认只跑激活账号；trae 的三个任务均 IncludeDisabled（见任务注册表
+			// 注释：它们是 trae_no_credit 罚停的唯一恢复入口）。
 			if !task.IncludeDisabled && !account.IsActive() {
 				continue
 			}
@@ -218,33 +224,29 @@ func (s *TraeOpsService) runUsageRefresh(ctx context.Context, account *Account) 
 	return "", err
 }
 
-// runCreditsMonitor 积分到期监控：刷新快照并对 7 天内到期的账号打
-// expiring_soon 标记 + 告警日志。
+// runCreditsMonitor 积分到期监控：刷新快照并对临期（14 天内到期）的账号打
+// expiring_soon 标记 + 告警日志。顺带完成 trae_no_credit 的恢复判定——走
+// storeTraeQuotaSnapshot 而不是自己再查一遍上游，避免两条路径的恢复语义漂移。
 func (s *TraeOpsService) runCreditsMonitor(ctx context.Context, account *Account) (string, error) {
-	creds, client, err := s.traeClient(account)
+	entitlements, err := storeTraeQuotaSnapshot(ctx, s.accountRepo, account)
 	if err != nil {
 		return "", err
 	}
-	entitlements, err := trae.QueryEntitlements(ctx, client, creds.VariantOf(), creds.JWT, trae.DeviceIdentity{
-		DeviceID:     creds.DeviceID,
-		MarketUserID: creds.UID,
-	})
-	if err != nil {
-		return "", err
-	}
+	expiring := traeEntitlementsExpiring(entitlements)
 	if err := writeTraeQuotaExtra(ctx, s.accountRepo, account, entitlements, map[string]any{
-		"expiring_soon": traeEntitlementsExpiring(entitlements),
+		"expiring_soon": expiring,
 	}); err != nil {
 		return "", err
 	}
-	if traeEntitlementsExpiring(entitlements) {
-		log.Printf("[TraeOps] account %d 积分临期告警：7 天内到期（expiring_soon=true）", account.ID)
-		return "积分临期：7 天内到期", nil
+	if expiring {
+		log.Printf("[TraeOps] account %d 积分临期告警：%d 天内到期（expiring_soon=true）", account.ID, traeExpiringSoonDays)
+		return fmt.Sprintf("积分临期：%d 天内到期", traeExpiringSoonDays), nil
 	}
 	return "", nil
 }
 
-// traeEntitlementsExpiring 是否存在 7 天内到期且未过期的积分包。
+// traeEntitlementsExpiring 是否存在临期且未过期的积分包（窗口见
+// pkg/trae 的 expiringSoonWindow，当前 14 天）。
 func traeEntitlementsExpiring(entitlements *trae.Entitlements) bool {
 	if entitlements == nil {
 		return false
@@ -256,6 +258,9 @@ func traeEntitlementsExpiring(entitlements *trae.Entitlements) bool {
 	}
 	return false
 }
+
+// traeExpiringSoonDays 「临期」窗口的天数（仅用于文案；判据在 pkg/trae）。
+const traeExpiringSoonDays = 14
 
 // traeClient 解析账号凭据并构造带账号代理的 HTTP 客户端。
 func (s *TraeOpsService) traeClient(account *Account) (*trae.Credentials, *http.Client, error) {

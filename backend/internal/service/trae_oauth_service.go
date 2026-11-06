@@ -310,6 +310,8 @@ func storeTraeQuotaSnapshot(ctx context.Context, repo AccountRepository, account
 	if err := writeTraeQuotaExtra(ctx, repo, account, entitlements, nil); err != nil {
 		return nil, err
 	}
+	// 额度恢复且账号是被本逻辑罚停的 → 解冻（签到 / 周期刷新 / 手动查询共用）。
+	recoverTraeNoCredit(ctx, repo, account, entitlements)
 	return entitlements, nil
 }
 
@@ -343,6 +345,56 @@ func traeAccountProxyURL(account *Account) string {
 		return account.Proxy.URL()
 	}
 	return ""
+}
+
+// Trae 账号积分 / 错误状态常量。
+const (
+	// traeQuotaExtraKey 积分快照在 extra 中的键。
+	traeQuotaExtraKey = "trae_quota"
+	// TraeNoCreditReason 积分耗尽罚号的 error reason（恢复逻辑按它识别）。
+	TraeNoCreditReason = "trae_no_credit"
+)
+
+// zeroTraeQuotaExtra 积分耗尽时把快照清零（流内 402 语义路径调用，配合罚号）。
+// 保留逐包明细的键形状，避免前端/消费方在下一次真实刷新前读到缺键。
+func zeroTraeQuotaExtra(ctx context.Context, repo AccountRepository, accountID int64) {
+	if repo == nil {
+		return
+	}
+	snapshot := map[string]any{
+		"total":           0,
+		"purchased_today": 0,
+		"earliest_expire": 0,
+		"has_expire":      false,
+		"packages":        []any{},
+		"zeroed_at":       time.Now().Format(time.RFC3339),
+	}
+	if err := repo.UpdateExtra(ctx, accountID, map[string]any{traeQuotaExtraKey: snapshot}); err != nil {
+		log.Printf("[TraeQuota] zero-out failed account %d: %v", accountID, err)
+	}
+}
+
+// recoverTraeNoCredit 积分恢复且账号是被 trae_no_credit 罚停的，清除错误状态并
+// 恢复调度；其他来源的 error 不动（避免误恢复人工停用 / jwt 失效的账号）。
+func recoverTraeNoCredit(ctx context.Context, repo AccountRepository, account *Account, entitlements *trae.Entitlements) {
+	if repo == nil || account == nil || entitlements == nil {
+		return
+	}
+	if entitlements.Total <= 0 || account.Status != StatusError || account.ErrorMessage != TraeNoCreditReason {
+		return
+	}
+	if err := repo.ClearError(ctx, account.ID); err != nil {
+		log.Printf("[TraeQuota] no-credit recovery clear error failed account %d: %v", account.ID, err)
+		return
+	}
+	if err := repo.SetSchedulable(ctx, account.ID, true); err != nil {
+		log.Printf("[TraeQuota] no-credit recovery re-enable failed account %d: %v", account.ID, err)
+		return
+	}
+	account.Status = StatusActive
+	account.ErrorMessage = ""
+	account.Schedulable = true
+	log.Printf("[TraeQuota] account %d recovered from no-credit (total=%.2f)", account.ID, entitlements.Total)
 }
 
 // buildTraeCredentialsFromToken 由交换结果组装存储层凭据（值均为 string），

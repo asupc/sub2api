@@ -127,8 +127,11 @@ func (b *traeStreamBody) Close() error               { return b.closer.Close() }
 //     报错时按 classifyTraeUpstreamFailure 合成 HTTP 错误状态，交由调用方的
 //     既有错误链（failover / 账号处置）统一处理。
 //
+// 两条路径的流内错误都经 handleTraeUpstreamStreamError 做账号级处置与 Ops 登记。
+// c 可为 nil（测试/无 gin 上下文场景），此时只跳过 Ops 登记。
+//
 // model 为回显进响应体的模型名（取出站请求体的 model 字段）。
-func (s *OpenAIGatewayService) wrapTraeChatResponse(ctx context.Context, account *Account, resp *http.Response, clientStream bool, model string) error {
+func (s *OpenAIGatewayService) wrapTraeChatResponse(ctx context.Context, c *gin.Context, account *Account, resp *http.Response, clientStream bool, model string) error {
 	if s == nil || account == nil || resp == nil || resp.Body == nil || resp.StatusCode >= 400 {
 		return nil
 	}
@@ -146,7 +149,7 @@ func (s *OpenAIGatewayService) wrapTraeChatResponse(ctx context.Context, account
 			})
 			_ = upstreamBody.Close()
 			if outcome.Error != nil {
-				s.handleTraeUpstreamStreamError(ctx, account, outcome.Error)
+				s.handleTraeUpstreamStreamError(ctx, c, account, outcome.Error)
 			}
 			_ = pipeWriter.Close()
 		}()
@@ -159,6 +162,10 @@ func (s *OpenAIGatewayService) wrapTraeChatResponse(ctx context.Context, account
 	response, upstreamErr, _ := trae.Aggregate(resp.Body, chatID, model)
 	_ = resp.Body.Close()
 	if upstreamErr != nil {
+		// 非流式失败的账号级处置与 ops 记录走同一条流内错误通道（此前只把
+		// 状态写回 resp，账号状态与错误看板都不会更新——exactly 线上"积分耗尽
+		// 后继续被调度"的时间窗）。
+		s.handleTraeUpstreamStreamError(ctx, c, account, upstreamErr)
 		status := classifyTraeUpstreamFailure(upstreamErr.Code, upstreamErr.Message)
 		errBody, _ := json.Marshal(trae.ErrorBody(strconv.FormatInt(upstreamErr.Code, 10), upstreamErr.Message))
 		resp.StatusCode = status
@@ -198,6 +205,11 @@ func classifyTraeUpstreamFailure(code int64, message string) int {
 	case code == 429 || strings.Contains(msg, "rate limit"):
 		return http.StatusTooManyRequests
 	case strings.Contains(msg, "quota") || strings.Contains(msg, "credit") || strings.Contains(msg, "insufficient"):
+		// 宽口径（含「配额查询失败」等非耗尽语义）：只表示"稍后重试"，不据此罚号。
+		// 账号级积分耗尽判定用严格标记，见 isTraeNoCreditFailure。
+		return http.StatusTooManyRequests
+	case isTraeNoCreditFailure(message):
+		// 中文耗尽文案（「积分不足 / 余额不足」等）不含上行的 ASCII 关键词。
 		return http.StatusTooManyRequests
 	case code == 4001 || code == 4023 || strings.Contains(msg, "param is invalid") || strings.Contains(msg, "model is unknown"):
 		return http.StatusBadRequest
@@ -206,10 +218,58 @@ func classifyTraeUpstreamFailure(code int64, message string) int {
 	}
 }
 
-// handleTraeUpstreamStreamError 处理流式转换中发现的流内错误：仅对凭据失效
-// 类（合成 401）做账号级处置，其余记录日志交由观测。ctx 经 WithoutCancel
+// traeNoCreditMarkers 「积分 / 额度耗尽」的上游文案标记（口径同移植源
+// trae-workbuddy-switch `HARD_CREDIT_MARKERS`）。ASCII 标记对全文小写后匹配，
+// 中文标记按原文匹配。
+//
+// 刻意**不含**裸 `quota` / `credit` / `insufficient`：这三类词会命中「配额剩余
+// 查询失败」「credit 字段缺失」等非耗尽语义，据此冻结账号属于误伤；来源实现同样
+// 只认完整短语。
+var traeNoCreditMarkers = []string{
+	"insufficient credit",
+	"no credit",
+	"credit exhausted",
+	"credits exhausted",
+	"out of credit",
+	"quota exceeded",
+	"quota exhaust",
+	"payment required",
+	"credit not enough",
+	"not enough credit",
+	"积分不足",
+	"额度不足",
+	"余额不足",
+	"积分用完",
+	"额度用尽",
+	"没有积分",
+}
+
+// isTraeNoCreditFailure 判定上游错误文案是否表示「积分 / 额度已耗尽」。
+func isTraeNoCreditFailure(message string) bool {
+	if strings.TrimSpace(message) == "" {
+		return false
+	}
+	lowered := strings.ToLower(message)
+	for _, marker := range traeNoCreditMarkers {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleTraeUpstreamStreamError 处理流式转换中发现的流内错误：按上游错误做
+// 账号级处置，并登记到 Ops 错误日志（wire 状态已固化为 200，因此必须走
+// MarkOpsStreamError 的带内通道，否则错误看板上完全隐形）。ctx 经 WithoutCancel
 // 使用（客户端可能已断开，drain 阶段的处置不能随之取消）。
-func (s *OpenAIGatewayService) handleTraeUpstreamStreamError(ctx context.Context, account *Account, upstreamErr *trae.UpstreamError) {
+//
+// 处置：
+//
+//	积分 / 额度耗尽 → 快照清零 + status=error（trae_no_credit）+ 停调度；
+//	                  签到 / 积分刷新成功后自动恢复（见 TraeOpsService）。
+//	401 / token 失效 → status=error（jwt 已不可自愈，需重新授权）。
+//	其余            → 仅记录，交由观测（与改造前一致）。
+func (s *OpenAIGatewayService) handleTraeUpstreamStreamError(ctx context.Context, c *gin.Context, account *Account, upstreamErr *trae.UpstreamError) {
 	if upstreamErr == nil {
 		return
 	}
@@ -220,18 +280,78 @@ func (s *OpenAIGatewayService) handleTraeUpstreamStreamError(ctx context.Context
 		zap.Int("mapped_status", status),
 		zap.String("message", upstreamErr.Message),
 	)
-	if status != http.StatusUnauthorized || s.accountRepo == nil {
+	// Ops 可见性：同一条错误无论是拒绝型还是瞬时型都要进错误看板
+	//（改造前该路径零记录，线上表现为「失败的请求在看板上根本不存在」）。
+	markTraeStreamErrorForOps(c, account, upstreamErr, status)
+
+	if s.accountRepo == nil {
 		return
 	}
 	actionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	msg := fmt.Sprintf("trae jwt invalid (code=%d): %s", upstreamErr.Code, upstreamErr.Message)
-	if err := s.accountRepo.SetError(actionCtx, account.ID, msg); err != nil {
-		logger.L().Warn("trae chat stream: mark account error failed",
-			zap.Int64("account_id", account.ID),
-			zap.Error(err),
-		)
+	switch {
+	case status == http.StatusUnauthorized:
+		msg := fmt.Sprintf("trae jwt invalid (code=%d): %s", upstreamErr.Code, upstreamErr.Message)
+		if err := s.accountRepo.SetError(actionCtx, account.ID, msg); err != nil {
+			logger.L().Warn("trae chat stream: mark account error failed",
+				zap.Int64("account_id", account.ID),
+				zap.Error(err),
+			)
+		}
+	case isTraeNoCreditFailure(upstreamErr.Message):
+		// 积分耗尽：上游不会自愈，继续调度只会每次撞墙（线上实测：积分归零后
+		// 仍被调度了 27 分钟、几十次 400~700ms 的立即拒绝，且全部计为"成功"）。
+		// 处置口径对齐 qoder/workbuddy：快照清零 + 罚号 + 停调度，
+		// 由签到 / 积分刷新任务在额度恢复后自动解冻。
+		zeroTraeQuotaExtra(actionCtx, s.accountRepo, account.ID)
+		if err := s.accountRepo.SetError(actionCtx, account.ID, TraeNoCreditReason); err != nil {
+			logger.L().Warn("trae set no-credit error failed",
+				zap.Int64("account_id", account.ID), zap.Error(err))
+		} else {
+			account.Status = StatusError
+			account.ErrorMessage = TraeNoCreditReason
+			account.Schedulable = false
+		}
 	}
+}
+
+// markTraeStreamErrorForOps 把 trae 流内错误登记到 Ops 带内错误通道
+// （ops_error_logs）。trae 的流内错误走不了 handler 层的通用错误链，必须在这里
+// 显式标记；同时补上上游状态与错误详情，便于按错误码聚合排查。
+func markTraeStreamErrorForOps(c *gin.Context, account *Account, upstreamErr *trae.UpstreamError, status int) {
+	if c == nil || upstreamErr == nil {
+		return
+	}
+	message := strings.TrimSpace(upstreamErr.Message)
+	if message == "" {
+		message = fmt.Sprintf("trae upstream error (code=%d)", upstreamErr.Code)
+	}
+	code := strconv.FormatInt(upstreamErr.Code, 10)
+	errType := "upstream_error"
+	switch {
+	case isTraeNoCreditFailure(upstreamErr.Message):
+		errType = "insufficient_quota"
+	case status == http.StatusUnauthorized:
+		errType = "authentication_error"
+	case status == http.StatusTooManyRequests:
+		errType = "rate_limit_error"
+	case status == http.StatusBadRequest:
+		errType = "invalid_request_error"
+	}
+	setOpsUpstreamError(c, int(upstreamErr.Code), message, fmt.Sprintf(`{"code":%s,"message":%q}`, code, message))
+	if account != nil {
+		// 先登记上游尝试归因，再标记带内错误：MarkOpsStreamFailure 会在此刻快照
+		// 上游错误上下文（顺序颠倒则快照里看不到本次尝试）。
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: int(upstreamErr.Code),
+			Kind:               "stream_error",
+			Message:            message,
+		})
+	}
+	MarkOpsStreamFailure(c, errType, "trae_upstream_"+code, message, status)
 }
 
 // DefaultTraeModelIDs 是 /v1/models 的 trae 静态兜底清单（pkg/trae 的静态
