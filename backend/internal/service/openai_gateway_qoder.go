@@ -404,13 +404,17 @@ func qoderRequestModel(body []byte) string {
 }
 
 // qoderClientErrorPayload 由 FriendlyUpstreamError 合成的 OpenAI 风格错误体。
+// error.code 一律用 classifyQoderUpstreamFailure 收口（hub #137
+// _client_error_status）：排队 / 额度这类非凭证类错误对客户端不用 401/403
+// （改 429，与 OpenAI insufficient_quota 一致），避免按状态码归类的客户端
+// 误判「API Key 无效」。
 func qoderClientErrorPayload(code int, detail string) map[string]any {
 	message, errType := qoder.FriendlyUpstreamError(code, detail)
 	return map[string]any{
 		"error": map[string]any{
 			"message": message,
 			"type":    errType,
-			"code":    code,
+			"code":    classifyQoderUpstreamFailure(code, detail),
 		},
 	}
 }

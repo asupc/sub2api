@@ -172,3 +172,76 @@ func TestIsQueuedRejectAndRetryAfterSeconds(t *testing.T) {
 	require.Equal(t, 45, RetryAfterSeconds(`{"retryAfterSeconds":45}`))
 	require.Equal(t, 0, RetryAfterSeconds("no retry field"))
 }
+
+// hub #137：文字里独立的 401/403 改写为 HTTP_401/HTTP_403，DSH 类按
+// /\b(?:401|403)\b/ 归类 AUTH 的客户端不再误判「API Key 无效」。
+func TestNeutralizeAuthCodes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`{"code":"403","msg":"isQueued"}`, `{"code":"HTTP_403","msg":"isQueued"}`},
+		{"upstream 403: bad", "upstream HTTP_403: bad"},
+		{"401 and 403", "HTTP_401 and HTTP_403"},
+		{"HTTP_403 already", "HTTP_403 already"}, // 前缀 _ 已是单词字符，403 不再独立
+		{"14031", "14031"},                       // 数字夹击
+		{"40301", "40301"},
+		{"a403b", "a403b"}, // 字母夹击
+		{"errno=4030", "errno=4030"},
+		{"no codes", "no codes"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := NeutralizeAuthCodes(c.in); got != c.want {
+			t.Fatalf("NeutralizeAuthCodes(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// hub #137：排队 / 额度类错误文案——中文原因 + 详情中性化 + 英文分类提示，
+// 错误类型不再落入裸 upstream 403 兜底。
+func TestFriendlyUpstreamErrorQueueAndQuota(t *testing.T) {
+	// 排队（403 信封）。
+	msg, errType := FriendlyUpstreamError(403, `{"code":"403","message":"{\"isQueued\":true,\"retryAfterSeconds\":30}"}`)
+	if errType != "upstream_queued" {
+		t.Fatalf("queued errType = %q", errType)
+	}
+	for _, want := range []string{"排队", queuedClientHint} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("queued message missing %q: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, `"403"`) {
+		t.Fatalf("queued message must not carry bare 403: %s", msg)
+	}
+	// 额度耗尽（112）。
+	msg, errType = FriendlyUpstreamError(403, `{"code":"403","message":"{\"code\":112,\"msg\":\"credits exhausted\"}"}`)
+	if errType != "quota_exhausted" {
+		t.Fatalf("exhausted errType = %q", errType)
+	}
+	if !strings.Contains(msg, quotaClientHint) || strings.Contains(msg, `"403"`) {
+		t.Fatalf("exhausted message: %s", msg)
+	}
+	// 每日次数上限（110）。
+	msg, errType = FriendlyUpstreamError(403, `{"code":"403","message":"Billing daily count exceeded"}`)
+	if errType != "quota_daily_limit" {
+		t.Fatalf("daily errType = %q", errType)
+	}
+	if !strings.Contains(msg, dailyClientHint) {
+		t.Fatalf("daily message: %s", msg)
+	}
+	// 兜底分支同样中性化。
+	msg, errType = FriendlyUpstreamError(403, "some other 403 refusal")
+	if errType != "upstream_error" {
+		t.Fatalf("fallback errType = %q", errType)
+	}
+	if strings.Contains(msg, " 403 ") || strings.HasSuffix(msg, "403: some other 403 refusal") {
+		t.Fatalf("fallback message must neutralize bare 403: %s", msg)
+	}
+	if !strings.Contains(msg, "HTTP_403") {
+		t.Fatalf("fallback message should carry HTTP_403: %s", msg)
+	}
+	// 瞬时故障分支维持原语义（不受中性化影响）。
+	msg, errType = FriendlyUpstreamError(502, "provider_error boom")
+	if errType != "upstream_transient_error" {
+		t.Fatalf("transient errType = %q", errType)
+	}
+	_ = msg
+}

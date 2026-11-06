@@ -3,6 +3,7 @@ package qoder
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -341,8 +342,54 @@ func parseRetryAfterSeconds(detail string) int {
 	return n
 }
 
+// neutralizeAuthCodesIsWord 报告字节是否为「单词字符」（[0-9A-Za-z_]），
+// NeutralizeAuthCodes 的边界判定用（RE2 无环视，手写扫描）。
+func neutralizeAuthCodesIsWord(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+// NeutralizeAuthCodes 把文字里**独立出现**的 401/403 改写成 HTTP_401/HTTP_403
+// （hub #137）。排队 / 额度这类「不是凭证问题」的错误，上游详情里常带信封层的
+// "code":"403"；不少客户端只看错误文字归类——DSH 的 pi-ai 适配层第一条规则就是
+// /\b(?:401|403)\b/ -> AUTH，界面便显示成「API Key 无效」。改写后 \b 两侧都是
+// 单词字符，不再命中；数字本身仍可读（HTTP_403）。
+func NeutralizeAuthCodes(text string) string {
+	if !strings.Contains(text, "401") && !strings.Contains(text, "403") {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		if i+3 <= len(text) {
+			seg := text[i : i+3]
+			if seg == "401" || seg == "403" {
+				leftOK := i == 0 || !neutralizeAuthCodesIsWord(text[i-1])
+				rightOK := i+3 >= len(text) || !neutralizeAuthCodesIsWord(text[i+3])
+				if leftOK && rightOK {
+					b.WriteString("HTTP_")
+					b.WriteString(seg)
+					i += 3
+					continue
+				}
+			}
+		}
+		b.WriteByte(text[i])
+		i++
+	}
+	return b.String()
+}
+
+// 客户端分类器认得的英文原因（hub #137：文末附一句，DSH/pi-ai 按 rate limit /
+// quota 归类为可重试限流而非鉴权失败）。
+const (
+	queuedClientHint = " [rate limit: upstream model queue is full (10605), retry later]"
+	quotaClientHint  = " [quota exhausted: upstream account credits exhausted (112), top up or enable another account]"
+	dailyClientHint  = " [usage limit reached: upstream daily request count exceeded (110), retry after local midnight]"
+)
+
 // FriendlyUpstreamError 把上游错误转成对客户端可读的消息
-// （qoder_proxy.py L3836-3859）：内容审核给确定性说明、瞬时故障给重试指引。
+// （qoder_proxy.py L3836-3859，hub #87/#108/#137 扩充）：内容审核给确定性说明、
+// 排队/额度给中文原因 + 英文分类提示、瞬时故障给重试指引。
 func FriendlyUpstreamError(code int, detail string) (message, errType string) {
 	detail = strings.TrimSpace(detail)
 	if IsContentPolicy(detail) {
@@ -350,6 +397,39 @@ func FriendlyUpstreamError(code int, detail string) (message, errType string) {
 				"属确定性拒绝、重试无效。请检查/缩短输入（系统提示词、超长历史、"+
 				"工具定义或粘贴的代码/文本）后重试。上游详情：%s", clip(detail, 300)),
 			"content_policy_rejected"
+	}
+	// hub #137：排队 / 额度详情统一过 NeutralizeAuthCodes，文末附客户端分类器
+	// 认得的英文原因（DSH/pi-ai 按文字里的裸 401/403 归类 AUTH → 误显「API Key
+	// 无效」；改写后按 rate limit / quota 归类为可重试限流）。
+	safeDetail := NeutralizeAuthCodes(detail)
+	// issue #87：排队（403/503 信封）统一给中文原因——不是 Key/账号/网络问题。
+	if (IsQueuedReject(detail) || strings.Contains(detail, "RESOURCE_LIMIT")) &&
+		(code == 403 || code == 503) {
+		d := clip(safeDetail, 160)
+		if d == "" {
+			d = "(无详情)"
+		}
+		return "上游模型排队中（10605 / RESOURCE_LIMIT）：请稍后重试，或换一个模型/区域。" +
+			"这不是你的 Key、账号或网络问题。上游详情：" + d + queuedClientHint, "upstream_queued"
+	}
+	// issue #108 / hub #137：额度类 403 不是凭证问题——客户端应看懂该充值/换号。
+	kind, _ := QuotaCooldown(detail, time.Now())
+	if kind == QuotaKindExhausted {
+		d := clip(safeDetail, 160)
+		if d == "" {
+			d = "(无详情)"
+		}
+		return "上游账号额度耗尽（112 / pricingUrl）：重试无效，请充值或启用其它账号。" +
+			"上游详情：" + d + quotaClientHint, "quota_exhausted"
+	}
+	if kind == QuotaKindDaily {
+		// hub #137：每日次数上限（110）此前落到兜底分支，原样显示成 upstream 403。
+		d := clip(safeDetail, 160)
+		if d == "" {
+			d = "(无详情)"
+		}
+		return "上游账号今日请求次数已达上限（110）：本地 0 点后恢复，或启用其它账号。" +
+			"这不是你的 Key 问题。上游详情：" + d + dailyClientHint, "quota_daily_limit"
 	}
 	if IsTransientUpstream(code, detail) ||
 		(strings.Contains(detail, "provider_error") && !strings.Contains(detail, "invalid_")) {
@@ -360,7 +440,18 @@ func FriendlyUpstreamError(code int, detail string) (message, errType string) {
 		return fmt.Sprintf("上游瞬时故障 (HTTP %d)：网关已对同账号自动重试仍失败，"+
 			"请稍后重试。上游详情：%s", code, clip(d, 300)), "upstream_transient_error"
 	}
-	return fmt.Sprintf("upstream %d: %s", code, detail), "upstream_error"
+	// hub #137：非 403/503 信封的排队（如 200 流内错误帧重试后仍排队）同样归为
+	// 排队语义，附英文原因。
+	if IsQueuedReject(detail) || strings.Contains(detail, "RESOURCE_LIMIT") {
+		d := clip(safeDetail, 200)
+		if d == "" {
+			d = "(无详情)"
+		}
+		return "上游排队中（10605 / RESOURCE_LIMIT）：已等待并重试仍拿不到可用资源。" +
+			"请稍后重试；若频繁出现，说明该模型当前排队严重。上游详情：" + d + queuedClientHint, "upstream_queued"
+	}
+	// 兜底同样中性化：upstream 403 的裸数字会命中按文字归类的客户端 AUTH 规则。
+	return fmt.Sprintf("upstream %s: %s", NeutralizeAuthCodes(strconv.Itoa(code)), safeDetail), "upstream_error"
 }
 
 func clip(s string, n int) string {

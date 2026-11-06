@@ -420,21 +420,28 @@ type QuotaPackage struct {
 
 // QuotaUsage /api/v2/quota/usage 聚合结果（fetch_credits L2316-2385）。
 type QuotaUsage struct {
-	Remain           int            `json:"remain"`
-	Used             int            `json:"used"`
-	Size             int            `json:"size"`
-	Exceeded         bool           `json:"exceeded"`
-	UsagePct         any            `json:"usage_pct"`
-	ExpiresAt        int64          `json:"expires_at"`
-	Packages         []QuotaPackage `json:"packages"`
+	Remain   int    `json:"remain"`
+	Used     int    `json:"used"`
+	Size     int    `json:"size"`
+	Exceeded bool   `json:"exceeded"`
+	UsagePct any    `json:"usage_pct"`
+	ExpiresAt int64 `json:"expires_at"`
+	Packages  []QuotaPackage `json:"packages"`
+	// Composition 额度构成四桶（hub #141：套餐内/资源包/SOTA/共享池，含
+	// displayLabels 展示名与 available=false 的停用包）。合计（remain/used/
+	// size）由构成归一化得出——SOTA（dedicatedResourcePackages）计入，
+	// available=false 不计入，shared 单列不重复计数。
+	Composition []QuotaBucket `json:"composition,omitempty"`
+	// Source 命中的额度端点路径（端点自动探测，hub #141 probe）。
+	Source string `json:"source,omitempty"`
 	// issue #39/#67：共享组织配额（orgResourcePackage 等）。
-	SharedRemain     int    `json:"shared_remain,omitempty"`
-	SharedUsed       int    `json:"shared_used,omitempty"`
-	SharedSize       int    `json:"shared_size,omitempty"`
-	SharedAvailable  bool   `json:"shared_available,omitempty"`
-	SharedUnlimited  bool   `json:"shared_unlimited,omitempty"`
-	SharedSource     string `json:"shared_source,omitempty"`
-	EffectiveRemain  int    `json:"effective_remain"`
+	SharedRemain    int    `json:"shared_remain,omitempty"`
+	SharedUsed      int    `json:"shared_used,omitempty"`
+	SharedSize      int    `json:"shared_size,omitempty"`
+	SharedAvailable bool   `json:"shared_available,omitempty"`
+	SharedUnlimited bool   `json:"shared_unlimited,omitempty"`
+	SharedSource    string `json:"shared_source,omitempty"`
+	EffectiveRemain int    `json:"effective_remain"`
 }
 
 type quotaUsageRaw struct {
@@ -451,14 +458,43 @@ type quotaUsageRaw struct {
 	SharedCredit         any            `json:"sharedCredit"`
 }
 
-// QuotaUsage 拉取并聚合额度（GET /api/v2/quota/usage：基础 + 赠送/签到）。
+// QuotaUsage 拉取并聚合额度（GET /api/v2/quota/usage：基础 + 赠送/签到，
+// hub #141 起含 SOTA 构成与端点自动探测）。
 func (c *Client) QuotaUsage(ctx context.Context, creds Credentials) (*QuotaUsage, error) {
 	cfg := Realm(creds.NormalizedRealm())
-	var raw quotaUsageRaw
-	if err := c.doJSON(ctx, http.MethodGet, cfg.OpenAPI+PathQuotaUsage, nil,
-		creds.OpenAPIHeaders(), &raw); err != nil {
-		return nil, err
+	realm := creds.NormalizedRealm()
+	// 端点自动探测（hub #141）：命中路径进程内记忆；404/405/410 时按候选
+	// 矩阵换下一路径（老网关/上游迁移兼容），全失败回落原错误。原始响应体
+	// 保留为 map（构成归一化 BFS 需要未声明字段，如 dedicatedResourcePackages）。
+	path := quotaUsagePath(realm)
+	var rawMap map[string]any
+	var lastErr error
+	for {
+		err := c.doJSON(ctx, http.MethodGet, cfg.OpenAPI+path, nil,
+			creds.OpenAPIHeaders(), &rawMap)
+		if err == nil {
+			rememberQuotaPath(realm, path)
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		se, ok := err.(*StatusError)
+		if !ok || (se.Code != http.StatusNotFound && se.Code != http.StatusMethodNotAllowed && se.Code != http.StatusGone) {
+			break
+		}
+		next, has := nextQuotaPathCandidate(path)
+		if !has {
+			break
+		}
+		path = next
 	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	source := path
+	rawRaw, _ := json.Marshal(rawMap)
+	var raw quotaUsageRaw
+	_ = json.Unmarshal(rawRaw, &raw)
 	num := func(d map[string]any, k string) float64 {
 		if d == nil {
 			return 0
@@ -575,6 +611,23 @@ func (c *Client) QuotaUsage(ctx context.Context, creds Credentials) (*QuotaUsage
 		SharedUnlimited:  sharedUnlimited,
 		SharedSource:     sharedKey,
 		EffectiveRemain:  effectiveRemain,
+		Source:           source,
+	}
+
+	// hub #141（issue 系列）：构成归一化（四桶）覆盖合计——SOTA
+	//（dedicatedResourcePackages）此前完全没被识别，INTL 合计少算 2000+；
+	// available=false 只展示不计入；shared 单列不重复计数。归一化一个桶都
+	// 认不出时保持旧口径（该端点可能换了形态）。
+	if composition := normalizeQuotaPayload(rawMap); len(composition) > 0 {
+		cRemain, cUsed, cSize := quotaCompositionTotals(composition)
+		out.Composition = composition
+		out.Remain = cRemain
+		out.Used = cUsed
+		out.Size = cSize
+		if ea := quotaEarliestExpiry(composition); ea > 0 && out.ExpiresAt == 0 {
+			out.ExpiresAt = ea
+		}
+		out.EffectiveRemain = cRemain + sharedAvailRemain
 	}
 	return out, nil
 }

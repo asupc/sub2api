@@ -728,14 +728,19 @@ func ResetAffinityStoreForTest() {
 
 // AssignSessionID 在 body 上分配 session_id（源 assign_prefix_session）：
 //
-//	始终先重置为随机 UUID（前一个失败账号可能已占过 ID）；亲和可用时按前缀
-//	哈希复用稳定 UUID，失败也只回落随机——可选优化不得打断推理，且日志不打印
-//	连接地址 / 密码 / 消息 / 异常详情。
+//	始终先重置（前一个失败账号可能已占过 ID）：hub #136 起兜底为**窗口级** id
+//	（整段对话恒定，保证上游 prompt 缓存按 session_id 命中），fallback 为空才退
+//	随机 UUID；亲和可用时按前缀哈希复用稳定 UUID（优先级高于 fallback），失败也
+//	只回落兜底——可选优化不得打断推理，且日志不打印连接地址 / 密码 / 消息 /
+//	异常详情。
 //
 // 返回 (session_id, affinity 标记)：标记用于用量记录（memory-prefix /
 // redis-prefix / random）。
-func AssignSessionID(body map[string]any, scope AffinityScope) (string, string) {
-	body["session_id"] = UUID4()
+func AssignSessionID(body map[string]any, scope AffinityScope, fallback string) (string, string) {
+	if fallback == "" {
+		fallback = UUID4()
+	}
+	body["session_id"] = fallback
 	mark := "random"
 	store, err := DefaultAffinityStore()
 	if err != nil || store == nil {

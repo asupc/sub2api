@@ -740,3 +740,101 @@ func TestBuildAgentChatBodyBusinessModelKey(t *testing.T) {
 		t.Fatalf("request_id must stay per-request unique, got %q", got)
 	}
 }
+
+// hub #136：窗口级会话键——session_id 的兜底口径。窗口键只用「模型 + 首条
+// user」，不吃 system（system 常带 cwd/git 状态/时间等每轮变化的运行时上下文，
+// 吃进去会让窗口键逐轮变 → session_id 逐轮换 → 上游 prompt 缓存归零）。
+func TestConversationWindowKeyIgnoresSystemDrift(t *testing.T) {
+	mk := func(system string) map[string]any {
+		return map[string]any{
+			"model": "kmodel",
+			"messages": []any{
+				map[string]any{"role": "system", "content": system},
+				map[string]any{"role": "user", "content": "first question"},
+				map[string]any{"role": "assistant", "content": "answer"},
+				map[string]any{"role": "user", "content": "second question"},
+			},
+		}
+	}
+	a := conversationWindowKey("", mk("cwd=/repo/x time=10:00"))
+	b := conversationWindowKey("", mk("cwd=/repo/y time=11:30")) // system 每轮变化
+	if a == "" || a != b {
+		t.Fatalf("window key must ignore per-turn system drift: %q vs %q", a, b)
+	}
+	if !strings.HasPrefix(a, "win:") {
+		t.Fatalf("window key form = %q, want win: prefix", a)
+	}
+	// 首条 user 变（新对话）→ 窗口键变。
+	c := conversationWindowKey("", map[string]any{
+		"model":    "kmodel",
+		"messages": []any{map[string]any{"role": "user", "content": "another conversation"}},
+	})
+	if c == a || c == "" {
+		t.Fatalf("different first user must change window key: %q", c)
+	}
+	// 模型不同 → 窗口键不同（缓存按模型隔离）。
+	d := conversationWindowKey("", map[string]any{
+		"model":    "kmodel2",
+		"messages": []any{map[string]any{"role": "user", "content": "first question"}},
+	})
+	if d == a || d == "" {
+		t.Fatalf("different model must change window key: %q", d)
+	}
+	// 显式键优先，原样返回（不追加提问摘要）。
+	if got := conversationWindowKey("client-sess-1", mk("s")); got != "client-sess-1" {
+		t.Fatalf("explicit key = %q, want client-sess-1", got)
+	}
+	// 无 user 消息 → 空串（调用方回落提问级 id）。
+	if got := conversationWindowKey("", map[string]any{"messages": []any{
+		map[string]any{"role": "system", "content": "only system"}}}); got != "" {
+		t.Fatalf("no-user window key = %q, want empty", got)
+	}
+	// 空 content 的 user 不作锚，取第一条有内容的 user。
+	if got := conversationWindowKey("", map[string]any{
+		"model": "kmodel",
+		"messages": []any{
+			map[string]any{"role": "user", "content": ""},
+			map[string]any{"role": "user", "content": "real anchor"},
+		}}); got == "" || got != conversationWindowKey("", map[string]any{
+		"model":    "kmodel",
+		"messages": []any{map[string]any{"role": "user", "content": "real anchor"}},
+	}) {
+		t.Fatalf("empty-content user must not be the anchor: %q", got)
+	}
+}
+
+// hub #136：同一对话内两轮提问——chat_record_id（用量归组）换新，session_id
+// 兜底（窗口级）恒定。session_id 的稳定性由调用方 BuildAgentChatBody 透传
+// conv.windowID 实现，这里直接验证 ConversationIdentity 返回两者的口径。
+func TestConversationIdentityWindowStableAcrossTurns(t *testing.T) {
+	req := func(system, lastUser string) map[string]any {
+		return map[string]any{
+			"model": "kmodel",
+			"messages": []any{
+				map[string]any{"role": "system", "content": system},
+				map[string]any{"role": "user", "content": "first question"},
+				map[string]any{"role": "assistant", "content": "answer"},
+				map[string]any{"role": "user", "content": lastUser},
+			},
+		}
+	}
+	a := ConversationIdentity("", req("ctx t1", "turn one"))
+	b := ConversationIdentity("", req("ctx t2", "turn two")) // 下一轮提问
+	if a == nil || b == nil {
+		t.Fatal("conversation identity missing")
+	}
+	if a.id == b.id {
+		t.Fatal("per-turn id must change across user turns")
+	}
+	if a.windowID == "" || a.windowID != b.windowID {
+		t.Fatalf("window id must be stable across turns: %q vs %q", a.windowID, b.windowID)
+	}
+	if a.windowID == a.id {
+		t.Fatal("window id must be decoupled from per-turn id")
+	}
+	// 显式键路径同样返回窗口级 id（显式键原样）。
+	c := ConversationIdentity("client-sess-9", req("ctx t1", "turn one"))
+	if c == nil || c.windowID != "client-sess-9" {
+		t.Fatalf("explicit window id = %v, want client-sess-9", c)
+	}
+}

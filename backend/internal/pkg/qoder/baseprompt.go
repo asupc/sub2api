@@ -1265,10 +1265,19 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	body["business"] = biz
 
 	// 前缀会话亲和（opt-in，issue: 前缀会话亲和）：同消息前缀优先复用稳定
-	// session_id，未命中生成并写入；默认关闭时行为不变（每次随机 UUID）。
-	// 放在 tools/parameters/agent_id 定稿之后（源 assign_prefix_session 在
-	// build_qoder_body 之后调用，context 含这三项）；作用域含账号/区域/模型/
-	// 客户端会话与工具参数配置，换号后重新查找该账号自己的映射。
+	// session_id，未命中回落窗口级兜底；放在 tools/parameters/agent_id 定稿之后
+	// （源 assign_prefix_session 在 build_qoder_body 之后调用，context 含这三项）；
+	// 作用域含账号/区域/模型/客户端会话与工具参数配置，换号后重新查找该账号自己
+	// 的映射。
+	//
+	// hub #136：session_id 兜底用**窗口级** id（整段对话恒定，模型+首条 user 不吃
+	// system），不能用「一次提问」的 conv.id —— 否则每轮新提问上游 prompt 缓存
+	// 都归零（缓存段系数仅 8%，同段历史差 12 倍价格）。窗口键拿不到时回落提问级
+	// id（源 window_id or id），conv 为 nil（开关关闭）保持旧行为随机 UUID。
+	convWindow := ""
+	if conv != nil {
+		convWindow = firstNonEmpty(conv.windowID, conv.id)
+	}
 	AssignSessionID(body, AffinityScope{
 		AccountUID:       session.UID,
 		Realm:            realm,
@@ -1279,7 +1288,7 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 			"parameters": body["parameters"],
 			"agent_id":   body["agent_id"],
 		},
-	})
+	}, convWindow)
 
 	encoded := QoderEncode([]byte(marshalNoEscape(body)))
 	if len(encoded) > maxBodyBytes() {

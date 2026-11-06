@@ -519,19 +519,46 @@ func TestAssignSessionIDDisabledKeepsRandom(t *testing.T) {
 	t.Cleanup(ResetAffinityStoreForTest)
 
 	body := map[string]any{"messages": testSessionMessages("hi")}
-	id1, mark1 := AssignSessionID(body, testScope())
+	id1, mark1 := AssignSessionID(body, testScope(), "")
 	if mark1 != "random" {
 		t.Fatalf("mark = %q, want random", mark1)
 	}
-	id2, _ := AssignSessionID(body, testScope())
+	id2, _ := AssignSessionID(body, testScope(), "")
 	if id1 == id2 {
 		t.Fatal("disabled cache must produce fresh session each time")
 	}
 	// 前一个失败账号残留的 session_id 必须被重置（源 assign_prefix_session 注释）。
 	body["session_id"] = "stale-id-from-failed-account"
-	id3, _ := AssignSessionID(body, testScope())
+	id3, _ := AssignSessionID(body, testScope(), "")
 	if id3 == "stale-id-from-failed-account" {
 		t.Fatal("stale session id must be reset")
+	}
+}
+
+// hub #136：缓存关闭时窗口级兜底也要生效——同对话两轮请求 session_id 稳定，
+// 不再每请求随机（上游 prompt 缓存按 session_id 命中）。
+func TestAssignSessionIDFallbackStableWithoutCache(t *testing.T) {
+	t.Setenv("QD_SESSION_CACHE", "off")
+	ResetAffinityStoreForTest()
+	t.Cleanup(ResetAffinityStoreForTest)
+
+	fallback := "win:abc123"
+	body := map[string]any{"messages": testSessionMessages("hi")}
+	id1, mark1 := AssignSessionID(body, testScope(), fallback)
+	if mark1 != "random" {
+		t.Fatalf("mark = %q, want random", mark1)
+	}
+	if id1 != fallback {
+		t.Fatalf("session id = %q, want fallback %q", id1, fallback)
+	}
+	body2 := map[string]any{"messages": testSessionMessages("hi")}
+	if id2, _ := AssignSessionID(body2, testScope(), fallback); id2 != fallback {
+		t.Fatalf("second call session id = %q, want stable fallback", id2)
+	}
+	// 残留 session_id 被重置为兜底而非保留。
+	body["session_id"] = "stale-id-from-failed-account"
+	if id3, _ := AssignSessionID(body, testScope(), fallback); id3 != fallback {
+		t.Fatalf("stale reset session id = %q, want fallback", id3)
 	}
 }
 
@@ -543,25 +570,25 @@ func TestAssignSessionIDEnabledReuses(t *testing.T) {
 	t.Cleanup(ResetAffinityStoreForTest)
 
 	body := map[string]any{"messages": testSessionMessages("hi")}
-	id1, mark1 := AssignSessionID(body, testScope())
+	id1, mark1 := AssignSessionID(body, testScope(), "")
 	if mark1 != "memory-prefix" {
 		t.Fatalf("mark = %q, want memory-prefix", mark1)
 	}
-	id2, _ := AssignSessionID(body, testScope())
+	id2, _ := AssignSessionID(body, testScope(), "")
 	if id1 == "" || id1 != id2 {
 		t.Fatalf("enabled cache should reuse: %q vs %q", id1, id2)
 	}
 	// 换作用域不复用。
 	other := testScope()
 	other.AccountUID = "acct-z"
-	id3, _ := AssignSessionID(body, other)
+	id3, _ := AssignSessionID(body, other, "")
 	if id3 == id1 {
 		t.Fatal("scope change must not reuse")
 	}
 	// 无 user 锚点 → 随机。
 	sysBody := map[string]any{"messages": []any{
 		map[string]any{"role": "system", "content": "sys"}}}
-	id4, mark4 := AssignSessionID(sysBody, testScope())
+	id4, mark4 := AssignSessionID(sysBody, testScope(), "")
 	if mark4 != "random" {
 		t.Fatalf("system-only mark = %q, want random", mark4)
 	}
@@ -579,7 +606,7 @@ func TestAssignSessionIDCacheFailureKeepsInferring(t *testing.T) {
 	t.Cleanup(ResetAffinityStoreForTest)
 
 	body := map[string]any{"messages": testSessionMessages("hi")}
-	id, mark := AssignSessionID(body, testScope())
+	id, mark := AssignSessionID(body, testScope(), "")
 	if id == "" {
 		t.Fatal("must assign session id even on cache failure")
 	}

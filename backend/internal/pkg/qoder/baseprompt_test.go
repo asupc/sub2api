@@ -826,15 +826,21 @@ func TestBuildAgentChatBodySessionAffinity(t *testing.T) {
 		map[string]any{"role": "user", "content": "hello there"},
 	}
 
-	// 默认关闭：同前缀两次 session_id 不同。
+	// 默认关闭（hub #136 起）：session_id 走**窗口级兜底**（模型+首条 user，
+	// 不吃 system）——同对话两轮稳定（上游 prompt 缓存按 session_id 命中），
+	// 不再每请求随机。
 	t.Setenv("QD_SESSION_CACHE", "off")
 	ResetAffinityStoreForTest()
 	t.Cleanup(ResetAffinityStoreForTest)
 	req := map[string]any{"model": "qwen3.8-max", "messages": msgs}
 	body1 := decodeBody(t, mustBuild(t, req, sess, "cn"))
 	body2 := decodeBody(t, mustBuild(t, req, sess, "cn"))
-	if body1["session_id"] == body2["session_id"] {
-		t.Fatalf("disabled cache must randomize session_id: %v", body1["session_id"])
+	if body1["session_id"] == "" || body1["session_id"] != body2["session_id"] {
+		t.Fatalf("disabled cache must keep window-stable session_id: %v vs %v",
+			body1["session_id"], body2["session_id"])
+	}
+	if s, _ := body1["session_id"].(string); !strings.HasPrefix(s, "win:") {
+		t.Fatalf("fallback session id should be window-scoped: %v", body1["session_id"])
 	}
 
 	// 开启（memory）：同前缀复用稳定 session_id。

@@ -34,10 +34,15 @@ const (
 
 // upstreamConversation 一次上游会话的稳定身份。
 type upstreamConversation struct {
-	key     string
-	id      string
-	beginAt int64
-	at      int64 // unix 秒，最后一次使用时间
+	key string
+	id  string
+	// windowID 窗口级 id（整段对话恒定，hub #136）：喂 session_id，保证上游
+	// prompt 缓存按 session_id 命中；与 id（按一次提问，用量归组）解耦——
+	// 两者曾是一个键，v1.7.17 把 id 改成一次提问一个后 session_id 跟着变，
+	// 每轮新提问上游缓存归零（面板 98%↔0% 循环，同段历史差 12 倍价格）。
+	windowID string
+	beginAt  int64
+	at       int64 // unix 秒，最后一次使用时间
 }
 
 var (
@@ -106,6 +111,43 @@ func conversationKeyFromHistory(req map[string]any) string {
 	return "turn:" + hex.EncodeToString(sum[:])
 }
 
+// conversationWindowKey 窗口级会话键（整段对话恒定，hub #136）：显式键优先，
+// 否则「模型 + 首条 user」。**不吃 system**——system 里常带每轮都会变的运行时
+// 上下文（cwd / git 状态 / 当前时间），把它算进键会让窗口键逐轮变化 →
+// session_id 逐轮更换 → 上游 prompt 缓存永远打不中（#136 的第二层原因）。
+// 该键喂 session_id（缓存命中），与提问键 conversationKeyFromHistory（喂
+// business.id / chat_record_id 的用量归组）解耦。
+func conversationWindowKey(clientSessionKey string, req map[string]any) string {
+	if key := strings.TrimSpace(clientSessionKey); key != "" {
+		return key
+	}
+	if req == nil {
+		return ""
+	}
+	msgs, _ := req["messages"].([]any)
+	firstUser := ""
+	for _, raw := range msgs {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := m["role"].(string); role != "user" {
+			continue
+		}
+		// 空内容 user 不作锚（源：空串继续找下一条，取第一条有内容的 user）。
+		if text := messageText(m["content"]); text != "" {
+			firstUser = headN(text, 400)
+			break
+		}
+	}
+	if firstUser == "" {
+		return ""
+	}
+	model, _ := req["model"].(string)
+	sum := sha1.Sum([]byte(model + "\x00" + firstUser))
+	return "win:" + hex.EncodeToString(sum[:])
+}
+
 // messageText 取消息正文的纯文本形态（字符串或 parts 数组拼接）。
 func messageText(content any) string {
 	switch v := content.(type) {
@@ -139,9 +181,11 @@ func headN(s string, n int) string {
 	return string(r[:n])
 }
 
-// ConversationIdentity 返回本请求所属的上游会话身份（源 conversation_identity）。
+// ConversationIdentity 返回本请求所属的上游会话身份（源 conversation_identity，
+// hub #128 / #136）。
 // clientSessionKey 为空时退化为历史摘要；两者都拿不到返回 nil（调用方保持旧行为）。
-// 关闭开关时也返回 nil。
+// 关闭开关时也返回 nil。windowID 为窗口级 id（#136，喂 session_id 兜底）；窗口键
+// 拿不到时为空串，调用方回落 id（提问级，一次提问内仍稳定——源 window_id or id）。
 func ConversationIdentity(clientSessionKey string, req map[string]any) *upstreamConversation {
 	if !conversationShareEnabled() {
 		return nil
@@ -161,6 +205,8 @@ func ConversationIdentity(clientSessionKey string, req map[string]any) *upstream
 	if key == "" {
 		return nil
 	}
+	// #136：窗口键确定性派生（同键同值），现算即可，不入 LRU。
+	windowID := conversationWindowKey(clientSessionKey, req)
 	now := conversationClock().Unix()
 	ttl := conversationTTL()
 	conversationMu.Lock()
@@ -170,12 +216,12 @@ func ConversationIdentity(clientSessionKey string, req map[string]any) *upstream
 		if now-entry.at <= ttl {
 			entry.at = now
 			conversationLRU.MoveToFront(el)
-			return &upstreamConversation{id: entry.id, beginAt: entry.beginAt}
+			return &upstreamConversation{id: entry.id, windowID: windowID, beginAt: entry.beginAt}
 		}
 		conversationLRU.Remove(el)
 		delete(conversationIndex, key)
 	}
-	entry := &upstreamConversation{key: key, id: UUID4(), beginAt: now * 1000, at: now}
+	entry := &upstreamConversation{key: key, id: UUID4(), windowID: windowID, beginAt: now * 1000, at: now}
 	conversationIndex[key] = conversationLRU.PushFront(entry)
 	for conversationLRU.Len() > conversationMaxEntries {
 		oldest := conversationLRU.Back()
@@ -187,5 +233,5 @@ func ConversationIdentity(clientSessionKey string, req map[string]any) *upstream
 			delete(conversationIndex, old.key)
 		}
 	}
-	return &upstreamConversation{id: entry.id, beginAt: entry.beginAt}
+	return &upstreamConversation{id: entry.id, windowID: entry.windowID, beginAt: entry.beginAt}
 }

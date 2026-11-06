@@ -14,7 +14,52 @@ type TokenUsage struct {
 	Prompt     uint64 `json:"prompt_tokens"`
 	Completion uint64 `json:"completion_tokens"`
 	Total      uint64 `json:"total_tokens"`
-	Reasoning  uint64 `json:"-"`
+	// Cached 缓存命中量（trae-switch #154/#169）：上游四种写法都认（见
+	// cachedTokensOf），命中量在语义上是输入的子集，脏数据钳到 Prompt。
+	Cached    uint64 `json:"-"`
+	Reasoning uint64 `json:"-"`
+}
+
+// cachedTokensOf 从上游 usage 对象读缓存命中量（trae-switch #154，
+// cached_tokens_of 同款四种上游形态）：
+//
+//	DeepSeek  prompt_cache_hit_tokens
+//	OpenAI    prompt_tokens_details.cached_tokens
+//	Anthropic cache_read_input_tokens
+//	裸字段    cached_tokens
+//
+// 上限钳到 prompt_tokens：命中量报得比 prompt 还大时，下游命中率会 > 100%。
+func cachedTokensOf(value map[string]any) uint64 {
+	read := func(key string) uint64 {
+		if v, ok := value[key].(float64); ok && v > 0 {
+			return uint64(v)
+		}
+		return 0
+	}
+	hit := read("prompt_cache_hit_tokens")
+	if hit == 0 {
+		if details, ok := value["prompt_tokens_details"].(map[string]any); ok {
+			hit = read2(details, "cached_tokens")
+		}
+	}
+	if hit == 0 {
+		hit = read("cache_read_input_tokens")
+	}
+	if hit == 0 {
+		hit = read("cached_tokens")
+	}
+	if prompt := read("prompt_tokens"); prompt > 0 && hit > prompt {
+		return prompt
+	}
+	return hit
+}
+
+// read2 map 读取辅助（cachedTokensOf 的嵌套明细用）。
+func read2(m map[string]any, key string) uint64 {
+	if v, ok := m[key].(float64); ok && v > 0 {
+		return uint64(v)
+	}
+	return 0
 }
 
 // TokenUsageFromValue 从事件 payload 解析；字段缺失按 0 处理，
@@ -36,17 +81,26 @@ func TokenUsageFromValue(value map[string]any) TokenUsage {
 		Prompt:     prompt,
 		Completion: completion,
 		Total:      total,
+		Cached:     cachedTokensOf(value),
 		Reasoning:  read("reasoning_tokens"),
 	}
 }
 
 // ToOpenAI 转成 OpenAI usage 对象。reasoning_tokens 不是 OpenAI 标准字段，不外发。
+//
+// prompt_tokens_details.cached_tokens **只在真有命中量时才写**（trae-switch
+// #154）：这是对外 wire 形状，多一个恒在的键会让严格校验的客户端拒帧，
+// 而「上游没报」与「确实没命中」在这里收敛成同一种表现（缺键）是正确的。
 func (u TokenUsage) ToOpenAI() map[string]any {
-	return map[string]any{
+	usage := map[string]any{
 		"prompt_tokens":     u.Prompt,
 		"completion_tokens": u.Completion,
 		"total_tokens":      u.Total,
 	}
+	if u.Cached > 0 {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": u.Cached}
+	}
+	return usage
 }
 
 // IsMeaningful 是否拿到了有效数据（全 0 视为没拿到）。

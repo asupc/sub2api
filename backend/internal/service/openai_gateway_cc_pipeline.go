@@ -371,6 +371,9 @@ func (s *OpenAIGatewayService) sendCCUpstreamRequest(
 			_ = resp.Body.Close()
 			return nil, qdErr
 		}
+		// 缓存保温（hub 22bd512，QD_CACHE_KEEPALIVE 默认关闭）：登记这条刚成功
+		// 的真实对话，闲置到期后用同 payload 续期上游前缀缓存。关闭时零开销。
+		s.observeQoderKeepalive(account, body, qoderOrigBody)
 	}
 	// workbuddy：上游恒以 SSE 回流（拒绝非流式）。流式本就是标准 OpenAI SSE 直接
 	// 透传；调用方期望非流式（stream=false）时在交回前本地聚合为 chat.completion

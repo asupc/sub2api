@@ -777,7 +777,14 @@ func ParseLeakedToolCalls(text string, allowedNames map[string]bool) (calls []To
 		argsStr, _ := args.(string)
 		if pyStrip(argsStr) != "" {
 			if !json.Valid([]byte(argsStr)) {
-				return nil, text
+				// hub 70ba58b（DSH 现场）：内层裸引号 / 尾随逗号先尝试修复，
+				// 修好还原成真实调用，修不好才判失败——否则这一轮会被整段
+				// 丢弃（fail-closed）或当正文泄漏。
+				fixed, ok := repairArgsJSON(argsStr)
+				if !ok {
+					return nil, text
+				}
+				argsStr = fixed
 			}
 		}
 		calls = append(calls, ToolCall{
@@ -813,6 +820,12 @@ func stillLeakCandidate(text string) bool {
 	}
 	rest := pyLStrip(body)
 	if rest == "" {
+		return true
+	}
+	// hub #140（issue #137 现场）：伪 XML 工具调用（`<tool_call>Name {json}
+	// </tool_call>`）不是 JSON 数组，但同属「marker + 协议块」，必须继续 hold
+	// 到流末再判定；否则第二帧就被证伪、整块当正文补发（或中途 fail-closed）。
+	if toolTagCandidate(rest) {
 		return true
 	}
 	if strings.HasSuffix(rest, "```") {
@@ -955,6 +968,8 @@ func toolEchoPrefixHold(text string) bool {
 }
 
 // echoHoldCandidate 统一暂存判定：仍可能是 #8 数组回声或 #11 工具结果回声？
+// （hub #140 的伪 XML 块由 marker 后缀判定 stillLeakCandidate 内的
+// toolTagCandidate 覆盖；无 marker 的裸块由下游 RecoverToolTags 迭代器持有。）
 func echoHoldCandidate(text string) bool {
 	return stillLeakCandidate(text) || toolEchoPrefixHold(text)
 }
@@ -1323,6 +1338,11 @@ func (lr *leakRecover) finishStream() {
 	recovered := false
 	if lr.holding {
 		calls, clean := ParseLeakedToolCalls(lr.hold, lr.allowed)
+		if len(calls) == 0 && strings.Contains(strings.ToLower(lr.hold), toolCallOpen) {
+			// hub #140（issue #137 现场）：伪 XML 形态
+			// （`[marker] <tool_call>Name {json}</tool_call>` 或裸块）。
+			calls, clean = ParseToolCallTags(lr.hold, lr.allowed)
+		}
 		if len(calls) > 0 {
 			recovered = true
 			for i, call := range calls {
@@ -1809,8 +1829,11 @@ type chatStream struct {
 func NewChatStream(r io.Reader, opts ChatStreamOptions) FrameIter {
 	inner := NewInnerSSE(r, opts.Usage)
 	recovered := RecoverLeakedToolCalls(inner, opts.AllowedToolNames)
+	// hub #140（issue #137 现场）：伪 XML `<tool_call>` 块独立守卫——marker 链
+	// 的前缀暂留可能把标签开头切进散文先行放出，由这里在下游重新接住。
+	tagged := RecoverToolTags(recovered, opts.AllowedToolNames)
 	// issue #124：无名工具调用守卫（name 未到先扣住）
-	nameless := GuardNamelessToolCalls(recovered)
+	nameless := GuardNamelessToolCalls(tagged)
 	// issue #112：流末工具参数完整性守卫（上游中途 EOF 时 fail-closed；
 	// ToolEchoLenient 时按正常完成收尾，hub #135）
 	var src FrameIter = GuardTruncatedToolArgs(nameless, opts.ToolEchoLenient)
@@ -2065,6 +2088,13 @@ func AggregateStream(r io.Reader, model string, usage *UsageHolder, allowedNames
 					cc := c
 					toolCalls[i] = &cc
 				}
+			} else if rec, clean := ParseToolCallTags(echoSrc, allowedNames); len(rec) > 0 {
+				// hub #140：marker 块内的伪 XML 形态
+				msg.Content = head16 + clean
+				for i, c := range rec {
+					cc := c
+					toolCalls[i] = &cc
+				}
 			} else if leakedPartialDroppable(echoSrc, allowedNames) {
 				msg.Content = head16
 			} else if leakedMalformedEcho(echoSrc, allowedNames) {
@@ -2072,6 +2102,16 @@ func AggregateStream(r io.Reader, model string, usage *UsageHolder, allowedNames
 				msg.Content = head16
 			} else if toolEchoDroppable(echoSrc, allowedNames) {
 				msg.Content = head16
+			}
+		} else if strings.Contains(strings.ToLower(head16), toolCallOpen) {
+			// hub #140：无 marker 的裸 `<tool_call>` 块（findMarkerSplit 切不出
+			// 回声块时对全文跑标签还原，守卫防误伤讲解示例）。
+			if rec, clean := ParseToolCallTags(head16, allowedNames); len(rec) > 0 {
+				msg.Content = clean
+				for i, c := range rec {
+					cc := c
+					toolCalls[i] = &cc
+				}
 			}
 		}
 	}

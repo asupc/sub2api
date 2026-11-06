@@ -302,3 +302,47 @@ func TestAggregateReturnsUpstreamError(t *testing.T) {
 		t.Errorf("upstreamErr = %+v", upstreamErr)
 	}
 }
+
+// trae-switch #154：命中量必须能被解析出来（四种上游写法都认），且脏数据
+// （命中 > prompt）钳到 prompt——否则下游命中率会 > 100%。
+func TestTokenUsageCachedFromAllFourUpstreamShapes(t *testing.T) {
+	cases := []struct {
+		name  string
+		usage map[string]any
+		want  uint64
+	}{
+		// 值必须是 float64：JSON 解码到 map[string]any 的数字形态（int 字面量
+		// 会绕过 read 的类型断言）。
+		{"DeepSeek", map[string]any{"prompt_tokens": float64(100), "prompt_cache_hit_tokens": float64(90)}, 90},
+		{"OpenAI", map[string]any{"prompt_tokens": float64(100), "prompt_tokens_details": map[string]any{"cached_tokens": float64(70)}}, 70},
+		{"Anthropic", map[string]any{"prompt_tokens": float64(100), "cache_read_input_tokens": float64(60)}, 60},
+		{"bare", map[string]any{"prompt_tokens": float64(100), "cached_tokens": float64(50)}, 50},
+		{"missing", map[string]any{"prompt_tokens": float64(100)}, 0},
+		{"dirty clamped", map[string]any{"prompt_tokens": float64(100), "cached_tokens": float64(150)}, 100},
+	}
+	for _, c := range cases {
+		if got := TokenUsageFromValue(c.usage).Cached; got != c.want {
+			t.Errorf("%s: cached = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// trae-switch #154：cached_tokens 只在真有命中量时才写（缺键 = 上游没报或
+// 没命中，多一个恒在的键会让严格校验的客户端拒帧）。
+func TestTokenUsageToOpenAICachedTokensWireShape(t *testing.T) {
+	noHit := TokenUsage{Prompt: 10, Completion: 1, Total: 11}.ToOpenAI()
+	if _, ok := noHit["prompt_tokens_details"]; ok {
+		t.Fatal("no hit: prompt_tokens_details must be absent")
+	}
+	hit := TokenUsage{Prompt: 10, Completion: 1, Total: 11, Cached: 9}.ToOpenAI()
+	details, ok := hit["prompt_tokens_details"].(map[string]any)
+	if !ok {
+		t.Fatal("with hit: prompt_tokens_details must be present")
+	}
+	if details["cached_tokens"] != uint64(9) {
+		t.Fatalf("cached_tokens = %v", details["cached_tokens"])
+	}
+	if hit["prompt_tokens"].(uint64) != 10 {
+		t.Fatal("prompt_tokens keeps upstream total (includes cached)")
+	}
+}
