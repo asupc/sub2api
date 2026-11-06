@@ -2,6 +2,7 @@ package trae
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -82,6 +83,130 @@ func newUUIDLike() string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexed[0:8], hexed[8:12], hexed[12:16], hexed[16:20], hexed[20:32])
 }
 
+// conversationIdentitySource 从 OpenAI 请求体提取「对话稳定标识原文」
+// （移植 trae-workbuddy-switch 88ed652 的 conversation_identity_source）。
+//
+// 优先级：
+//  1. prompt_cache_key —— 客户端自带的提示词缓存键，同对话内天然稳定；
+//  2. metadata.session_id —— 部分客户端把自身会话号放在元数据里；
+//  3. 内容指纹：system 提示 + 首条 user 消息拼串。OpenAI 协议下多轮对话的
+//     历史在 messages 头部只增不改，同一对话多次请求的指纹完全一致；
+//  4. user —— 客户端传入的终端用户标识，**只能垫底**。
+//
+// 为什么 user 排在内容指纹之后：很多客户端把 user 填成固定的安装 ID
+// （Cline / Continue 这类），让它优先会让该客户端的**全部对话塌缩成同一个
+// 会话号**——跨对话同号比「每请求随机」更糟。账号维度已由 uid 混入哈希承担。
+//
+// 返回 "" 表示连指纹都拼不出，调用方退回随机 UUID。
+func conversationIdentitySource(body map[string]any) string {
+	for _, item := range []struct{ prefix, field string }{
+		{"cache_key:", "prompt_cache_key"},
+		{"metadata:", "metadata"},
+	} {
+		var raw string
+		switch item.field {
+		case "metadata":
+			// metadata 是对象，取其 session_id 子字段。
+			if metadata, ok := body[item.field].(map[string]any); ok {
+				raw, _ = metadata["session_id"].(string)
+			}
+		default:
+			raw, _ = body[item.field].(string)
+		}
+		if trimmed := strings.TrimSpace(raw); trimmed != "" {
+			return item.prefix + trimmed
+		}
+	}
+	if fingerprint := contentFingerprint(body); fingerprint != "" {
+		return fingerprint
+	}
+	if user, ok := body["user"].(string); ok {
+		if trimmed := strings.TrimSpace(user); trimmed != "" {
+			return "user:" + trimmed
+		}
+	}
+	return ""
+}
+
+// contentFingerprint 内容指纹：system 提示 + 首条 user 消息的文本拼串。
+//
+// 只取头部两段而不是整段历史：多轮对话的历史在 messages 头部只增不改，
+// 头部两段足以区分对话，同时不必扫描越来越长的历史数组。
+// 分段数组等复杂 content 整体序列化——同客户端同请求形态下结果稳定。
+func contentFingerprint(body map[string]any) string {
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		return ""
+	}
+	var systemText, userText string
+	hasSystem, hasUser := false, false
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := message["role"].(string)
+		content, exists := message["content"]
+		if !exists {
+			continue
+		}
+		text, hasText := "", true
+		switch value := content.(type) {
+		case string:
+			text = value
+		case nil:
+			hasText = false
+		default:
+			// 分段数组等复杂形态整体序列化（键序由 encoding/json 固定）。
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				hasText = false
+			} else {
+				text = string(encoded)
+			}
+		}
+		if !hasText {
+			continue
+		}
+		switch role {
+		case "system":
+			if !hasSystem {
+				systemText, hasSystem = text, true
+			}
+		case "user":
+			if !hasUser {
+				userText, hasUser = text, true
+			}
+		}
+		if hasSystem && hasUser {
+			break // 两段都取到，无需继续扫描长对话。
+		}
+	}
+	parts := make([]string, 0, 2)
+	if hasSystem {
+		parts = append(parts, "system:"+systemText)
+	}
+	if hasUser {
+		parts = append(parts, "user:"+userText)
+	}
+	return strings.Join(parts, "|")
+}
+
+// stableConversationID 由标识原文派生**稳定**的 UUID 形态会话号：
+// SHA256 摘要前 16 字节 → UUID v4 位形（移植源 stable_conversation_id）。
+//
+// salt 区分字段用途（conv: / sess: / proj: 各一把盐）：同一对话派生出三个
+// 互不相同、又各自稳定的 ID。手工置版本位 / 变体位，保证上游看到的仍是
+// 标准 v4 UUID 形态（上游只认这种形状）。
+func stableConversationID(source, salt string) string {
+	sum := sha256.Sum256([]byte(salt + "|" + source))
+	bytes := sum[:16]
+	bytes[6] = (bytes[6] & 0x0f) | 0x40 // 版本位 → v4
+	bytes[8] = (bytes[8] & 0x3f) | 0x80 // 变体位 → RFC 4122
+	hexed := hex.EncodeToString(bytes)
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexed[0:8], hexed[8:12], hexed[12:16], hexed[16:20], hexed[20:32])
+}
+
 // ModelOf 从 OpenAI 请求体读取模型名；缺失或空白时用 defaultModel。
 func ModelOf(body map[string]any, defaultModel string) string {
 	if model, ok := body["model"].(string); ok {
@@ -131,12 +256,28 @@ func PrepareLLMChatBody(src []byte, variant Variant, defaultModel, uid, deviceID
 	// 上游只支持流式；stream:false 由调用方本地聚合。
 	body["stream"] = true
 	body["function"] = FunctionFor(variant)
-	body["conversation_id"] = newUUIDLike()
+	// 会话三 ID：按「对话内容 + 账号」稳定派生（对话复用），取不到指纹才随机
+	// （移植源 88ed652 / conversation_identity_source + stable_conversation_id）。
+	// 同一对话的多次请求（含多轮追加历史）派生出相同 ID，上游才能做路由亲和
+	// 与提示词前缀缓存；不同对话互不串号。uid 必须混入哈希：两个账号发起内容
+	// 相同的对话时，只按内容派生会得到完全相同的 ID——跨账号同会话号是典型的
+	// 风控特征。
+	//
+	// 二开修正（2026-11-06）：此前三个 ID 恒为**每请求随机**，前缀缓存拿不到
+	// 稳定的对话归属 ⇒ 线上 trae 全平台 9477 条请求 cache_read 恒为 0。
+	identitySource := conversationIdentitySource(body)
+	deriveID := func(salt string) string {
+		if identitySource == "" {
+			return newUUIDLike()
+		}
+		return stableConversationID(identitySource+"|uid:"+uid, salt)
+	}
+	body["conversation_id"] = deriveID("conv:")
 	body["user_id"] = uid
-	body["session_id"] = newUUIDLike()
+	body["session_id"] = deriveID("sess:")
 	body["device_id"] = deviceID
 	body["machine_id"] = machineID
-	body["project_id"] = newUUIDLike()
+	body["project_id"] = deriveID("proj:")
 	body["workspace_id"] = WorkspaceID
 	body["prompt_max_tokens"] = PromptMaxTokens
 	body["mode"] = ChatMode

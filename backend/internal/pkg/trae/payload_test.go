@@ -11,11 +11,23 @@ import (
 // preparedBody 构造并改写请求体，返回解析后的对象。
 func preparedBody(t *testing.T, body map[string]any, variant Variant) map[string]any {
 	t.Helper()
+	return preparedBodyVariant(t, body, variant, "u1")
+}
+
+// preparedBodyForUID 同 preparedBody（默认 VariantSoloCN），但可指定账号 uid
+// （跨账号隔离测试用）。
+func preparedBodyForUID(t *testing.T, body map[string]any, uid string) map[string]any {
+	t.Helper()
+	return preparedBodyVariant(t, body, VariantSoloCN, uid)
+}
+
+func preparedBodyVariant(t *testing.T, body map[string]any, variant Variant, uid string) map[string]any {
+	t.Helper()
 	src, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := PrepareLLMChatBody(src, variant, "deepseek-v4-flash", "u1", "dev1", "mach1")
+	out := PrepareLLMChatBody(src, variant, "deepseek-v4-flash", uid, "dev1", "mach1")
 	if !json.Valid(out) {
 		t.Fatalf("输出不是合法 JSON: %s", out)
 	}
@@ -221,10 +233,119 @@ func TestRequiredFieldsInjected(t *testing.T) {
 			t.Errorf("%s = %q, 不是 UUID 形态", key, value)
 		}
 	}
-	// 三次生成互不相同。
+	// 无内容指纹（空 messages）时退回随机 UUID：每请求不同，但仍是合法 v4 形态。
 	out2 := preparedBody(t, map[string]any{"model": "glm-5.3", "messages": []any{}}, VariantSoloCN)
 	if out["conversation_id"] == out2["conversation_id"] {
-		t.Error("conversation_id 应每次随机生成")
+		t.Error("无指纹时 conversation_id 应每次随机生成")
+	}
+}
+
+// TestConversationIDsStablePerConversation 对话复用护栏（移植源 88ed652）：
+// 同一对话（system + 首条 user 不变，仅追加历史）的多次请求必须派生出**相同**
+// 的三个会话 ID；不同对话互不相同；三个 ID 彼此也不同（盐前缀隔离）。
+//
+// 这是上游提示词前缀缓存的前提——此前三个 ID 恒为每请求随机，线上 trae
+// 全平台 cache_read 恒为 0。
+func TestConversationIDsStablePerConversation(t *testing.T) {
+	firstTurn := map[string]any{
+		"model": "glm-5.3",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "你是助手"},
+			map[string]any{"role": "user", "content": "第一轮提问"},
+		},
+	}
+	// 模拟多轮对话：历史头部不动，末尾追加 assistant 与新 user。
+	secondTurn := map[string]any{
+		"model": "glm-5.3",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "你是助手"},
+			map[string]any{"role": "user", "content": "第一轮提问"},
+			map[string]any{"role": "assistant", "content": "第一轮回答"},
+			map[string]any{"role": "user", "content": "第二轮提问"},
+		},
+	}
+	first := preparedBody(t, firstTurn, VariantSoloCN)
+	second := preparedBody(t, secondTurn, VariantSoloCN)
+	for _, key := range []string{"conversation_id", "session_id", "project_id"} {
+		if first[key] != second[key] {
+			t.Errorf("%s 同一对话多轮必须复用同值：%v vs %v", key, first[key], second[key])
+		}
+	}
+	// 三个 ID 互不相同（不同盐派生）。
+	if first["conversation_id"] == first["session_id"] || first["session_id"] == first["project_id"] {
+		t.Error("三个会话 ID 必须互不相同（盐前缀隔离）")
+	}
+	// 不同对话（不同首条 user）不得串号。
+	other := preparedBody(t, map[string]any{
+		"model": "glm-5.3",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "你是助手"},
+			map[string]any{"role": "user", "content": "另一段对话"},
+		},
+	}, VariantSoloCN)
+	for _, key := range []string{"conversation_id", "session_id", "project_id"} {
+		if first[key] == other[key] {
+			t.Errorf("%s 不同对话必须不同", key)
+		}
+	}
+}
+
+// TestConversationIDsClientCacheKeyWins 客户端自带 prompt_cache_key 优先于内容指纹。
+func TestConversationIDsClientCacheKeyWins(t *testing.T) {
+	plain := preparedBody(t, map[string]any{
+		"prompt_cache_key": "dialog-42",
+		"messages":         []any{map[string]any{"role": "user", "content": "甲"}},
+	}, VariantSoloCN)
+	padded := preparedBody(t, map[string]any{
+		"prompt_cache_key": " dialog-42 ",
+		"messages":         []any{map[string]any{"role": "user", "content": "乙"}},
+	}, VariantSoloCN)
+	for _, key := range []string{"conversation_id", "session_id", "project_id"} {
+		if plain[key] != padded[key] {
+			t.Errorf("%s 相同 cache_key（含空白差异）必须同值", key)
+		}
+	}
+}
+
+// TestFixedUserFieldDoesNotCollapseConversations 固定 user 不得压过内容指纹：
+// 填固定安装 ID 的客户端（Cline / Continue）不能把所有对话塌缩成同一个会话号。
+func TestFixedUserFieldDoesNotCollapseConversations(t *testing.T) {
+	conversation := func(firstUser string) map[string]any {
+		return preparedBody(t, map[string]any{
+			"user":     "install-id-of-this-machine",
+			"messages": []any{map[string]any{"role": "user", "content": firstUser}},
+		}, VariantSoloCN)
+	}
+	a := conversation("第一段对话")
+	b := conversation("第二段对话")
+	for _, key := range []string{"conversation_id", "session_id", "project_id"} {
+		if a[key] == b[key] {
+			t.Errorf("%s 固定 user + 不同对话内容必须派生不同 ID", key)
+		}
+	}
+	// 同一段对话 + 同一 user ⇒ 仍然稳定。
+	again := conversation("第一段对话")
+	if a["conversation_id"] != again["conversation_id"] {
+		t.Error("同对话同 user 必须稳定")
+	}
+}
+
+// TestConversationIDsIsolatedPerAccount 跨账号隔离：相同对话内容 + 不同账号
+// 必须派生出不同 ID（跨账号同会话号是典型风控特征）。
+func TestConversationIDsIsolatedPerAccount(t *testing.T) {
+	body := map[string]any{
+		"model": "glm-5.3",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "你是助手"},
+			map[string]any{"role": "user", "content": "你好"},
+		},
+	}
+	a := preparedBodyForUID(t, body, "1958692729393946")
+	b := preparedBodyForUID(t, body, "2958692729393947")
+	for _, key := range []string{"conversation_id", "session_id", "project_id"} {
+		if a[key] == b[key] {
+			t.Errorf("%s 相同对话不同账号必须不同", key)
+		}
 	}
 }
 
