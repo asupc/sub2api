@@ -254,3 +254,24 @@
 - **验证**：本机 Docker `golang:1.27.3`（go.mod 实际要求 1.27.3）`go build ./...` 通过、`go vet` 目标包通过；`go test -tags=unit ./internal/...` 仅 6 个存量失败（与基线清单一致），`pkg/qoder`、`pkg/trae` 与 service 的 Qoder/Trae 相关用例全绿。
 - **独立验证与修正（同日，提交 `57bf968`）**：两个只读 subagent 逐项对照源实现并做变异验证，修正 9 处：① 补移植同区间漏项 `db99d43`（会话按「一次提问」切分：最后一条 user + `turn:`，显式键追加提问摘要）；② `QD_CONVERSATION_SHARE` 兼容 `false/False/no`，新增 `QD_CONVERSATION_TTL`；③ 入站会话头（`X-Conversation-Id`/`Conversation-Id`/`X-Session-Id`/`Session-Id`）优先于请求体；④ 补 `nameless` tool-call 守卫；⑤ usage 帧接受空 `{}` 字典；⑥ hold 帧计数只计空转帧、候选判定前剥离尾部 DSML 闭合标签；⑦ namespace 识别补「省略 type + children」形态；⑧ 工具名集合递归含 namespace 子工具；⑨ 错误分类顺序对齐处置函数（排队→额度→凭证失效），trae 纯空白包名按无名处理。测试由 7 个用例扩至 18 个（按提问切分、头键优先、禁用变体、TTL 覆盖与边界、空 usage 帧序、marker-only fail-closed、同帧增量搬运、nameless 两路径、NewChatStream 接线、深度上限、110 下界、未知类型 namespace、空白包名）。
 - **已知偏差（接受，不再重复评估）**：动态显示名只在 `FetchModels`（账号模型同步/测试）时注册，未移植源请求路径的离线补注册（本侧无落盘目录缓存，已知改名由 `kimi-k3.1-pro` 别名兜底）；建流前 failover 错误仍携上游 403（流内合成状态为 429，源亦 re-raise 403）；`ClassifyEnvelopeError` 在生产代码无调用（额度处置不经它）。
+
+### 2026-11-06 trae 积分耗尽处置、流内错误入看板与对话会话身份稳定化
+
+- **问题/根因（线上实证，NAS 生产实例）**：账号 `98760`（id=608）积分归零后，网关仍继续调度 27 分钟、52 次 400~700ms 的立即拒绝（`usage_logs` 里 input/output 全 0），`accounts` 状态始终 `active`、`ops_error_logs` 零记录。根因三点：
+  1. `handleTraeUpstreamStreamError` 只处理合成 401，积分类错误仅打一行 slog；而全部请求走 `/v1/messages` + stream，命中的正是这条路径。`classifyTraeUpstreamFailure` 的 429 映射只在非流式聚合路径写回 `resp.StatusCode` 才生效。
+  2. trae 流内错误不进 `ops_error_logs`（wire 状态已固化为 200，通用错误链采集不到），失败在面板上完全隐形。
+  3. `pkg/trae/payload.go` 的 `conversation_id` / `session_id` / `project_id` 恒为**每请求随机 UUID**——移植源 `88ed652` 的「对话复用稳定会话 ID」未随三平台集成搬入（相对基准的漏搬缺陷，已补齐）。**注意：该项与本批次「缓存不命中」不是因果关系**——真机对照实验（见下「缓存验证结论」）证明稳定会话 ID + `prompt_cache_key` 均无法让上游回报命中量。
+- **修复**：
+  - **`trae_no_credit` 罚停与自动恢复**：流内错误命中严格耗尽标记（口径同移植源 `HARD_CREDIT_MARKERS`，16 条中英短语；刻意不含裸 `quota`/`credit`/`insufficient`，避免「配额查询失败」类误伤）→ 快照清零 + `SetError(trae_no_credit)` + `Schedulable=false`；`storeTraeQuotaSnapshot` 落库后统一做恢复判定（额度 > 0 且确系本逻辑罚停才解冻），签到 / 周期刷新 / 手动查询三条路径共用一份语义。非流式聚合路径同样接入（此前只写状态、账号状态不动）。
+  - **流内错误入看板**：`markTraeStreamErrorForOps` 经 `MarkOpsStreamFailure` + `appendOpsUpstreamError` 登记（先记上游尝试归因再标记，保证快照可见）；错误类型按积分耗尽 / 鉴权 / 限流 / 参数错分档，`CountTowardsSLA=true`。
+  - **会话身份稳定化**：移植 `conversation_identity_source` / `content_fingerprint` / `stable_conversation_id`——标识优先级 `prompt_cache_key` > `metadata.session_id` > 内容指纹（system + 首条 user）> `user`（固定安装 ID 类的 `user` 必须垫底，否则会把该客户端全部对话塌缩成同一会话号）；SHA256 前 16 字节 → v4 位形 UUID，`conv:`/`sess:`/`proj:` 各一把盐，`uid` 混入哈希做跨账号隔离。取不到指纹才退回随机 UUID。
+  - 顺带修正 `credits_monitor` 的临期文案（判据早已是 14 天，日志/note 仍写「7 天内到期」），并让它复用 `storeTraeQuotaSnapshot` 而非自己再查一遍上游。
+- **改动文件**：`pkg/trae/payload.go`（会话身份派生）、`service/openai_gateway_trae.go`（错误处置 / ops 登记 / 非流式接线）、`service/trae_oauth_service.go`（`TraeNoCreditReason`、`zeroTraeQuotaExtra`、`recoverTraeNoCredit`）、`service/trae_ops_service.go`（`runCreditsMonitor` 收口）、`service/openai_gateway_cc_pipeline.go`（`wrapTraeChatResponse` 传入 gin 上下文）。测试：新增 `service/openai_gateway_trae_credit_test.go`（10 用例），`pkg/trae/payload_test.go` 增 4 个会话身份护栏用例并修正原「每次随机」断言。
+- **合并影响**：全部为二开文件（`pkg/trae`/`service/openai_gateway_trae.go` 等均在三平台源码集成时新增），无上游同步冲突面；不触碰 `UPSTREAM-BASE`，`PORTER-BASE` 亦不变（本次为补齐基准 `dfa5bf7` 内已含的 `88ed652` 移植缺口，非新基准）。
+- **缓存验证结论（2026-11-06 真机对照实验，已定论）**：用生产账号真实凭据直连上游 `llm_utils_chat` 做 A/B：
+  - 实验 1：4254 token 大前缀（20047 字 system），同一组稳定 `conversation_id`/`session_id`/`project_id` 连发两次 → 两次均 `cache_read_input_tokens:0`（上游 `metadata` 帧回显了同一个 `session_id`，证明稳定 ID 确实送达并被接受）；
+  - 实验 2（对照）：再注入源 `outbound/mod.rs` 第 6 步的 `prompt_cache_key`（`wb2a-<uid8>-<sha256(uid|conv)[..16]>`）→ 仍为 0。
+  - 上游 `token_usage` 帧**确实携带** `cache_creation_input_tokens` / `cache_read_input_tokens` 两个键（so 侧 `cachedTokensOf` 已认），且 `metadata.prompt_cache_pool_record` 恒为 `null`。
+  - **结论**：不是解析缺陷、不是会话 ID 缺陷——是上游（SOLO CN / `ep-2026...` 后端）对当前流量**未启用前缀缓存计费**。源作者 11-05 本机实测其网关 200 条日志同样 0 条命中（其 96.33% 样本来自 WorkBuddy 客户端 jsonl，非 trae），与本结论一致。
+  - **未做**：国际版变体（`core-normal.trae.ai`）对照、官方 IDE 真机抓包对比（需额外投入与账号，待定）。
+- **遗留**：`usage_refresh` 快照目前仍不参与调度门控（6 小时盲窗期内若上游未报耗尽文案，账号不会被拦）——该语义变更单独评估。
