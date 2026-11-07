@@ -500,6 +500,62 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini3Image|70|2026-03-01T09:00:00Z')
   })
 
+  // 二开渲染口径：额度组按 buckets 展示（后端 antigravity_quota_groups[].buckets），
+  // 5h 在前、weekly 在后，标签走 usageWindow.gemini / usageWindow.claude。
+  it('Antigravity 按额度组展示 5h 与 weekly 窗口', async () => {
+    getUsage.mockResolvedValue({
+      antigravity_quota: {
+        'gemini-3-flash': { utilization: 99, reset_time: '2026-11-11T15:52:48Z' }
+      },
+      antigravity_quota_groups: [
+        {
+          key: 'gemini',
+          display_name: 'Gemini Models',
+          buckets: [
+            { window: 'weekly', utilization: 25, reset_time: '2026-11-11T15:52:48Z' },
+            { window: '5h', utilization: 60, reset_time: '2026-11-04T20:52:48Z' }
+          ]
+        },
+        {
+          key: 'claude-gpt',
+          display_name: 'Claude and GPT models',
+          buckets: [
+            { window: '5h', utilization: 0, reset_time: '' },
+            { window: 'weekly', utilization: 10, reset_time: '2026-11-11T15:52:48Z' }
+          ]
+        }
+      ]
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 1003, platform: 'antigravity', type: 'oauth', extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization', 'resetsAt', 'color'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const bars = wrapper.findAll('.usage-bar').map((bar) => bar.text())
+    expect(bars).toEqual([
+      // 5h 恒在 weekly 之前，与上游返回顺序无关
+      'admin.accounts.usageWindow.gemini 5h|60|2026-11-04T20:52:48Z',
+      'admin.accounts.usageWindow.gemini 7d|25|2026-11-11T15:52:48Z',
+      'admin.accounts.usageWindow.claude 5h|0|',
+      'admin.accounts.usageWindow.claude 7d|10|2026-11-11T15:52:48Z'
+    ])
+    // 有额度组数据时不再回退到按模型名的旧口径。
+    expect(wrapper.text()).not.toContain('gemini3Flash')
+  })
+
   it('Antigravity 会显示 AI Credits 余额信息', async () => {
     getUsage.mockResolvedValue({
       ai_credits: [

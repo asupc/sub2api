@@ -759,6 +759,54 @@ func (c *Client) RetrieveUserQuotaSummary(ctx context.Context, accessToken, proj
 	return nil, nil, lastErr
 }
 
+// RetrieveUserQuotaSummaryFromURL 从单个端点读取额度汇总（无 URL 回退）。
+// 移植自上游 v0.2.20（backend/internal/pkg/antigravity/quota_summary.go），
+// 复用二开的 RetrieveUserQuotaSummary 实现，仅提供显式 baseURL 入口。
+func (c *Client) RetrieveUserQuotaSummaryFromURL(ctx context.Context, baseURL, accessToken, projectID string) (*RetrieveUserQuotaSummaryResponse, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return nil, errors.New("retrieveUserQuotaSummary base URL is required")
+	}
+	if c == nil || c.httpClient == nil {
+		return nil, errors.New("antigravity client is not configured")
+	}
+	bodyBytes, err := json.Marshal(FetchAvailableModelsRequest{Project: projectID})
+	if err != nil {
+		return nil, fmt.Errorf("序列化请求失败: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1internal:retrieveUserQuotaSummary", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
+
+	resp, err := servertiming.Do(c.httpClient, req)
+	if err != nil {
+		return nil, fmt.Errorf("retrieveUserQuotaSummary 请求失败: %w", err)
+	}
+	respBodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, quotaSummaryReadLimit+1))
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("读取响应失败: %w", err)
+	}
+	if int64(len(respBodyBytes)) > quotaSummaryReadLimit {
+		return nil, fmt.Errorf("响应超过 %d 字节", quotaSummaryReadLimit)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, &ForbiddenError{StatusCode: resp.StatusCode, Body: string(respBodyBytes), Operation: "retrieveUserQuotaSummary"}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("retrieveUserQuotaSummary 失败 (HTTP %d): %s", resp.StatusCode, string(respBodyBytes))
+	}
+	var quotaResp RetrieveUserQuotaSummaryResponse
+	if err := json.Unmarshal(respBodyBytes, &quotaResp); err != nil {
+		return nil, fmt.Errorf("响应解析失败: %w", err)
+	}
+	return &quotaResp, nil
+}
+
 // ModelInfo 模型信息
 type ModelInfo struct {
 	QuotaInfo          *ModelQuotaInfo `json:"quotaInfo,omitempty"`
