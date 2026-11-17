@@ -65,7 +65,11 @@ func qoderChatURL(account *Account) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return qoder.GatewayCandidates(creds.NormalizedRealm())[0] + qoder.ChatPath, nil
+	hosts, err := qoder.GatewayCandidatesFor(creds.NormalizedRealm(), creds.VPCEndpoint)
+	if err != nil {
+		return "", err
+	}
+	return hosts[0] + qoder.ChatPath, nil
 }
 
 // qoderCosySession 取（或建）该账号的 COSY 签名会话。
@@ -201,7 +205,10 @@ func qoderNextGatewayRequest(account *Account, req *http.Request, body []byte) (
 	if err != nil {
 		return nil, false
 	}
-	candidates := qoder.GatewayCandidates(creds.NormalizedRealm())
+	candidates, err := qoder.GatewayCandidatesFor(creds.NormalizedRealm(), creds.VPCEndpoint)
+	if err != nil {
+		return nil, false
+	}
 	next := ""
 	for i, host := range candidates {
 		parsed, perr := url.Parse(host)
@@ -806,7 +813,7 @@ func (s *AccountTestService) fetchQoderUpstreamModels(ctx context.Context, accou
 		return nil, newUpstreamModelSyncConfigError("Build qoder cosy session failed", err)
 	}
 	client := qoder.NewClient(newQoderHTTPClient(upstreamModelsProxyURL(account), 30*time.Second))
-	entries, err := client.FetchModels(ctx, creds.NormalizedRealm(), sess)
+	entries, err := client.FetchModels(ctx, creds.NormalizedRealm(), sess, creds.VPCEndpoint)
 	if err != nil {
 		return nil, newUpstreamModelSyncUpstreamError("Failed to fetch qoder model catalog", err)
 	}

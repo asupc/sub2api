@@ -313,3 +313,19 @@ func TestImportPAT(t *testing.T) {
 		t.Fatalf("userinfo: %+v", ui)
 	}
 }
+
+// TestFormEncodeRefreshToken 覆盖 e8e5300：只转义会破坏 k=v 结构的字节。
+func TestFormEncodeRefreshToken(t *testing.T) {
+	cases := map[string]string{
+		"drt-abc_123.X~y": "drt-abc_123.X~y",
+		"a+b":             "a%2Bb",
+		"a/b=":            "a%2Fb%3D",
+		"a&b":             "a%26b",
+		"a%20b":           "a%2520b",
+	}
+	for in, want := range cases {
+		if got := formEncodeRefreshToken(in); got != want {
+			t.Errorf("formEncode(%q) = %q want %q", in, got, want)
+		}
+	}
+}

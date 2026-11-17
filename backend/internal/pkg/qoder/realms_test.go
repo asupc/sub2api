@@ -212,3 +212,45 @@ func TestOpenAPIPathMissingCache(t *testing.T) {
 		t.Fatal("reset must clear")
 	}
 }
+
+// TestParseVPCEndpoint 覆盖 5599074：实例名与三个专属域都能解析，非法
+// 形态（端口/路径/公网域/空白）拒绝。
+func TestParseVPCEndpoint(t *testing.T) {
+	for _, input := range []string{"acme", "acme.vpc.qoder.com.cn", "acme-openapi.vpc.qoder.com.cn", "acme-gateway.vpc.qoder.com.cn"} {
+		cfg, err := ParseVPCEndpoint(input)
+		if err != nil {
+			t.Fatalf("%q: %v", input, err)
+		}
+		if cfg.Instance != "acme" ||
+			cfg.OpenAPI != "https://acme-openapi.vpc.qoder.com.cn" ||
+			cfg.Gateway != "https://acme-gateway.vpc.qoder.com.cn" {
+			t.Fatalf("%q -> %+v", input, cfg)
+		}
+	}
+	for _, input := range []string{" acme", "acme ", "acme:8443", "acme/x", "https://acme.example.com", "acme?x=1", "acme#f"} {
+		if _, err := ParseVPCEndpoint(input); err == nil {
+			t.Errorf("%q must be rejected", input)
+		}
+	}
+}
+
+// TestRealmConfigForVPC 企业实例只用专属域且不回退公网。
+func TestRealmConfigForVPC(t *testing.T) {
+	cfg, err := RealmConfigFor("cn", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.VPCInstance != "acme" || len(cfg.GatewayFallbacks) != 0 {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	got, err := GatewayCandidatesFor("cn", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "https://acme-gateway.vpc.qoder.com.cn" {
+		t.Fatalf("gateway candidates = %v", got)
+	}
+	if _, err := RealmConfigFor("intl", "acme"); err == nil {
+		t.Fatal("intl must reject VPC")
+	}
+}

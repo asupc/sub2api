@@ -1,7 +1,10 @@
 package qoder
 
 import (
+	"fmt"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -27,6 +30,9 @@ type RealmConfig struct {
 	SendClientID    bool
 	SendRedirectURI bool
 	NonceDashed     bool
+	// VPCInstance 企业 VPC 实例名（空 = 公网）。非空时 OpenAPI/Gateway/Website
+	// 已替换为实例专属域，且不再有公网故障回退。
+	VPCInstance string
 }
 
 // RealmConfigs 双区配置（键 "cn" / "intl"）。
@@ -72,12 +78,163 @@ func intlGateway() string {
 	return "https://api3.qoder.sh"
 }
 
-// Realm 取区域配置；未知区域回落 cn（qoder_accounts.py L806-807）。
-func Realm(name string) *RealmConfig {
-	if cfg, ok := RealmConfigs[name]; ok {
-		return cfg
+// VPCConfig 企业 VPC 实例的三个官方主机（qoder_accounts.py parse_vpc_endpoint）。
+type VPCConfig struct {
+	Instance string
+	Domain   string
+	Website  string
+	OpenAPI  string
+	Gateway  string
+}
+
+const vpcDomainSuffix = "vpc.qoder.com.cn"
+
+var vpcInstanceRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ParseVPCEndpoint 解析 QD_CN_VPC_ENDPOINT / 账号 vpc_endpoint：接受实例名
+// （acme）或三个服务域之一（acme[-openapi|-gateway].vpc.qoder.com.cn）。
+// 路径、端口、凭据、query、fragment、首尾空白一律拒绝，避免只改掉流程里的
+// 一部分端点。
+func ParseVPCEndpoint(value string) (*VPCConfig, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
 	}
-	return RealmConfigs["cn"]
+	raw := strings.TrimSpace(value)
+	if raw != value || strings.ContainsAny(raw, "\r\n\t") {
+		return nil, fmt.Errorf("invalid VPC endpoint: surrounding whitespace or control characters")
+	}
+	target := raw
+	if !strings.Contains(target, "://") {
+		target = "https://" + target
+	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return nil, fmt.Errorf("invalid VPC endpoint: malformed host or port")
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||
+		parsed.Port() != "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return nil, fmt.Errorf("invalid VPC endpoint: expected an instance name or a domain under %s", vpcDomainSuffix)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	instance := host
+	if strings.HasSuffix(host, "."+vpcDomainSuffix) {
+		instance = strings.TrimSuffix(host, "."+vpcDomainSuffix)
+		instance = strings.TrimSuffix(instance, "-openapi")
+		instance = strings.TrimSuffix(instance, "-gateway")
+	} else if strings.Contains(host, ".") {
+		return nil, fmt.Errorf("invalid VPC endpoint: expected an instance name or a domain under %s", vpcDomainSuffix)
+	}
+	if !vpcInstanceRe.MatchString(instance) {
+		return nil, fmt.Errorf("invalid VPC endpoint: bad instance name %q", instance)
+	}
+	domain := instance + "." + vpcDomainSuffix
+	return &VPCConfig{
+		Instance: instance,
+		Domain:   domain,
+		Website:  "https://" + domain,
+		OpenAPI:  "https://" + instance + "-openapi." + vpcDomainSuffix,
+		Gateway:  "https://" + instance + "-gateway." + vpcDomainSuffix,
+	}, nil
+}
+
+var (
+	globalVPC    *VPCConfig
+	globalVPCErr string
+)
+
+func init() {
+	cfg, err := ParseVPCEndpoint(os.Getenv("QD_CN_VPC_ENDPOINT"))
+	if err != nil {
+		globalVPCErr = err.Error()
+		return
+	}
+	globalVPC = cfg
+}
+
+// VPCConfigError 环境变量 QD_CN_VPC_ENDPOINT 的解析错误（空 = 无错误）。
+func VPCConfigError() string { return globalVPCErr }
+
+// vpcRealmConfig 在 cn 公网配置基础上替换企业 VPC 三个域；企业实例只能
+// 访问实例专属域，公网故障回退全部移除。
+func vpcRealmConfig(vpc *VPCConfig) *RealmConfig {
+	base := *RealmConfigs["cn"]
+	base.OpenAPI = vpc.OpenAPI
+	base.Gateway = vpc.Gateway
+	base.Website = vpc.Website
+	base.Domain = vpc.Domain
+	base.GatewayFallbacks = nil
+	base.VPCInstance = vpc.Instance
+	return &base
+}
+
+// publicRealmConfig 公网配置的副本。
+func publicRealmConfig(realm string) *RealmConfig {
+	if cfg, ok := RealmConfigs[realm]; ok {
+		cp := *cfg
+		return &cp
+	}
+	cp := *RealmConfigs["cn"]
+	return &cp
+}
+
+// RealmConfigFor 取区域配置并应用企业 VPC 覆盖。
+//
+//	vpc == ""      继承部署级 QD_CN_VPC_ENDPOINT（cn）
+//	vpc == "public"/"-" 显式使用公网（即使部署级已配 VPC）
+//	其它           解析为实例名/专属域（仅 cn）
+func RealmConfigFor(realm, vpc string) (*RealmConfig, error) {
+	realm = strings.TrimSpace(realm)
+	if !ValidRealm(realm) {
+		realm = "cn"
+	}
+	override := strings.TrimSpace(vpc)
+	if override == "public" || override == "-" {
+		return publicRealmConfig(realm), nil
+	}
+	if override == "" {
+		if realm == "cn" && globalVPC != nil {
+			return vpcRealmConfig(globalVPC), nil
+		}
+		if realm == "cn" && globalVPCErr != "" {
+			return nil, fmt.Errorf("invalid QD_CN_VPC_ENDPOINT: %s", globalVPCErr)
+		}
+		return publicRealmConfig(realm), nil
+	}
+	if realm != "cn" {
+		return nil, fmt.Errorf("VPC is only available for CN accounts")
+	}
+	parsed, err := ParseVPCEndpoint(override)
+	if err != nil {
+		return nil, err
+	}
+	if parsed == nil {
+		return publicRealmConfig(realm), nil
+	}
+	return vpcRealmConfig(parsed), nil
+}
+
+// realmConfigForCredentials 账号级配置；VPC 无效时回落公网（调用方应在建号
+// 时校验，避免把企业凭证发到公网）。
+func realmConfigForCredentials(creds Credentials) *RealmConfig {
+	cfg, err := RealmConfigFor(creds.NormalizedRealm(), creds.VPCEndpoint)
+	if err != nil {
+		return publicRealmConfig(creds.NormalizedRealm())
+	}
+	return cfg
+}
+
+// Realm 取区域配置（部署级 VPC 生效；账号级覆盖用 RealmConfigFor）。
+// 未知区域回落 cn（qoder_accounts.py L806-807）。
+func Realm(name string) *RealmConfig {
+	realm := strings.TrimSpace(name)
+	if !ValidRealm(realm) {
+		realm = "cn"
+	}
+	if realm == "cn" && globalVPC != nil {
+		return vpcRealmConfig(globalVPC)
+	}
+	return publicRealmConfig(realm)
 }
 
 // ValidRealm 报告 name 是否为合法区域名。
@@ -89,14 +246,23 @@ func ValidRealm(name string) bool {
 // GatewayCandidates 该区域的推理主机候选列表（主选 + 故障切换域名）。
 // 签名只覆盖 path，同一请求换主机后签名依旧有效（qoder_accounts.py L810-820）。
 func GatewayCandidates(realm string) []string {
-	cfg := Realm(realm)
+	out, _ := GatewayCandidatesFor(realm, "")
+	return out
+}
+
+// GatewayCandidatesFor 账号级候选；VPC 实例只有实例专属推理域，不回退公网。
+func GatewayCandidatesFor(realm, vpc string) ([]string, error) {
+	cfg, err := RealmConfigFor(realm, vpc)
+	if err != nil {
+		return nil, err
+	}
 	out := []string{cfg.Gateway}
 	for _, host := range cfg.GatewayFallbacks {
 		if host != "" && !slicesContains(out, host) {
 			out = append(out, host)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // OpenAPICandidates 该区域 openapi 基址候选（qoder_accounts.py openapi_candidates，
@@ -114,12 +280,29 @@ func GatewayCandidates(realm string) []string {
 //  4. https://openapi.{domain}；
 //  5. 官网 website。
 func OpenAPICandidates(realm string) []string {
-	cfg := Realm(realm)
+	out, _ := OpenAPICandidatesFor(realm, "")
+	return out
+}
+
+// OpenAPICandidatesFor 账号级 openapi 候选；VPC 实例只返回专属域（绝不把
+// 企业凭证发往公网）。
+func OpenAPICandidatesFor(realm, vpc string) ([]string, error) {
+	cfg, err := RealmConfigFor(realm, vpc)
+	if err != nil {
+		return nil, err
+	}
 	r := realm
 	if !ValidRealm(r) {
 		r = "cn"
 	}
 	out := make([]string, 0, 5)
+	if cfg.VPCInstance != "" {
+		base := strings.TrimRight(cfg.OpenAPI, "/")
+		if base != "" {
+			return []string{base}, nil
+		}
+		return nil, fmt.Errorf("invalid VPC endpoint: openapi base is empty")
+	}
 	if env := strings.TrimSpace(os.Getenv("QD_" + strings.ToUpper(r) + "_OPENAPI")); env != "" {
 		out = append(out, strings.TrimRight(env, "/"))
 	}

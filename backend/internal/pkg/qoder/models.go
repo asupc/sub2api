@@ -488,16 +488,21 @@ var (
 //   - 主机按官方候选顺序尝试（intl api1 → api2 → api3，签名只覆盖 path，
 //     切换主机不影响签名）；
 //   - 结果进程级 TTL 缓存（按 realm，token 无关）；动态失败时回退静态快照。
-func (c *Client) FetchModels(ctx context.Context, realm string, sess *CosySession) ([]CatalogEntry, error) {
+func (c *Client) FetchModels(ctx context.Context, realm string, sess *CosySession, vpcEndpoint ...string) ([]CatalogEntry, error) {
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = vpcEndpoint[0]
+	}
+	cacheKey := realm + "\x00" + vpc
 	modelsCacheMu.Lock()
-	if hit, ok := modelsCache[realm]; ok && time.Since(hit.at) < modelsCacheTTL {
+	if hit, ok := modelsCache[cacheKey]; ok && time.Since(hit.at) < modelsCacheTTL {
 		entries := hit.entries
 		modelsCacheMu.Unlock()
 		return entries, nil
 	}
 	modelsCacheMu.Unlock()
 
-	dynamic, err := c.fetchDynamicModels(ctx, realm, sess)
+	dynamic, err := c.fetchDynamicModels(ctx, realm, sess, vpc)
 	if err != nil {
 		// 动态失败：回退静态快照全量（不写缓存，下次仍尝试动态）
 		static, serr := StaticModels(realm)
@@ -512,7 +517,7 @@ func (c *Client) FetchModels(ctx context.Context, realm string, sess *CosySessio
 	registerLiveNamesFromCatalog(merged)
 
 	modelsCacheMu.Lock()
-	modelsCache[realm] = modelsCacheEntry{at: time.Now(), entries: merged}
+	modelsCache[cacheKey] = modelsCacheEntry{at: time.Now(), entries: merged}
 	modelsCacheMu.Unlock()
 	return merged, nil
 }
@@ -528,14 +533,18 @@ func staticOrdered(realm string) []CatalogEntry {
 
 // fetchDynamicModels COSY 签名拉取 /algo/api/v2/model/list（chat scene）。
 // 返回动态接口的原始条目列表（未合并）。
-func (c *Client) fetchDynamicModels(ctx context.Context, realm string, sess *CosySession) ([]map[string]any, error) {
+func (c *Client) fetchDynamicModels(ctx context.Context, realm string, sess *CosySession, vpc string) ([]map[string]any, error) {
 	if sess == nil {
 		return nil, fmt.Errorf("qoder: fetch models requires cosy session")
 	}
 	signBody := QoderEncode([]byte("{}"))
 	var payload any
 	var lastErr error
-	for _, host := range GatewayCandidates(realm) {
+	hosts, err := GatewayCandidatesFor(realm, vpc)
+	if err != nil {
+		return nil, err
+	}
+	for _, host := range hosts {
 		rawURL := host + ModelsPath
 		headers := sess.Headers(signBody, rawURL, "", false, "application/json")
 		headers.Set("User-Agent", ClientUA)

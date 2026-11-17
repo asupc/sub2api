@@ -67,7 +67,7 @@ describe('三平台建号表单', () => {
     await importButton.trigger('click')
     await flushPromises()
 
-    expect(qoderImportPAT).toHaveBeenCalledWith('pt-abc123', 'cn')
+    expect(qoderImportPAT).toHaveBeenCalledWith('pt-abc123', 'cn', undefined, '')
 
     const createButton = wrapper
       .findAll('button')

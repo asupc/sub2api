@@ -122,13 +122,20 @@ func resetOpenAPIMissingCache() {
 // 0.x~10s 才失败；TTL 6h 后允许重探，端点上线仍能被发现）。fallback=false 时只探
 // 主基址（legacy 端点在国际版必然 404，多探一个基址就是白等一个 RTT）。
 func (c *Client) doJSONOpenAPI(ctx context.Context, realm, path, method string,
-	body []byte, headers http.Header, out any, fallback bool) error {
+	body []byte, headers http.Header, out any, fallback bool, vpcEndpoint ...string) error {
 	realm = normalizedRealm(realm)
 	if OpenAPIPathMissing(realm, path) {
 		return &StatusError{Code: http.StatusNotFound,
 			Body: "cached 404 (known missing in " + realm + ")"}
 	}
-	bases := OpenAPICandidates(realm)
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = vpcEndpoint[0]
+	}
+	bases, err := OpenAPICandidatesFor(realm, vpc)
+	if err != nil {
+		return err
+	}
 	if !fallback {
 		bases = bases[:1]
 	}
@@ -187,6 +194,9 @@ type Credentials struct {
 	OrganizationName string `json:"organization_name"`
 	MachineID        string `json:"machine_id"`
 	MachineToken     string `json:"machine_token"`
+	// VPCEndpoint 企业 VPC 实例名/专属域（仅 cn；空 = 继承部署级
+	// QD_CN_VPC_ENDPOINT，"public"/"-" = 显式公网）。
+	VPCEndpoint string `json:"vpc_endpoint,omitempty"`
 }
 
 // ParseCredentials 从 sub2api 渠道 credentials map 解析。
@@ -204,12 +214,13 @@ func ParseCredentials(m map[string]string) Credentials {
 		OrganizationName: m["organization_name"],
 		MachineID:        m["machine_id"],
 		MachineToken:     m["machine_token"],
+		VPCEndpoint:      m["vpc_endpoint"],
 	}
 }
 
 // ToMap 序列化回 sub2api 渠道 credentials map（值均为 string）。
 func (c Credentials) ToMap() map[string]string {
-	return map[string]string{
+	out := map[string]string{
 		"access_token":      c.AccessToken,
 		"refresh_token":     c.RefreshToken,
 		"token_kind":        c.TokenKind,
@@ -223,6 +234,11 @@ func (c Credentials) ToMap() map[string]string {
 		"machine_id":        c.MachineID,
 		"machine_token":     c.MachineToken,
 	}
+	// 空值不写键：保持既有 credentials map 形状不变（strict roundtrip 测试）。
+	if c.VPCEndpoint != "" {
+		out["vpc_endpoint"] = c.VPCEndpoint
+	}
+	return out
 }
 
 // NormalizedRealm 规范化区域名（未知/空回落 cn）。
@@ -231,6 +247,11 @@ func (c Credentials) NormalizedRealm() string {
 		return c.Realm
 	}
 	return "cn"
+}
+
+// RealmConfig 账号级区域配置（含 VPC 覆盖）。
+func (c Credentials) RealmConfig() *RealmConfig {
+	return realmConfigForCredentials(c)
 }
 
 // Identity 由凭证构造 COSY 会话身份。
@@ -258,7 +279,7 @@ func (c Credentials) Identity() Identity {
 // UA 必须与所属区域的官方客户端一致（CN: QoderWork/…，INTL: Qoder/…）——
 // Go 语言 HTTP 客户端的默认 UA 等于在每个 openapi 请求上自报「我是脚本」。
 func (c Credentials) OpenAPIHeaders() http.Header {
-	cfg := Realm(c.NormalizedRealm())
+	cfg := realmConfigForCredentials(c)
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set("Accept", "application/json, text/plain, */*")
@@ -394,7 +415,7 @@ type UserInfo struct {
 
 // Userinfo 拉取账号身份（GET /api/v1/userinfo）。
 func (c *Client) Userinfo(ctx context.Context, creds Credentials) (*UserInfo, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	h := http.Header{}
 	h.Set("Accept", "application/json")
 	h.Set("User-Agent", ClientUA)
@@ -461,7 +482,7 @@ type quotaUsageRaw struct {
 // QuotaUsage 拉取并聚合额度（GET /api/v2/quota/usage：基础 + 赠送/签到，
 // hub #141 起含 SOTA 构成与端点自动探测）。
 func (c *Client) QuotaUsage(ctx context.Context, creds Credentials) (*QuotaUsage, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	realm := creds.NormalizedRealm()
 	// 端点自动探测（hub #141）：命中路径进程内记忆；404/405/410 时按候选
 	// 矩阵换下一路径（老网关/上游迁移兼容），全失败回落原错误。原始响应体
@@ -660,7 +681,7 @@ func normalizeEpoch(v any) int64 {
 
 // UserPlan 套餐名（GET /api/v2/user/plan -> plan_tier_name / user_type）。
 func (c *Client) UserPlan(ctx context.Context, creds Credentials) (string, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	var out struct {
 		PlanTierName string `json:"plan_tier_name"`
 		UserType     string `json:"user_type"`
@@ -712,7 +733,7 @@ func (c *Client) CheckinStatus(ctx context.Context, creds Credentials) (*Checkin
 		RewardExpiresAt    int64  `json:"rewardExpiresAt"`
 	}
 	err := c.doJSONOpenAPI(ctx, realm, PathCheckinStatus, http.MethodGet, nil,
-		creds.OpenAPIHeaders(), &q, false)
+		creds.OpenAPIHeaders(), &q, false, creds.VPCEndpoint)
 	if err != nil {
 		if se, ok := err.(*StatusError); ok &&
 			(se.Code == 404 || se.Code == 405 || se.Code == 410) {
@@ -775,7 +796,7 @@ func (c *Client) Checkin(ctx context.Context, creds Credentials) (*CheckinResult
 	}
 	// 同上：基址走候选（fallback=false，legacy 端点只探主基址）。
 	err = c.doJSONOpenAPI(ctx, creds.NormalizedRealm(), PathCheckinClaim, http.MethodPost,
-		[]byte("{}"), creds.OpenAPIHeaders(), &res, false)
+		[]byte("{}"), creds.OpenAPIHeaders(), &res, false, creds.VPCEndpoint)
 	if err != nil {
 		if se, ok := err.(*StatusError); ok {
 			if se.Code == 409 || strings.Contains(se.Body, "ALREADY_CLAIMED") {
@@ -803,7 +824,7 @@ func (c *Client) Checkin(ctx context.Context, creds Credentials) (*CheckinResult
 // ProEligibility Pro 升级包资格（GET /sash/api/v1/me/pro-upgrade/eligibility）。
 // 端点不存在 / 活动已下线（404/403/410）时返回 (false, nil)。
 func (c *Client) ProEligibility(ctx context.Context, creds Credentials) (bool, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	var out struct {
 		Eligible bool `json:"eligible"`
 	}
@@ -822,7 +843,7 @@ func (c *Client) ProEligibility(ctx context.Context, creds Credentials) (bool, e
 // ProClaim 领取 Pro 升级包（POST /sash/api/v1/me/pro-upgrade/claim，body {}）。
 // 409 / ALREADY 归一化为已领取（pro_claim L2419-2437）。
 func (c *Client) ProClaim(ctx context.Context, creds Credentials) (*CheckinResult, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	var res struct {
 		Success *bool  `json:"success"`
 		Message string `json:"message"`
@@ -897,12 +918,12 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 	headers, source := creds.DesktopHeadersIdentity()
 	var raw json.RawMessage
 	// 基址走候选（源 _campaigns_get -> _openapi_json：仅连接失败/404 换下一个）。
-	err := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil, headers, &raw, true)
+	err := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil, headers, &raw, true, creds.VPCEndpoint)
 	if err != nil {
 		// 桌面端头被拒（401/403）时回退普通头，至少保留"能不能看到"的信息
 		if se, ok := err.(*StatusError); ok && (se.Code == 401 || se.Code == 403) {
 			err = c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil,
-				creds.OpenAPIHeaders(), &raw, true)
+				creds.OpenAPIHeaders(), &raw, true, creds.VPCEndpoint)
 		}
 	}
 	if err != nil {
@@ -923,7 +944,7 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 	if !q.ShowCampaign && source == MachineIdentityOmitted && !machineMinimalDisabled() {
 		var retryRaw json.RawMessage
 		if rerr := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil,
-			creds.desktopHeadersMinimal(), &retryRaw, true); rerr == nil {
+			creds.desktopHeadersMinimal(), &retryRaw, true, creds.VPCEndpoint); rerr == nil {
 			var rq campaignsPayload
 			if jerr := json.Unmarshal(retryRaw, &rq); jerr == nil && rq.ShowCampaign {
 				raw = retryRaw
@@ -937,7 +958,7 @@ func (c *Client) Campaigns(ctx context.Context, creds Credentials) (*CampaignsSt
 		if ident := RefreshNativeIdentity(realm, creds.UID); ident.valid() {
 			var retryRaw json.RawMessage
 			if rerr := c.doJSONOpenAPI(ctx, realm, PathCampaigns, http.MethodGet, nil,
-				creds.desktopHeadersWithIdentity(ident), &retryRaw, true); rerr == nil {
+				creds.desktopHeadersWithIdentity(ident), &retryRaw, true, creds.VPCEndpoint); rerr == nil {
 				var rq campaignsPayload
 				if jerr := json.Unmarshal(retryRaw, &rq); jerr == nil && rq.ShowCampaign {
 					raw = retryRaw
@@ -1085,7 +1106,7 @@ var campaignFailureCN = map[string]string{
 // 已领取返回 CLAIMED+replayed；同机器身份下其他账号已领返回 BLOCKED+
 // SAME_PERSON_ALREADY_CLAIMED，服务端按"人"去重）。
 func (c *Client) ClaimCampaign(ctx context.Context, creds Credentials, campaignID string) (*CampaignClaimResult, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	var r struct {
 		Status         string          `json:"status"`
 		FailureCode    string          `json:"failureCode"`
@@ -1171,7 +1192,7 @@ func (c *Client) ClaimCampaign(ctx context.Context, creds Credentials, campaignI
 
 // CampaignReward 查询单个活动的发放状态（幂等，只读）。
 func (c *Client) CampaignReward(ctx context.Context, creds Credentials, campaignID string) (json.RawMessage, error) {
-	cfg := Realm(creds.NormalizedRealm())
+	cfg := realmConfigForCredentials(creds)
 	var out json.RawMessage
 	if err := c.doJSON(ctx, http.MethodGet, cfg.OpenAPI+CampaignRewardPath(campaignID),
 		nil, creds.DesktopHeaders(), &out); err != nil {
@@ -1559,7 +1580,7 @@ func (c *Client) FetchCreditUsage(ctx context.Context, creds Credentials, days i
 		Unit         string  `json:"unit"`
 	}
 	err := c.doJSONOpenAPI(ctx, creds.NormalizedRealm(), PathCreditsSummary,
-		http.MethodGet, nil, creds.DesktopHeaders(), &sum, true)
+		http.MethodGet, nil, creds.DesktopHeaders(), &sum, true, creds.VPCEndpoint)
 	if err != nil {
 		// 源语义：summary 失败时整体 ok=false（即便缓存也记，避免反复打全量接口）。
 		out := CreditUsage{Unit: "credits"}
@@ -1586,7 +1607,7 @@ func (c *Client) FetchCreditUsage(ctx context.Context, creds Credentials, days i
 	}
 	// heatmap 失败只丢 daily（源 _c2/_e2 被忽略，summary 仍可用）。
 	if herr := c.doJSONOpenAPI(ctx, creds.NormalizedRealm(), PathCreditsHeatmap,
-		http.MethodGet, nil, creds.DesktopHeaders(), &heat, true); herr == nil {
+		http.MethodGet, nil, creds.DesktopHeaders(), &heat, true, creds.VPCEndpoint); herr == nil {
 		out.Daily = make([]CreditDay, 0, len(heat.Items))
 		for _, item := range heat.Items {
 			v := 0.0

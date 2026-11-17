@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,8 @@ type LoginSession struct {
 	Nonce    string
 	Realm    string
 	Platform string
+	// VPCEndpoint 企业 VPC 覆盖（登录轮询与账号建号沿用同一实例）。
+	VPCEndpoint string
 	// CreatedAt 登录窗口起点；超过 LoginTTLSeconds 应作废重开。
 	CreatedAt time.Time
 }
@@ -58,8 +61,15 @@ type LoginSession struct {
 // machineID 为设备标识：源实现优先读本机官方客户端的 machine_id 文件、
 // 缺则生成 uuid；服务器场景由调用方传入（建议稳定存储，如渠道级配置，
 // 缺省此处生成 uuid4）。
-func StartLogin(realm, platform, machineID string) *LoginSession {
-	cfg := Realm(realm)
+func StartLogin(realm, platform, machineID string, vpcEndpoint ...string) *LoginSession {
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = vpcEndpoint[0]
+	}
+	cfg, err := RealmConfigFor(realm, vpc)
+	if err != nil {
+		cfg = Realm(realm)
+	}
 	verifier, challenge := MakePKCE()
 	nonce := UUID4Hex()
 	if cfg.NonceDashed {
@@ -85,9 +95,10 @@ func StartLogin(realm, platform, machineID string) *LoginSession {
 		AuthURL:   cfg.Website + "/device/selectAccounts?" + q,
 		Verifier:  verifier,
 		Nonce:     nonce,
-		Realm:     realm,
-		Platform:  platform,
-		CreatedAt: time.Now(),
+		Realm:       realm,
+		Platform:    platform,
+		VPCEndpoint: vpc,
+		CreatedAt:   time.Now(),
 	}
 }
 
@@ -141,7 +152,10 @@ func (e *SessionDeadError) Error() string {
 // 本调用不带账号凭证（设备流的 nonce/verifier challenge，无 Authorization）；
 // 404/202 = 用户尚未完成授权（继续轮询）。
 func (c *Client) PollLogin(ctx context.Context, sess *LoginSession) (*PollResult, error) {
-	cfg := Realm(sess.Realm)
+	cfg, err := RealmConfigFor(sess.Realm, sess.VPCEndpoint)
+	if err != nil {
+		cfg = Realm(sess.Realm)
+	}
 	q := "nonce=" + queryEscape(sess.Nonce) +
 		"&verifier=" + queryEscape(sess.Verifier) +
 		"&challenge_method=S256"
@@ -241,12 +255,19 @@ func deviceExpiry(expiresIn any, expiresAt string, now time.Time) int64 {
 // ImportPAT 导入 pt- 个人访问令牌：交换 jobToken 并拉取身份
 // （Pool.import_pat L3234-3285）。返回 (jobToken 凭证, 身份, 错误)；
 // userinfo 拉取失败时身份为 nil（尽力而为）。
-func (c *Client) ImportPAT(ctx context.Context, realm, pat string) (*TokenSet, *UserInfo, error) {
+func (c *Client) ImportPAT(ctx context.Context, realm, pat string, vpcEndpoint ...string) (*TokenSet, *UserInfo, error) {
 	pat = strings.TrimSpace(pat)
 	if !strings.HasPrefix(pat, "pt-") {
 		return nil, nil, fmt.Errorf("qoder: PAT must start with pt-")
 	}
-	cfg := Realm(realm)
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = vpcEndpoint[0]
+	}
+	cfg, cfgErr := RealmConfigFor(realm, vpc)
+	if cfgErr != nil {
+		return nil, nil, cfgErr
+	}
 	payload, _ := json.Marshal(map[string]string{"personal_token": pat})
 	h := tokenPostHeaders()
 	var data struct {
@@ -291,28 +312,25 @@ var ErrNoRefreshToken = fmt.Errorf("qoder: no refresh token; sign in again")
 //
 // 401/403 且命中会话死亡标记时返回 *SessionDeadError。
 // 返回的 TokenSet 在刷新响应未携带新 refresh token 时沿用旧值。
-func (c *Client) RefreshAccessToken(ctx context.Context, realm, refreshToken, personalToken string) (*TokenSet, error) {
-	cfg := Realm(realm)
+func (c *Client) RefreshAccessToken(ctx context.Context, realm, refreshToken, personalToken string, vpcEndpoint ...string) (*TokenSet, error) {
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = vpcEndpoint[0]
+	}
+	cfg, cfgErr := RealmConfigFor(realm, vpc)
+	if cfgErr != nil {
+		return nil, cfgErr
+	}
 	base := cfg.OpenAPI
 
-	postToken := func(path string, payload []byte, kind string) (*TokenSet, error) {
-		var data struct {
-			Token        string `json:"token"`
-			DeviceToken  string `json:"device_token"`
-			RefreshToken string `json:"refresh_token"`
-			ExpiresIn    any    `json:"expires_in"`
-		}
-		err := c.doJSON(ctx, http.MethodPost, base+path, payload, tokenPostHeaders(), &data)
-		if err != nil {
-			if se, ok := err.(*StatusError); ok && (se.Code == 401 || se.Code == 403) {
-				if SessionDead(se.Body) {
-					return nil, &SessionDeadError{Detail: se.Body}
-				}
-				return nil, fmt.Errorf("qoder: refresh failed: HTTP %d %s",
-					se.Code, clip(se.Body, 160))
-			}
-			return nil, fmt.Errorf("qoder: refresh failed: %w", err)
-		}
+	type tokenResponse struct {
+		Token        string `json:"token"`
+		DeviceToken  string `json:"device_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    any    `json:"expires_in"`
+	}
+
+	parseToken := func(data tokenResponse, kind string) (*TokenSet, error) {
 		token := data.Token
 		if token == "" {
 			token = data.DeviceToken
@@ -334,15 +352,83 @@ func (c *Client) RefreshAccessToken(ctx context.Context, realm, refreshToken, pe
 			ExpiresAt: expires, Kind: kind}, nil
 	}
 
+	// postToken POST 一次 JSON 请求（PAT 交换等非刷新端点用，不做 415 退避）。
+	postToken := func(path string, payload []byte, kind string) (*TokenSet, error) {
+		var data tokenResponse
+		err := c.doJSON(ctx, http.MethodPost, base+path, payload, tokenPostHeaders(), &data)
+		if err != nil {
+			if se, ok := err.(*StatusError); ok && (se.Code == 401 || se.Code == 403) {
+				if SessionDead(se.Body) {
+					return nil, &SessionDeadError{Detail: se.Body}
+				}
+				return nil, fmt.Errorf("qoder: refresh failed: HTTP %d %s",
+					se.Code, clip(se.Body, 160))
+			}
+			return nil, fmt.Errorf("qoder: refresh failed: %w", err)
+		}
+		return parseToken(data, kind)
+	}
+
+	// postRefresh 刷新端点专用（hub e8e5300 / issue #182）：先按上次成功
+	// 的编码发；只有 415 才换另一种编码重试一次，成功后记住。401/403/400
+	// 一律不重试——那说明凭据或参数有问题。
+	postRefresh := func(path string, kind string) (*TokenSet, error) {
+		build := func(enc refreshEncoding) ([]byte, http.Header) {
+			headers := tokenPostHeaders()
+			if enc == refreshForm {
+				headers.Set("Content-Type", "application/x-www-form-urlencoded")
+				return []byte("refresh_token=" + formEncodeRefreshToken(refreshToken)), headers
+			}
+			payload, _ := json.Marshal(map[string]string{"refresh_token": refreshToken})
+			return payload, headers
+		}
+		first := preferredRefreshEncoding()
+		payload, headers := build(first)
+		var data tokenResponse
+		err := c.doJSON(ctx, http.MethodPost, base+path, payload, headers, &data)
+		if err == nil {
+			return parseToken(data, kind)
+		}
+		se, isStatus := err.(*StatusError)
+		if isStatus && se.Code == http.StatusUnsupportedMediaType {
+			other := refreshJSON
+			if first == refreshJSON {
+				other = refreshForm
+			}
+			retryPayload, retryHeaders := build(other)
+			var retryData tokenResponse
+			retryErr := c.doJSON(ctx, http.MethodPost, base+path, retryPayload, retryHeaders, &retryData)
+			if retryErr == nil {
+				rememberRefreshEncoding(other)
+				return parseToken(retryData, kind)
+			}
+			if retryStatus, ok := retryErr.(*StatusError); ok {
+				if (retryStatus.Code == 401 || retryStatus.Code == 403) && SessionDead(retryStatus.Body) {
+					return nil, &SessionDeadError{Detail: retryStatus.Body}
+				}
+				return nil, fmt.Errorf(
+					"qoder: refresh failed: JSON and form encodings both rejected (first HTTP %d %s; retry HTTP %d %s)",
+					se.Code, clip(se.Body, 160), retryStatus.Code, clip(retryStatus.Body, 160))
+			}
+			return nil, fmt.Errorf("qoder: refresh failed: %w (after HTTP 415 form retry: %v)", err, retryErr)
+		}
+		if isStatus && (se.Code == 401 || se.Code == 403) {
+			if SessionDead(se.Body) {
+				return nil, &SessionDeadError{Detail: se.Body}
+			}
+			return nil, fmt.Errorf("qoder: refresh failed: HTTP %d %s",
+				se.Code, clip(se.Body, 160))
+		}
+		return nil, fmt.Errorf("qoder: refresh failed: %w", err)
+	}
+
 	// 1) OAuth 设备族
 	if strings.HasPrefix(refreshToken, "drt-") {
-		payload, _ := json.Marshal(map[string]string{"refresh_token": refreshToken})
-		return postToken(PathDeviceRefresh, payload, "device")
+		return postRefresh(PathDeviceRefresh, "device")
 	}
 	// 2) jobToken 族：jrt- 优先，失败回落 PAT 重新交换
 	if refreshToken != "" {
-		payload, _ := json.Marshal(map[string]string{"refresh_token": refreshToken})
-		if ts, err := postToken(PathJobRefresh, payload, "job"); err == nil {
+		if ts, err := postRefresh(PathJobRefresh, "job"); err == nil {
 			return ts, nil
 		}
 	}
@@ -356,4 +442,51 @@ func (c *Client) RefreshAccessToken(ctx context.Context, realm, refreshToken, pe
 		return nil, ErrNoRefreshToken
 	}
 	return nil, fmt.Errorf("qoder: all refresh routes failed")
+}
+
+// refreshEncoding 刷新请求的编码方式（hub e8e5300）。
+type refreshEncoding int
+
+const (
+	refreshJSON refreshEncoding = iota
+	refreshForm
+)
+
+var (
+	refreshEncodingMu   sync.Mutex
+	refreshEncodingPref *refreshEncoding // nil = 尚未成功过，先试 JSON
+)
+
+// preferredRefreshEncoding 上次成功的编码；不知道时 JSON。
+func preferredRefreshEncoding() refreshEncoding {
+	refreshEncodingMu.Lock()
+	defer refreshEncodingMu.Unlock()
+	if refreshEncodingPref == nil {
+		return refreshJSON
+	}
+	return *refreshEncodingPref
+}
+
+// rememberRefreshEncoding 只记成功，不记失败（一次 415 可能只是上游抖动）。
+func rememberRefreshEncoding(enc refreshEncoding) {
+	refreshEncodingMu.Lock()
+	defer refreshEncodingMu.Unlock()
+	refreshEncodingPref = &enc
+}
+
+// formEncodeRefreshToken form 值的最小编码：只转义会破坏 k=v 结构的字节
+// （源实现 urlencoding_encode：非 [A-Za-z0-9._~-] 一律 %XX）。
+func formEncodeRefreshToken(value string) string {
+	var b strings.Builder
+	b.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
 }

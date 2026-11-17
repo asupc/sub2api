@@ -67,7 +67,7 @@ func NewQoderOAuthService(accountRepo AccountRepository, proxyRepo ProxyReposito
 
 // StartLogin 发起设备授权：返回用户浏览器打开的授权 URL 与 state。
 // realm ∈ {cn, intl}（空按 cn）；proxyID 可选（登录与轮询走代理）。
-func (s *QoderOAuthService) StartLogin(ctx context.Context, realm string, proxyID *int64) (authURL string, state string, err error) {
+func (s *QoderOAuthService) StartLogin(ctx context.Context, realm string, proxyID *int64, vpcEndpoint ...string) (authURL string, state string, err error) {
 	realm = strings.TrimSpace(realm)
 	if realm == "" {
 		realm = "cn"
@@ -75,11 +75,20 @@ func (s *QoderOAuthService) StartLogin(ctx context.Context, realm string, proxyI
 	if !qoder.ValidRealm(realm) {
 		return "", "", infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_REALM", "realm must be cn or intl, got %q", realm)
 	}
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = strings.TrimSpace(vpcEndpoint[0])
+	}
+	if vpc != "" {
+		if _, perr := qoder.ParseVPCEndpoint(vpc); perr != nil {
+			return "", "", infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_VPC", "%v", perr)
+		}
+	}
 	proxyURL, err := s.proxyURL(ctx, proxyID)
 	if err != nil {
 		return "", "", err
 	}
-	login := qoder.StartLogin(realm, "CLI", qoder.UUID4())
+	login := qoder.StartLogin(realm, "CLI", qoder.UUID4(), vpc)
 	client := qoder.NewClient(newQoderHTTPClient(proxyURL, 30*time.Second))
 	s.mu.Lock()
 	s.sweepLoginSessionsLocked(time.Now())
@@ -121,6 +130,7 @@ func (s *QoderOAuthService) PollLogin(ctx context.Context, state string) (*Qoder
 			return nil, infraerrors.New(http.StatusBadGateway, "QODER_OAUTH_POLL_NO_TOKEN", "授权完成但未取到 token")
 		}
 		creds := qoderCredentialsFromTokenSet(result.Token, sess.login.Realm, result.UserInfo)
+		creds.VPCEndpoint = sess.login.VPCEndpoint
 		out := &QoderLoginResult{
 			Done:        true,
 			Credentials: qoderCredentialsAnyMap(creds, ""),
@@ -144,7 +154,7 @@ type QoderLoginResult struct {
 
 // ImportPAT 导入 pt- 个人访问令牌：交换 jobToken 并拉取身份。返回可直接建号的
 // 凭证（token_kind=pat，保留 personal_token 供刷新回落重交换）。
-func (s *QoderOAuthService) ImportPAT(ctx context.Context, pat, realm string, proxyID *int64) (*QoderLoginResult, error) {
+func (s *QoderOAuthService) ImportPAT(ctx context.Context, pat, realm string, proxyID *int64, vpcEndpoint ...string) (*QoderLoginResult, error) {
 	realm = strings.TrimSpace(realm)
 	if realm == "" {
 		realm = "cn"
@@ -152,12 +162,21 @@ func (s *QoderOAuthService) ImportPAT(ctx context.Context, pat, realm string, pr
 	if !qoder.ValidRealm(realm) {
 		return nil, infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_REALM", "realm must be cn or intl, got %q", realm)
 	}
+	vpc := ""
+	if len(vpcEndpoint) > 0 {
+		vpc = strings.TrimSpace(vpcEndpoint[0])
+	}
+	if vpc != "" {
+		if _, perr := qoder.ParseVPCEndpoint(vpc); perr != nil {
+			return nil, infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_VPC", "%v", perr)
+		}
+	}
 	proxyURL, err := s.proxyURL(ctx, proxyID)
 	if err != nil {
 		return nil, err
 	}
 	client := qoder.NewClient(newQoderHTTPClient(proxyURL, 30*time.Second))
-	ts, ui, err := client.ImportPAT(ctx, realm, pat)
+	ts, ui, err := client.ImportPAT(ctx, realm, pat, vpc)
 	if err != nil {
 		return nil, infraerrors.Newf(http.StatusBadGateway, "QODER_OAUTH_PAT_IMPORT_FAILED", "导入 Qoder PAT 失败: %v", err)
 	}
@@ -165,6 +184,7 @@ func (s *QoderOAuthService) ImportPAT(ctx context.Context, pat, realm string, pr
 	// 原始 PAT 存 personal_token 供 RefreshAccessToken 回落。
 	ts.Kind = "pat"
 	creds := qoderCredentialsFromTokenSet(ts, realm, ui)
+	creds.VPCEndpoint = vpc
 	return &QoderLoginResult{
 		Done:        true,
 		Credentials: qoderCredentialsAnyMap(creds, strings.TrimSpace(pat)),
@@ -239,7 +259,7 @@ func (s *QoderOAuthService) RefreshAccountToken(ctx context.Context, account *Ac
 		return nil, err
 	}
 	client := qoder.NewClient(newQoderHTTPClient(proxyURL, 30*time.Second))
-	ts, err := client.RefreshAccessToken(ctx, creds.NormalizedRealm(), creds.RefreshToken, personalToken)
+	ts, err := client.RefreshAccessToken(ctx, creds.NormalizedRealm(), creds.RefreshToken, personalToken, creds.VPCEndpoint)
 	if err != nil {
 		var dead *qoder.SessionDeadError
 		if errors.As(err, &dead) {
@@ -591,7 +611,7 @@ func qoderAccountCredentials(account *Account) (qoder.Credentials, error) {
 	for _, key := range []string{
 		"access_token", "refresh_token", "token_kind", "expires_at", "realm",
 		"uid", "nickname", "user_type", "organization_id", "organization_name",
-		"machine_id", "machine_token",
+		"machine_id", "machine_token", "vpc_endpoint",
 	} {
 		if v := account.GetCredential(key); v != "" {
 			m[key] = v

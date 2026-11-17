@@ -211,11 +211,12 @@ export interface QoderQuotaSnapshot {
 /** POST /admin/qoder/oauth/login-start — 发起设备授权 */
 export async function qoderLoginStart(
   realm: string,
-  proxyId?: number
+  proxyId?: number,
+  vpcEndpoint?: string
 ): Promise<DeviceLoginStartResponse> {
   const { data } = await apiClient.post<DeviceLoginStartResponse>(
     '/admin/qoder/oauth/login-start',
-    { realm, proxy_id: proxyId }
+    { realm, proxy_id: proxyId, vpc_endpoint: vpcEndpoint || undefined }
   )
   return data
 }
@@ -236,11 +237,12 @@ export async function qoderLoginPoll(state: string): Promise<DeviceLoginPollResp
 export async function qoderImportPAT(
   pat: string,
   realm: string,
-  proxyId?: number
+  proxyId?: number,
+  vpcEndpoint?: string
 ): Promise<DeviceLoginPollResponse> {
   const { data } = await apiClient.post<DeviceLoginPollResponse>(
     '/admin/qoder/oauth/create-from-pat',
-    { pat, realm, proxy_id: proxyId }
+    { pat, realm, proxy_id: proxyId, vpc_endpoint: vpcEndpoint || undefined }
   )
   return data
 }

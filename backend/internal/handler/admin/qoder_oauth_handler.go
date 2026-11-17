@@ -27,6 +27,8 @@ type QoderLoginStartRequest struct {
 	Realm string `json:"realm"`
 	// ProxyID 让授权与轮询请求经指定代理发出。
 	ProxyID *int64 `json:"proxy_id"`
+	// VPCEndpoint 企业 VPC 实例名/专属域（仅 cn；空 = 继承部署级配置）。
+	VPCEndpoint string `json:"vpc_endpoint"`
 }
 
 // QoderLoginStartResponse 是 login-start 响应体。
@@ -43,7 +45,7 @@ func (h *QoderOAuthHandler) LoginStart(c *gin.Context) {
 		response.BadRequest(c, "Invalid request: "+err.Error())
 		return
 	}
-	authURL, state, err := h.qoderOAuthService.StartLogin(c.Request.Context(), req.Realm, req.ProxyID)
+	authURL, state, err := h.qoderOAuthService.StartLogin(c.Request.Context(), req.Realm, req.ProxyID, req.VPCEndpoint)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -96,6 +98,8 @@ type QoderPATImportRequest struct {
 	Realm string `json:"realm"`
 	// ProxyID 让交换请求经指定代理发出。
 	ProxyID *int64 `json:"proxy_id"`
+	// VPCEndpoint 企业 VPC 实例名/专属域（仅 cn）。
+	VPCEndpoint string `json:"vpc_endpoint"`
 }
 
 // ImportPAT 导入 pt- 个人访问令牌：交换 jobToken 并返回可直接建号的凭证。
@@ -110,7 +114,7 @@ func (h *QoderOAuthHandler) ImportPAT(c *gin.Context) {
 		response.BadRequest(c, "PAT must start with pt-")
 		return
 	}
-	result, err := h.qoderOAuthService.ImportPAT(c.Request.Context(), req.PAT, req.Realm, req.ProxyID)
+	result, err := h.qoderOAuthService.ImportPAT(c.Request.Context(), req.PAT, req.Realm, req.ProxyID, req.VPCEndpoint)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

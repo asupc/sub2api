@@ -29,6 +29,22 @@
       </div>
     </div>
 
+    <!-- 企业 VPC（仅国内版） -->
+    <div v-if="realm === 'cn'">
+      <label class="input-label">{{ t('admin.accounts.oauth.qoder.vpcEndpoint') }}</label>
+      <input
+        v-model="vpcEndpoint"
+        type="text"
+        class="input w-full font-mono text-xs"
+        :placeholder="t('admin.accounts.oauth.qoder.vpcEndpointPlaceholder')"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <p class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+        {{ t('admin.accounts.oauth.qoder.vpcEndpointHint') }}
+      </p>
+    </div>
+
     <!-- 导入方式 -->
     <div class="flex gap-4">
       <label class="flex cursor-pointer items-center gap-2">
@@ -140,6 +156,9 @@ const exchanging = ref(false)
 const creating = ref(false)
 const patError = ref('')
 const credentials = ref<Record<string, unknown> | null>(null)
+// 企业 VPC（仅国内版）：填实例名或 acme.vpc.qoder.com.cn 专属域。
+const vpcEndpoint = ref('')
+const effectiveVpc = computed(() => (realm.value === 'cn' ? vpcEndpoint.value.trim() : ''))
 
 // 模型白名单（可选）：选中模型落 credentials.model_mapping（{模型: 模型}）。
 const selectedModels = ref<string[]>([])
@@ -155,7 +174,8 @@ const authorizedHint = computed(() =>
   credentials.value ? t('admin.accounts.oauth.qoder.authorizedHint') : ''
 )
 
-const startLogin = () => adminAPI.platformOps.qoderLoginStart(realm.value)
+const startLogin = () =>
+  adminAPI.platformOps.qoderLoginStart(realm.value, undefined, effectiveVpc.value)
 const pollLogin = (state: string): Promise<DeviceLoginPollResponse> =>
   adminAPI.platformOps.qoderLoginPoll(state)
 
@@ -169,7 +189,7 @@ const handleImportPAT = async () => {
   exchanging.value = true
   patError.value = ''
   try {
-    const result = await adminAPI.platformOps.qoderImportPAT(pat, realm.value)
+    const result = await adminAPI.platformOps.qoderImportPAT(pat, realm.value, undefined, effectiveVpc.value)
     credentials.value = result.credentials ?? null
     if (!credentials.value) {
       patError.value = t('admin.accounts.oauth.qoder.noCredentials')
@@ -186,6 +206,9 @@ const handleCreate = async () => {
   creating.value = true
   try {
     const accountCredentials: Record<string, unknown> = { ...credentials.value }
+    if (effectiveVpc.value) {
+      accountCredentials.vpc_endpoint = effectiveVpc.value
+    }
     if (selectedModels.value.length > 0) {
       const mapping: Record<string, unknown> = {}
       for (const model of selectedModels.value) {
