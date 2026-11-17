@@ -314,3 +314,12 @@
 - **改动文件**：`deploy/build-and-deploy-nas.sh`（头部用法说明同步更新）、`CHANGELOG-SO.md`（本条）。
 - **合并影响**：无（`deploy/` 为二开部署脚本，不触碰 `UPSTREAM-BASE` / `PORTER-BASE`）。
 - **验证**：`bash -n deploy/build-and-deploy-nas.sh` 语法检查通过。
+
+### 移植源切换：WorkBuddy 改以 workbuddy2api-panel 为准（2026-11-17）
+
+- **变更**：`.claude/skills/sub2api-porter-sync/SKILL.md` 将 WorkBuddy 权威移植源由 `workbuddy2api-hub`（Python）改为 `workbuddy2api-panel`（Go，本机 `D:\workbuddy2api-panel`，`misakano7545/workbuddy2api-panel`）。同步重写固定路径表、模块映射（panel 的 `internal/upstream/*`、`internal/pool/`、`internal/scheduler/`、`internal/panel/`）与检测步骤示例，删除「hub 克隆不存在」的询问分支，补充「panel 历史重发布、旧哈希不可用」「提交由 AI agent 辅助、须读实际代码」两条评估约束。
+- **基准**：`PORTER-BASE` workbuddy 行由 `workbuddy2api-hub 6e1e548` 改为 `workbuddy2api-panel a19c78f`（2026-11-06，按时间对齐上次 workbuddy 评估时点；两仓库无共同祖先，无法按提交映射）。panel 克隆历史于 2026-09-12 重新发布（根提交 `fd64aed`），CHANGELOG 中历史哈希（`73a7560e`、`535e19e`、`6e1e548`）在本克隆不存在，只能按「提交日期 + 标题」定位。
+- **待办**：panel `a19c78f..27b7458` 共 177 个提交尚未按本 skill 评估，下次运行 `sub2api-porter-sync` 从该区间开始，不得视为已评估。
+- **改动文件**：`.claude/skills/sub2api-porter-sync/SKILL.md`（未纳入版本控制）、`CLAUDE.md`（外部仓库说明同步）、`PORTER-BASE`、`CHANGELOG-SO.md`（本条）。
+- **合并影响**：无（流程文档与移植基准；不触碰 `UPSTREAM-BASE`，无上游代码冲突面）。
+- **验证**：skill 内已无 `workbuddy2api-hub` 作为源路径的残留（仅保留历史说明）；`PORTER-BASE` 仓库名与本地目录 basename 一致，可被 skill 的 `awk` 反查命中。

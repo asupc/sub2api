@@ -173,3 +173,4 @@ issues/
 
 # pnpm 容器安装缓存（NAS 构建临时产物）
 frontend/.pnpm-store/
+.claude/
