@@ -357,3 +357,14 @@ func TestWriteOpenAIUpstreamClientError_PayloadShape(t *testing.T) {
 		})
 	}
 }
+
+// TestIsOpenAIContextWindowErrorRecognizesPromptTooLong 覆盖 6f21bfe：
+// WorkBuddy 11115 原文不含 context 字样，但必须被识别为上下文超限。
+func TestIsOpenAIContextWindowErrorRecognizesPromptTooLong(t *testing.T) {
+	if !isOpenAIContextWindowError(`{"code":11115,"msg":"prompt is too long: 1048723 tokens > 1048576 maximum"}`, nil) {
+		t.Fatal("prompt is too long 必须识别为上下文超限")
+	}
+	if isOpenAIContextWindowError(`{"code":11115,"msg":"quota policy rejected"}`, nil) {
+		t.Fatal("仅凭 11115 不得判上下文超限")
+	}
+}

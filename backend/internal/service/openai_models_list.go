@@ -142,6 +142,7 @@ func standardOpenAIModelsBody(body []byte, fromManifest bool) ([]byte, error) {
 			}
 		}
 		entry["id"], _ = json.Marshal(id)
+		capClientSafeModelContextWindow(entry)
 		entry["object"] = json.RawMessage(`"model"`)
 		if len(entry["created"]) == 0 || string(entry["created"]) == "null" {
 			entry["created"] = json.RawMessage(`0`)
@@ -159,6 +160,31 @@ func standardOpenAIModelsBody(body []byte, fromManifest bool) ([]byte, error) {
 		Object string            `json:"object"`
 		Data   []json.RawMessage `json:"data"`
 	}{Object: "list", Data: models})
+}
+
+// clientSafeContextWindow 对客户端声明窗口的保守上限（trae-workbuddy-switch
+// 6f21bfe）：客户端用自己的 tokenizer 估算 prompt，实测偏低 10~15%；若清单
+// 直接报 1M，Codex 类客户端按 ×90% 触发压缩时真实 prompt 已越界，压缩请求本身
+// 也会 400，形成死锁。900k 留出约 14% 余量；只降不升。
+const clientSafeContextWindow int64 = 900_000
+
+// capClientSafeModelContextWindow 收窄 /v1/models 条目里的上下文窗口字段。
+// 嵌套对象或非数字形态原样保留（不猜结构）；管理面另走原始目录。
+func capClientSafeModelContextWindow(entry map[string]json.RawMessage) {
+	for _, field := range []string{
+		"context_length", "context_window", "max_context_window",
+		"context_length_default", "context_length_max",
+	} {
+		raw := bytes.TrimSpace(entry[field])
+		if len(raw) == 0 {
+			continue
+		}
+		var value float64
+		if json.Unmarshal(raw, &value) != nil || value <= float64(clientSafeContextWindow) {
+			continue
+		}
+		entry[field], _ = json.Marshal(clientSafeContextWindow)
+	}
 }
 
 // projectAccountModelsBody projects upstream entries to public names before

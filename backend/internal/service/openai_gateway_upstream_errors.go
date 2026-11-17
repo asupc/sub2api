@@ -261,6 +261,12 @@ func isOpenAIContextWindowError(upstreamMsg string, upstreamBody []byte) bool {
 		if strings.Contains(lower, "context_too_large") || strings.Contains(lower, "context_length_exceeded") {
 			return true
 		}
+		// trae-workbuddy-switch 6f21bfe：WorkBuddy 11115 的原文是
+		// "prompt is too long: N tokens > M maximum"，不含 context 字样；
+		// 不识别的话 Codex 会当普通 400 失败、不做上下文压缩。
+		if strings.Contains(lower, "prompt is too long") {
+			return true
+		}
 		if strings.Contains(lower, "maximum context length") || strings.Contains(lower, "max context length") {
 			return true
 		}

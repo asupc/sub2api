@@ -51,6 +51,13 @@ func writeOpenAIUpstreamClientError(c *gin.Context, statusCode int, body []byte,
 	if message == "" {
 		message = openAIUpstreamClientErrorFallbackMessage
 	}
+	// trae-workbuddy-switch 6f21bfe：OpenAI 系客户端（codex-cli 实测）只匹配
+	// "maximum context" / "context window exceeded"，不认 "prompt is too long"。
+	// 加前缀并保留上游原文，客户端才会就地压缩而不是当普通 400 失败。
+	if isOpenAIContextWindowError(message, body) &&
+		!strings.HasPrefix(strings.ToLower(message), "context window exceeded") {
+		message = "context window exceeded: " + message
+	}
 	errorPayload["message"] = message
 
 	c.JSON(statusCode, gin.H{"error": errorPayload})

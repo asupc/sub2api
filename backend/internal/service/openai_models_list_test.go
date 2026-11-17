@@ -362,3 +362,23 @@ func TestApplyCodexModelsMappingPreservesUnchangedBodyAndETag(t *testing.T) {
 		})
 	}
 }
+
+// TestCapClientSafeModelContextWindow 覆盖 6f21bfe：客户端清单的上下文
+// 窗口只降不升（>900k 压到 900k，小窗口原样）。
+func TestCapClientSafeModelContextWindow(t *testing.T) {
+	entry := map[string]json.RawMessage{
+		"context_length": json.RawMessage(`1048576`),
+		"context_window": json.RawMessage(`200000`),
+		"max_context_window": json.RawMessage(`1000000`),
+	}
+	capClientSafeModelContextWindow(entry)
+	if string(entry["context_length"]) != `900000` {
+		t.Errorf("context_length = %s", entry["context_length"])
+	}
+	if string(entry["context_window"]) != `200000` {
+		t.Errorf("context_window = %s", entry["context_window"])
+	}
+	if string(entry["max_context_window"]) != `900000` {
+		t.Errorf("max_context_window = %s", entry["max_context_window"])
+	}
+}
