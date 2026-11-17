@@ -83,6 +83,7 @@
               <th class="pb-2 text-right">{{ t('admin.dashboard.requests') }}</th>
               <th class="pb-2 text-right">{{ t('admin.dashboard.tokens') }}</th>
               <th v-if="showCost" class="pb-2 text-right">{{ t('admin.dashboard.actual') }}</th>
+              <th v-if="showAccountCost" class="pb-2 text-right">{{ t('admin.dashboard.accountCost') }}</th>
               <th v-if="showCost" class="pb-2 text-right">{{ t('admin.dashboard.standard') }}</th>
             </tr>
           </thead>
@@ -109,15 +110,19 @@
                 <td v-if="showCost" class="py-1.5 text-right text-green-600 dark:text-green-400">
                   ${{ formatCost(item.actual_cost) }}
                 </td>
+                <td v-if="showAccountCost" class="py-1.5 text-right text-orange-500 dark:text-orange-400">
+                  ${{ formatCost(item.account_cost ?? 0) }}
+                </td>
                 <td v-if="showCost" class="py-1.5 text-right text-gray-400 dark:text-gray-500">
                   ${{ formatCost(item.cost) }}
                 </td>
               </tr>
               <tr v-if="expandedKey === item.endpoint">
-                <td :colspan="showCost ? 5 : 3" class="p-0">
+                <td :colspan="(showCost ? 5 : 3) + (showAccountCost ? 1 : 0)" class="p-0">
                   <UserBreakdownSubTable
                     :items="breakdownItems"
                     :loading="breakdownLoading"
+                    :show-account-cost="showAccountCost"
                   />
                 </td>
               </tr>
@@ -162,6 +167,7 @@ const props = withDefaults(
     showSourceToggle?: boolean
     enableBreakdown?: boolean
     showCost?: boolean
+    showAccountCost?: boolean
     startDate?: string
     endDate?: string
     filters?: Record<string, any>
@@ -176,7 +182,8 @@ const props = withDefaults(
     showMetricToggle: false,
     showSourceToggle: false,
     enableBreakdown: true,
-    showCost: true
+    showCost: true,
+    showAccountCost: true
   }
 )
 

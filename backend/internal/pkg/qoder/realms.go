@@ -325,7 +325,7 @@ func OpenAPICandidatesFor(realm, vpc string) ([]string, error) {
 			out = append(out, host)
 		}
 	}
-	return out
+	return out, nil
 }
 
 func slicesContains(list []string, v string) bool {

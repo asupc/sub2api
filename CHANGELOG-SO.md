@@ -4,16 +4,16 @@
 > 基准：`UPSTREAM-BASE`（单行完整哈希）只在完整上游同步后前移；手动移植只记本文件、不改基准（唯一例外见 10-13 收口条目）。
 > 整理记录：2026-10-12 / 10-13 / 10-15 / 10-23 / 10-26 五次压缩，只保留功能事实、关键决策、合并冲突面与已知缺口；根因推导、测试输出、逐提交哈希与逐文件清单见 git 历史（压缩前 HEAD：10-26=`145baaa`、10-23=`82fc11f`、10-15=`f5aa70c`、10-13=`45cf4c6`；10-23 起模型测评历史收敛为单条）。10-26 压缩把构建/部署流水收敛为「构建链与部署流水」节，PORTER-BASE 历史批次按功能事实收敛。
 
-## 当前状态（2026-10-26 核实）
+## 当前状态（2026-11-17 核实）
 
 | 项 | 状态 |
 |---|---|
-| 上游基准 | `UPSTREAM-BASE`=`530c5e3a`（v0.2.21）；`backend/cmd/server/VERSION`=0.2.21 |
+| 上游基准 | `UPSTREAM-BASE`=`15871f90`（v0.2.22）；`backend/cmd/server/VERSION`=0.2.22 |
 | 移植源基准 | `PORTER-BASE` 文件：workbuddy `6e1e548`（workbuddy2api-hub v1.10.11）、qoder `70ba58b`（v1.7.30）、trae `dfa5bf7`（2026.11.51421）（2026-11-06 推进） |
 | 后端 | 代码 = v0.2.20 + 二开（三平台源码集成、Antigravity 直接模型模式、复合分组同族多平台调度、推理档位全量透传、OpenCode reasoning 回放收口、账号/计费/网关定制，逐项见时间线）；模型能力测评已于 10-23 整体移除 |
 | 前端 | 二开：功能入口裁剪 + UI/UX 体系重构 + 仪表盘/用量统计/账号表格增强；模型能力中心收敛为模型清单单页（无评分）；用量统计含「按 API 统计用量」与模型分布折叠 |
-| 数据库 | 官方迁移序列终态（裁剪期 drop 的表由 `deploy/restore-upstream-schema.sql` 恢复，可重放幂等）；二开迁移命名 `NNN_so_*.sql`，最新占用 250（测评表 DROP），后续从 251+ 起 |
-| 验证基线 | 2026-11-11（同步 v0.2.21 后）：后端 `go build`/`go vet`（含 `-tags=unit`）全通过，unit 仅 6 个已知存量失败（Gemini thinking variant ×2 子例 / 复合分组族 ×2 / antigravity 目录跳过 / effort 透传遗留 / prompt-audit 路由覆盖，与 HEAD 基线一致，无新增）；前端 typecheck + vitest（297 文件 / 2343 用例）+ build 全绿 |
+| 数据库 | 官方迁移序列终态（裁剪期 drop 的表由 `deploy/restore-upstream-schema.sql` 恢复，可重放幂等）；二开迁移命名 `NNN_so_*.sql`；上游 v0.2.22 已占用 251（`251_group_force_openai_ultrafast.sql`、`251_group_usage_rollup_nonblocking_build.sql`），后续二开迁移从 252 起 |
+| 验证基线 | 最近完整验证：2026-11-11（同步 v0.2.21 后）后端 build/vet 全通过、unit 仅 6 个已知存量失败（Gemini thinking variant ×2 子例 / 复合分组族 ×2 / antigravity 目录跳过 / effort 透传遗留 / prompt-audit 路由覆盖）；前端 typecheck + vitest（297 文件 / 2343 用例）+ build 全绿。**2026-11-17 同步 v0.2.22 时本机无 go/docker/pnpm，未复跑，需按下方条目命令补验** |
 | 线上实例 | `sub2api:0.2.17-so-20261026-2`（本机 Compose `/vol2/1000/docker/sub2api/`；旧 tag 均保留作回滚点） |
 
 - **功能边界**：支付永久不同步（2026-10-08 用户指示；上游 #7881 EasyPay 回调签名修复未同步，启用支付前需补）；en 语言包永久跳过；前端已删入口的官方功能视为隐藏（后端接口与表随官方保留）。
@@ -359,3 +359,51 @@
   - `cd frontend && pnpm typecheck && pnpm exec vitest run src/components/account/forms/__tests__/platformForms.spec.ts`。
 - **合并影响**：`pkg/apicompat/*`、`service/openai_models_list.go`、`service/openai_upstream_client_error.go`、`service/openai_gateway_upstream_errors.go` 属上游同步共面文件，后续上游同步需按二开语义手工合并；qoder/trae/workbuddy 其余文件为纯二开。**不触碰 `UPSTREAM-BASE` / `VERSION`**。
 - **PORTER-BASE**：qoder → `f0b41e4`，trae → `febc1b7`（两项本轮建议项均有明确结论）；workbuddy 保持 `a19c78f`（panel 区间仍有大量未评估项）。
+
+### 同步 v0.2.22（2026-11-17）
+
+- **区间与规模**：`530c5e3a → 15871f90`（186 提交 / 107 非合并 / 339 文件，+20705/-1634），v0.2.21 → v0.2.22。二开侧：151 个未改文件直接覆盖、71 个上游新增复制（另 2 个新增跳过）、80 个三路自动合并、16 个冲突手工裁决、5 个上游修改文件跳过、14 个二开已裁剪文件跳过。版本号 `VERSION`→0.2.22（tag `v0.2.22` 一致）。
+- **同步功能（按主题）**：
+  - **分组强制 OpenAI Ultra Fast**：`groups.force_openai_ultrafast` 新字段（迁移 `251_group_force_openai_ultrafast.sql`、ent schema/生成代码、DTO/handler/service、`GroupsView.vue` 创建/编辑开关与 `BulkEditAccountModal.vue`、zh 文案与类型）；按模型门控（仅 GPT-6 Astra / GPT-6.1 Sol），Ultrafast > Fast > 客户端，Ultrafast 按标准价 6 倍计费且不受「免费 Fast」影响。
+  - **OpenAI 透传按模型筛选**：账号 `extra.openai_passthrough_model_filter`（调度快照投影、`IsModelSupportedByAccount`、`/v1/models`、账号表单/批量编辑与 i18n）。
+  - **Vertex 多区域**：新增 `vertex_locations.go`（`us`/`eu` 区域 host、按请求区域 +10% 上游价倍数、模型级区域覆盖）；URL 构造统一走 `buildVertexGeminiAccountURL(..., cachedContentLocation)`；账号统计与 token 计费按实际区域加价。
+  - **Gemini**：Gemini 4 Carbon 目录/兜底价/别名（`normalizeGeminiThinkingTierAlias`）、Gemini 4 Hydrogen 计费、兼容入口 `response_format` 结构化输出、并行同名工具调用跨帧边界、原生请求按稳定前缀生成粘性会话哈希（`gemini_session.go`）、Vertex 账号模型目录按区域。
+  - **计费与用量**：同一用户扣费按用户通道合并结算（`usage_billing_lane.go` + `usage_billing_batch_repo.go` + wire）；DeepSeek `override_file` 显式非负单价不再叠加高峰倍率（`tokenPriceOverrides`）；分组日汇总重建与保留期清理不再阻塞 `usage_logs` 写入（迁移 `251_group_usage_rollup_nonblocking_build.sql`）；按账户筛选时模型/端点分布用实际扣费；Chat 回退路径保留响应模型观测；硅基流动 Qwen3-Embedding/Reranker 兜底价；高峰倍率测试钟修复；分组费率/RPM 同步事务化。
+  - **流式与网关**：上游 TCP keepalive 探测死连接（`http_upstream_keepalive*.go`）；keepalive 事件先转发、keepalive 后错误按 SSE 返回、Messages 桥首个内容前换号、compat 空流提交后释放粘性账号、客户端断开后仍写回粘性会话；Anthropic 原生端点/模型观测；`count_tokens` 透传去重头；保留 `metadata.user_id`；composite 只在 `message_start` 改写公开模型名并恢复响应模型；Anthropic 兼容路由的 effort 策略；首次输出内存回退；OpenAI tool schema Python 正则清洗、`patternProperties` 删除后放宽封闭对象、Codex additional_tools ID 保留、fork prompt cache key、密封调用内容保留。
+  - **调度/限流/认证**：调度快照按 bucket 合并加载、冷却账号保留在快照成员、`openai_capabilities` 与透传筛选进投影；Claude 并发令牌轮换后恢复请求、Fable `7d_oi` 窗口恢复解除模型限制、weekly usage 跨 5h 滚动保留、Anthropic quota 窗口起点对齐、Kimi 新月度配额解析；登录邮箱身份回填失败不再 panic。
+  - **各平台修复**：Antigravity Carbon thinking、schema items 类型匹配、流式思考与首字超时锚点、工具 schema 清洗；Bedrock 按错误语义分类并保留流中断 usage、渠道 Bedrock 兼容开关按布尔持久化；Grok server-side search 调用不入 tool calls、媒体错误消息与顶层错误解析隔离；websearch 账号模式覆盖全部渠道平台。
+  - **安全/Web**：settings 注入 HTML 禁止缓存、模型白名单拒绝通配符、并发等待 ping 可设 0 禁用、请求体热点路径零拷贝与 `json_escape_probe`。
+- **冲突裁决（16 文件）**：
+  - `backend/Dockerfile`、`deploy/Dockerfile`：取上游 Go 1.27.4。
+  - `cmd/server/wire_gen.go`：保留二开裁剪（不引入 `geminiCachedContentService`），并入 `usageBillingLaneCombiner` 与 `usageRepository` 通道装配。
+  - `ent/schema/group.go` 及生成代码：`mutation.go` 字段容量 68（二开无 `i18n` + 上游 `force_openai_ultrafast`）；`ent/runtime/runtime.go` 14 处描述符索引按「先去 `i18n`、再插 ultrafast」重算，`force_openai_ultrafast=50`、`free_openai_fast=51`，后续顺延。
+  - `handler/gemini_v1beta_handler.go`：采用上游稳定前缀内容哈希 `GenerateGeminiContentSessionHash`，保持二开无 `cachedContentBinding`。
+  - `repository/scheduler_cache.go`：保留二开删除的显式缓存投影键，并入上游 `openai_capabilities`。
+  - `service/account_test_service.go`：服务账号请求改用上游 `setVertexGeminiAuth` + 5 参 URL（修正合并后残留的 `accessToken` 引用）。
+  - `service/gateway_service.go`：`ForwardResult` 增加 `UpstreamPriceMultiplier`/`upstreamPriceFactor`，保持无 `CacheStorageTokenHours`。
+  - `service/gateway_usage_billing.go`：账号统计成本叠加 `upstreamPriceFactor`，新增 `upstreamPriceFactorApplies`/`applyUpstreamPriceFactor`；保持二开删除的显式缓存存储计费族。
+  - `service/upstream_models.go`：保持二开删除 `buildVertexPublisherModelsURL`（随显式缓存裁剪）。
+  - `service/vertex_service_account_test.go`：采用上游测试（5 参 URL、API Key 认证断言）。
+  - `deploy/config.example.yaml`：保持删除显式缓存说明，并入 DeepSeek override 定价注释。
+  - `AccountUsageCell.vue`：不引入 `isOfficialGeminiBaseUrl`（显式缓存裁剪），并入 `formatDateTime` 与额度观测新鲜度 UI。
+  - `EndpointDistributionChart.vue`：合并二开 `showCost` 与上游 `showAccountCost`（表头/单元格/colspan/默认值）。
+  - `UsageView.vue`：保持二开已移除的图表区（上游仅图表参数变化）。
+  - `README*.md`：上游仅新增赞助商 DataEyesAI，跳过。
+- **测试适配（裁剪模块引用）**：`gemini_messages_compat_service.go` 删除 `geminiCachedContentLocationInBody` 调用（区域固定取模型默认位置）；`gemini_carbon_pricing_test.go` 删除 `CacheStoragePricePerTokenHour` 断言；`vertex_locations_test.go` 删除 3 个依赖显式缓存/`buildVertexPublisherModelsURL` 的用例；`groupsOpenAIFast.spec.ts` 的 `[zh, en]` 收敛为 `[zh]`（en 语言包永久裁剪）。新增 `ChannelsView.bedrockCompat.spec.ts` 因视图已裁剪整体跳过。
+- **跳过项**：`.github/workflows/*`（3，二开无 CI 目录）；`backend/internal/payment/provider/alipay{,_test}.go`（支付链路永久不同步）；README×3 与 `assets/partners/logos/DataEyesAI.png`（赞助商）；`ChannelsView.bedrockCompat.spec.ts`（渠道管理视图已裁剪）；14 个 `MISSING_IN_SO`（Gemini 显式缓存/模型端点系列、en 语言包、ChannelsView）。
+- **依赖/构建链**：Go 1.27.3→1.27.4（`backend/go.mod`、根/`backend`/`deploy` Dockerfile、`deploy/docker-compose.so-dev.yml`；`github.com/google/jsonschema-go` 转为直接依赖）。`package.json`/`pnpm-lock.yaml` 本区间上游无变更，无需重生成。
+- **验证**：本机无 `go` / `docker` / `pnpm`，**未执行编译、gofmt、后端单测与前端 typecheck/vitest/build**。已做静态核查：无冲突标记残留、无二开已裁符号引用（`GeminiCachedContent*`/`GeminiExplicitCache*`/`isOfficialGeminiBaseUrl`/`ProxySelector`/en 语言包）、`git diff --check` 无空白错误、变更文件无重复函数、ent 索引与字段容量手工复核。建议在有工具链环境执行：
+  - `cd backend && gofmt -l internal cmd ent | head`；`go build ./... && go vet ./... && go vet -tags=unit ./...`
+  - 测试前临时移走 `backend/config.yaml`、`backend/data/config.yaml`；`go test -tags=unit ./...` 与 6 项存量失败基线对比。
+  - `cd frontend && pnpm typecheck && pnpm test:run && pnpm build`。
+- **版本号一致性**：`git describe --tags --abbrev=0 15871f90` → `v0.2.22`；`backend/cmd/server/VERSION`=0.2.22；`UPSTREAM-BASE`=`15871f904056f548dd874a1d069ffc6cdf777b78`。
+- **合并影响**：支付链路与 en 语言包零变更（`git status` 复核）；Gemini 显式缓存、渠道管理视图继续维持二开裁剪。新迁移占用 251，二开迁移下次从 252 起。
+
+### 修复 v0.2.22 同步遗留的编译错误（2026-11-17）
+
+- **问题**：v0.2.22 同步时本机无 Go 工具链，未执行编译验证，首次镜像构建暴露两处编译错误：
+  - `internal/pkg/qoder/realms.go:328`：`OpenAPICandidatesFor` 签名为 `([]string, error)`，末尾分支误写为 `return out`，补回 `nil`。
+  - `cmd/server/wire_gen.go:383`：`provideCleanup` 调用漏传 `traeOpsService`（函数体 625 行的 `traeOps.Stop()` 已在使用），同时触发 `declared and not used` 与「参数不足」两条错误。
+- **改动文件**：`backend/internal/pkg/qoder/realms.go`、`backend/cmd/server/wire_gen.go`、`CHANGELOG-SO.md`（本条）。
+- **验证**：`docker build --target backend-builder`（复用 BuildKit 的 `sub2api-gomod` / `sub2api-gobuild` 缓存）编译通过；完整镜像 `sub2api:0.2.22-so-20261117` 构建成功，经 `deploy/build-and-deploy-nas.sh` 部署到 NAS，容器 `Up (healthy)`、`/health` 返回 200。
+- **合并影响**：无（纯编译修复，不改变上游语义；`wire_gen.go` 继续维持二开手工接线）。
