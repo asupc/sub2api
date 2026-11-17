@@ -323,3 +323,39 @@
 - **改动文件**：`.claude/skills/sub2api-porter-sync/SKILL.md`（未纳入版本控制）、`CLAUDE.md`（外部仓库说明同步）、`PORTER-BASE`、`CHANGELOG-SO.md`（本条）。
 - **合并影响**：无（流程文档与移植基准；不触碰 `UPSTREAM-BASE`，无上游代码冲突面）。
 - **验证**：skill 内已无 `workbuddy2api-hub` 作为源路径的残留（仅保留历史说明）；`PORTER-BASE` 仓库名与本地目录 basename 一致，可被 skill 的 `awk` 反查命中。
+
+### 平台移植源同步：qoder / trae 全量 + WorkBuddy panel 高优先级项（2026-11-17）
+
+- **区间与规模**：qoder2api-hub `70ba58b → f0b41e4`（36 提交 / 28 非合并）；trae-workbuddy-switch `dfa5bf7 → febc1b7`（84 提交 / 81 非合并）；WorkBuddy 权威源已按同日 skill/CLAUDE.md 变更切到 `workbuddy2api-panel`，本轮评估 `a19c78f` 后的高优先级子集（panel HEAD `27b7458`，区间共 177 提交，其余大项未评估）。用户本轮全程选择全部建议项。
+- **qoder 已移植**：
+  - **工具调用 index 归一化（`fa44d07` #157）**：`pkg/qoder/sse.go` 新增 `NormalizeToolCallIndices`（按 id 认领槽位、无主 index 分配稳定槽位号），在 `RecoverLeakedToolCalls` 与 `AggregateStream` 前置；修上游并行调用全部复用 index=0 时被合并/参数串坏。
+  - **Kimi 原生工具与结构化历史（`2fad95d` #153）**：`baseprompt.go` 新增 `IsKimiModel`（kmodel/kmodel_latest/显示名）、`kimiToolProtocolPrompt`（字节级取自源文件）、`applyKimiToolProtocol`（仅带工具且非 `tool_choice=none` 时追加）；Kimi 默认走结构化工具历史。
+  - **工具回声 fail-closed 与伪调用守卫（`4be8084`）**：截断的泄漏回声在声明了 tools 时不再静默按成功收尾（流式与非流式都返回错误）；新增正文具名伪调用守卫 `GuardUnstructuredToolEcho` / `containsNamedToolEcho`（排除代码围栏示例）；结构化历史默认出口改为 cn+intl，新增 `QD_STRUCTURED_TOOL_HISTORY_REALMS` 可缩小范围。
+  - **Anthropic 工具参数规范化（`a858922` #143）**：`apicompat` 新增 `normalizeAnthropicHistoryToolInput`（解开历史里多编码一层的 input）与 `normalizeAnthropicToolUseInput`（非对象参数包成 `{"value": ...}`）；流式「对象形态 arguments 缓冲到块尾」未移植（本侧 CC 上游均发字符串增量）。
+  - **刷新 415 form 回退（`e8e5300` #182）**：`pkg/qoder/oauth.go` 先按上次成功编码发；仅 415 才在 JSON/form 间重试一次并记住成功编码；401/403/400 不重试。
+  - **QoDuck 目录条目（`c9d4ccb`）**：`assets/qoder_catalog_{cn,intl}.json` 补 `lmodel`（QoDuck，免费 app-only）。
+  - **企业 VPC 专属域（`5599074`+`0b0885f`+`b29401d`）**：`pkg/qoder/realms.go` 新增 `ParseVPCEndpoint` / `RealmConfigFor` / `GatewayCandidatesFor` / `OpenAPICandidatesFor`；支持 `QD_CN_VPC_ENDPOINT` 部署级与账号 `vpc_endpoint` 覆盖；VPC 实例只用专属域、不回退公网。`Credentials` 增 `vpc_endpoint`；OAuth login-start/PAT 导入、token 刷新、模型目录、chat 端点全部接线；`QoderForm.vue` 增国内版 VPC 输入。
+  - **Anthropic thinking 开关（`9a27ae2` #146）**：`apicompat` 新增 `ANTHROPIC_THINKING_MODE=off|empty`（默认 empty，保持既有空签名 thinking 输出；off 不输出 thinking 块）。源为按 Key/面板粒度，本侧无对应粒度，改为进程级环境变量。
+  - **改动文件**：`pkg/qoder/{sse,baseprompt,oauth,models,accounts,realms}.go`、`pkg/qoder/assets/qoder_catalog_{cn,intl}.json`、`pkg/apicompat/{chatcompletions_anthropic_bridge,responses_to_anthropic}.go`、`service/{openai_gateway_qoder,qoder_oauth_service,openai_models_list,openai_upstream_client_error,openai_gateway_upstream_errors}.go`、`handler/admin/qoder_oauth_handler.go`、`frontend/src/{api/admin/platformOps.ts,components/account/forms/QoderForm.vue,i18n/locales/zh/admin/accounts.ts}`。
+- **trae 已移植**：
+  - **工具调用跨帧累加（`ce0a2c4` #172）**：`pkg/trae/sse.go` 新增 `toolCallAccumulator`（按上游 index/id 定位槽位、name/arguments 去重累加、缺 id 补 `call_N`、流式稳定 index）；流式与非流式都改用累加器；有工具调用时 `finish_reason` 归一为 `tool_calls`。
+  - **过期包不计入可用余额（`0f0bf61`）**：`BuildEntitlements` 只累加未过期包，新增 `ExpiredRemaining` 单独报告。
+  - **临期窗口 14→7 天（`25f5982`）**：`pkg/trae/usage.go` 窗口与 `trae_ops_service.go` 文案常量统一为 7 天（推翻 2026-11-04 的 14 天裁定，源已再次变更）。
+  - **上下文超限翻译（`6f21bfe`）**：`isOpenAIContextWindowError` 识别 `prompt is too long`；`writeOpenAIUpstreamClientError` 给客户端可识别的 `context window exceeded:` 前缀；`/v1/models` 客户端条目上下文窗口只降不升，上限 900k。
+  - **改动文件**：`pkg/trae/{sse,usage}.go`、`service/{trae_ops_service,openai_gateway_upstream_errors,openai_upstream_client_error,openai_models_list}.go`。
+- **WorkBuddy panel 已移植（高优先级子集）**：
+  - **指纹版本（`2fa6876`）**：`pkg/workbuddy/headers.go` CN 桌面 5.11.3 / global 5.9.4；CLI 按 realm 2.176.0 / 2.165.0。`/v2/report` 桌面 commit/releaseDate 三元组本侧未实现（当前 report 事件不带这两个字段），记为不适用。
+  - **sanitize 注入身份指令收窄（`767056c`）**：新增 `scrubInjectedIdentity` / `scrubInjectedIdentityContent`，只清洗 assistant 正文与 reasoning_content/reasoning；system/user 的用户人设不改；带点身份名与 `<model_identity>` 标签处理按源实现。
+  - **工具结果倒置重排（`27b7458`）**：`pkg/workbuddy/tool_pairing.go` 新增 `reorderEarlyToolResults`，`RepairToolPairing` 改为 reorderEarly→merge→repack→cleanup，修 11148 `tool_call_sequence_broken`。
+  - **签到回执语义（`03a50ce`）**：`client.go` 拆出 `doJSONRaw`；`billing.go` 新增 `billingMeterRaw` / `checkinReceiptError`，code=0 的失败回执返回错误，已签到回执仍可被 `IsAlreadyCheckin` 识别；`errors.go` 新增失败硬词表，失败硬词压过 already（10001 不再无条件当已签到）。
+- **评估未移植（原因，勿重复评估）**：
+  - qoder：`f0b41e4` 排队观测/诊断端点（panel 诊断专属；本侧已有 queued 分类与冷却换号）；`53fb020` agents 模板/routing 配置缓存（本侧无 agents 面板/routing workbench）；credits 展示/额度单元格（本侧 quota composition 已覆盖）；PID1/Windows 绑定/更新器/chunked body/UI。
+  - trae：`0a4176a` 会话身份 v2（system+首条 user 指纹，与本侧「排除每轮变化的 system」设计冲突；本侧无历史裁剪）；`0959e76` 签到 10:05/窗口补跑（本侧调度器仅整点，10/21 点两轮且 21 点兜底）；`796c596`/`9b9380f` 暂时性刷新不误标（本侧仅 SessionDead 落错误）；`7b458c9` 上游模型清单（`pkg/trae/catalog.go` 已直连 batch_get_detail_param）；`995e575` 1.5MB 裁剪（本侧不裁剪历史）；`7b4208d`/`1e67583`/`0786010` Responses 状态隔离（本侧无 Response 状态存储）；`febc1b7` 统一网关斜杠 ID（本侧模型 ID 自带目录）；`9b6d1f0` 按模型默认思考档、`3c9f93d` `/v1/models` 思考档位（可选增强，用户本轮未选）；桌面端风控/记忆迁移/会话副本/UI/CI。
+  - WorkBuddy：panel `a19c78f..27b7458` 其余约 170 提交（安全续写/救援体系、预算与免费号模型分级、媒体/3D/MCP、面板 UI/auth/proxy 等）本轮未评估/未选，**不得视为已评估**；`PORTER-BASE` workbuddy 行保持 `a19c78f`。
+- **验证**：本机 `go` / `docker` / `pnpm` 均不可用，**未执行编译、gofmt、后端单测与前端 typecheck/vitest**，仅做静态审阅。建议在有工具链的环境执行：
+  - `cd backend && gofmt -l internal/pkg/qoder internal/pkg/trae internal/pkg/workbuddy internal/pkg/apicompat internal/service internal/handler`
+  - `go build ./... && go vet ./...`
+  - 测试前临时移走 `backend/config.yaml`、`backend/data/config.yaml`；`go test -tags=unit ./internal/pkg/qoder/... ./internal/pkg/trae/... ./internal/pkg/workbuddy/... ./internal/pkg/apicompat/... ./internal/service/...`；全量 `go test -tags=unit ./...` 与 6 个存量失败基线对比。
+  - `cd frontend && pnpm typecheck && pnpm exec vitest run src/components/account/forms/__tests__/platformForms.spec.ts`。
+- **合并影响**：`pkg/apicompat/*`、`service/openai_models_list.go`、`service/openai_upstream_client_error.go`、`service/openai_gateway_upstream_errors.go` 属上游同步共面文件，后续上游同步需按二开语义手工合并；qoder/trae/workbuddy 其余文件为纯二开。**不触碰 `UPSTREAM-BASE` / `VERSION`**。
+- **PORTER-BASE**：qoder → `f0b41e4`，trae → `febc1b7`（两项本轮建议项均有明确结论）；workbuddy 保持 `a19c78f`（panel 区间仍有大量未评估项）。
