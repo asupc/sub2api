@@ -83,6 +83,8 @@ func (s *QoderOAuthService) StartLogin(ctx context.Context, realm string, proxyI
 		if _, perr := qoder.ParseVPCEndpoint(vpc); perr != nil {
 			return "", "", infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_VPC", "%v", perr)
 		}
+	} else if realm == "cn" && qoder.VPCConfigError() != "" {
+		return "", "", infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_VPC", "%s", qoder.VPCConfigError())
 	}
 	proxyURL, err := s.proxyURL(ctx, proxyID)
 	if err != nil {
@@ -170,6 +172,8 @@ func (s *QoderOAuthService) ImportPAT(ctx context.Context, pat, realm string, pr
 		if _, perr := qoder.ParseVPCEndpoint(vpc); perr != nil {
 			return nil, infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_VPC", "%v", perr)
 		}
+	} else if realm == "cn" && qoder.VPCConfigError() != "" {
+		return nil, infraerrors.Newf(http.StatusBadRequest, "QODER_OAUTH_INVALID_VPC", "%s", qoder.VPCConfigError())
 	}
 	proxyURL, err := s.proxyURL(ctx, proxyID)
 	if err != nil {

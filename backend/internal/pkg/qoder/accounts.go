@@ -124,13 +124,19 @@ func resetOpenAPIMissingCache() {
 func (c *Client) doJSONOpenAPI(ctx context.Context, realm, path, method string,
 	body []byte, headers http.Header, out any, fallback bool, vpcEndpoint ...string) error {
 	realm = normalizedRealm(realm)
-	if OpenAPIPathMissing(realm, path) {
-		return &StatusError{Code: http.StatusNotFound,
-			Body: "cached 404 (known missing in " + realm + ")"}
-	}
 	vpc := ""
 	if len(vpcEndpoint) > 0 {
-		vpc = vpcEndpoint[0]
+		vpc = strings.TrimSpace(vpcEndpoint[0])
+	}
+	// 404 免探缓存按「区域 + 企业实例」隔离：不同 VPC 实例的端点可用性
+	// 不能互相污染。
+	cacheRealm := realm
+	if vpc != "" && vpc != "public" && vpc != "-" {
+		cacheRealm = realm + "@" + vpc
+	}
+	if OpenAPIPathMissing(cacheRealm, path) {
+		return &StatusError{Code: http.StatusNotFound,
+			Body: "cached 404 (known missing in " + cacheRealm + ")"}
 	}
 	bases, err := OpenAPICandidatesFor(realm, vpc)
 	if err != nil {
@@ -154,7 +160,7 @@ func (c *Client) doJSONOpenAPI(ctx context.Context, realm, path, method string,
 				se.Code == http.StatusGone {
 				// 首个基址 404：再试一个候选；第二个仍 404 即判定该路径本区域缺失。
 				if tried >= 2 {
-					markOpenAPIPathMissing(realm, path)
+					markOpenAPIPathMissing(cacheRealm, path)
 					return last
 				}
 				continue
