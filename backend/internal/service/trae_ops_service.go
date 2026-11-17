@@ -260,7 +260,8 @@ func traeEntitlementsExpiring(entitlements *trae.Entitlements) bool {
 }
 
 // traeExpiringSoonDays 「临期」窗口的天数（仅用于文案；判据在 pkg/trae）。
-const traeExpiringSoonDays = 14
+// 与 WorkBuddy 统一为 7 天（trae-workbuddy-switch 25f5982）。
+const traeExpiringSoonDays = 7
 
 // traeClient 解析账号凭据并构造带账号代理的 HTTP 客户端。
 func (s *TraeOpsService) traeClient(account *Account) (*trae.Credentials, *http.Client, error) {

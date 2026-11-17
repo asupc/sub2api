@@ -243,6 +243,248 @@ func ParseSoloEvent(event, data string) SoloEvent {
 	return parsed
 }
 
+// ---------------------------------------------------------------------------
+// 工具调用跨帧累加（移植 trae-workbuddy-switch ce0a2c4 / issue #172）
+// ---------------------------------------------------------------------------
+
+// toolCallSlot 一条上游工具调用在累加器里的槽位。
+type toolCallSlot struct {
+	id        string
+	name      string
+	arguments string
+	announced bool
+}
+
+// absorbedTool 一条上游调用在本帧**新增**的字段（已去重）。
+type absorbedTool struct {
+	slot      int
+	id        *string
+	name      string
+	arguments string
+}
+
+// toolCallAccumulator 按上游 index / id 定位槽位，再把每帧新增的片段下发。
+// SOLO 的 tool_calls 是逐帧增量：首帧给 id+name，后续帧只给 arguments；
+// 每帧独立转换会把一次调用拆成「有名无参」+「无名有参」两条残缺记录。
+type toolCallAccumulator struct {
+	slots      []*toolCallSlot
+	byUpstream map[int]int
+	byID       map[string]int
+	last       int
+	hasLast    bool
+}
+
+func newToolCallAccumulator() *toolCallAccumulator {
+	return &toolCallAccumulator{
+		byUpstream: map[int]int{},
+		byID:       map[string]int{},
+		last:       -1,
+	}
+}
+
+func (a *toolCallAccumulator) pushSlot() int {
+	a.slots = append(a.slots, &toolCallSlot{})
+	return len(a.slots) - 1
+}
+
+// slotOf 定位一条上游调用该落在哪个槽位。
+func (a *toolCallAccumulator) slotOf(call map[string]any) int {
+	if idx, ok := jsonInt(call["index"]); ok {
+		slot, seen := a.byUpstream[idx]
+		if !seen {
+			slot = a.pushSlot()
+			a.byUpstream[idx] = slot
+		}
+		a.last = slot
+		a.hasLast = true
+		return slot
+	}
+	id, _ := call["id"].(string)
+	if id != "" {
+		if slot, seen := a.byID[id]; seen {
+			a.last = slot
+			a.hasLast = true
+			return slot
+		}
+	} else if a.hasLast {
+		return a.last
+	}
+	slot := a.pushSlot()
+	a.last = slot
+	a.hasLast = true
+	return slot
+}
+
+// absorb 吸收一帧里的一条上游调用，返回本帧真正新增的字段。
+func (a *toolCallAccumulator) absorb(call map[string]any) absorbedTool {
+	slotIdx := a.slotOf(call)
+	slot := a.slots[slotIdx]
+	function, _ := call["function"].(map[string]any)
+	if function == nil {
+		function, _ = call["function_call"].(map[string]any)
+	}
+	out := absorbedTool{slot: slotIdx}
+
+	if id, _ := call["id"].(string); id != "" && slot.id == "" {
+		slot.id = id
+		a.byID[id] = slotIdx
+		out.id = &id
+	}
+
+	if function != nil {
+		if name, _ := function["name"].(string); name != "" {
+			known := slot.name
+			switch {
+			case strings.HasPrefix(name, known):
+				out.name = name[len(known):]
+				slot.name = name
+			case !strings.HasPrefix(known, name):
+				out.name = name
+				slot.name += name
+			}
+		}
+		if args := toolArgumentsText(function["arguments"]); args != "" && slot.arguments != args {
+			slot.arguments += args
+			out.arguments = args
+		}
+	}
+	return out
+}
+
+// absorbAll 非流式：吸收一帧全部调用（收尾时统一取 merged）。
+func (a *toolCallAccumulator) absorbAll(raw json.RawMessage) {
+	var calls []any
+	if json.Unmarshal(raw, &calls) != nil {
+		return
+	}
+	for _, item := range calls {
+		if call, ok := item.(map[string]any); ok {
+			a.absorb(call)
+		}
+	}
+}
+
+// hasCalls 是否真的产出过调用（空帧不算）。
+func (a *toolCallAccumulator) hasCalls() bool {
+	for _, slot := range a.slots {
+		if slot.id != "" || slot.name != "" || slot.arguments != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// streamingDeltas 把一帧上游 tool_calls 转成 OpenAI delta.tool_calls 分片。
+// 每个槽位只在首帧带 id/type，之后只带 function 的新增部分。
+func (a *toolCallAccumulator) streamingDeltas(raw json.RawMessage) []any {
+	var calls []any
+	if json.Unmarshal(raw, &calls) != nil {
+		return nil
+	}
+	entries := make([]any, 0, len(calls))
+	for _, item := range calls {
+		call, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		absorbed := a.absorb(call)
+		slot := a.slots[absorbed.slot]
+		hasPayload := absorbed.id != nil || absorbed.name != "" || absorbed.arguments != ""
+		if slot.announced && !hasPayload {
+			continue
+		}
+		entry := map[string]any{"index": absorbed.slot}
+		if !slot.announced {
+			slot.announced = true
+			entry["type"] = "function"
+			id := slot.id
+			if id == "" {
+				// Anthropic 的 tool_use 块没有 id 就无法回填结果。
+				id = fmt.Sprintf("call_%d", absorbed.slot)
+			}
+			entry["id"] = id
+		} else if absorbed.id != nil {
+			entry["id"] = *absorbed.id
+		}
+		function := map[string]any{}
+		if absorbed.name != "" {
+			function["name"] = absorbed.name
+		}
+		if absorbed.arguments != "" {
+			function["arguments"] = absorbed.arguments
+		}
+		if len(function) > 0 {
+			entry["function"] = function
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// merged 非流式：拼成完整的 message.tool_calls（每条都是完整调用，不带 index）。
+func (a *toolCallAccumulator) merged() []any {
+	out := make([]any, 0, len(a.slots))
+	for idx, slot := range a.slots {
+		if slot.id == "" && slot.name == "" && slot.arguments == "" {
+			continue
+		}
+		id := slot.id
+		if id == "" {
+			id = fmt.Sprintf("call_%d", idx)
+		}
+		out = append(out, map[string]any{
+			"id":   id,
+			"type": "function",
+			"function": map[string]any{
+				"name":      slot.name,
+				"arguments": slot.arguments,
+			},
+		})
+	}
+	return out
+}
+
+// promoteToolFinish 有工具调用时 finish_reason 必须是 tool_calls：上游 done
+// 固定报 stop，Anthropic 侧会映射成 end_turn，客户端据此丢弃工具结果。
+// length / content_filter 等其它原因不覆盖。
+func promoteToolFinish(finish string, hasCalls bool) string {
+	if hasCalls && (finish == "" || finish == "stop") {
+		return "tool_calls"
+	}
+	return finish
+}
+
+// jsonInt JSON 数字转 int（仅接受整数值）。
+func jsonInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case json.Number:
+		if n, err := v.Int64(); err == nil {
+			return int(n), true
+		}
+	}
+	return 0, false
+}
+
+// toolArgumentsText 参数统一成字符串再累加（上游偶尔直接给对象）。
+func toolArgumentsText(value any) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	default:
+		out, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(out)
+	}
+}
+
 // ConvertToolCalls 把 SOLO 的 tool_calls 转成 OpenAI 形态：
 // function_call → function，并去掉上游私有字段（namespace / partial_arguments
 // 是上游内部的流式增量，OpenAI 客户端不认识）。
@@ -366,6 +608,8 @@ func StreamConvert(reader io.Reader, chatID, model string, onChunk func(line str
 	parser := &SoloParser{}
 	outcome := StreamOutcome{}
 	var pendingUsage *TokenUsage
+	// issue #172：工具调用必须跨帧累加，按帧各自输出会被拆成残缺条目。
+	tools := newToolCallAccumulator()
 
 	emit := func(event SoloEvent) bool {
 		switch event.Event {
@@ -378,7 +622,7 @@ func StreamConvert(reader io.Reader, chatID, model string, onChunk func(line str
 				delta["reasoning_content"] = event.Reasoning
 			}
 			if len(event.ToolCalls) > 0 {
-				if converted := ConvertToolCalls(event.ToolCalls); len(converted) > 0 {
+				if converted := tools.streamingDeltas(event.ToolCalls); len(converted) > 0 {
 					delta["tool_calls"] = converted
 				}
 			}
@@ -397,6 +641,8 @@ func StreamConvert(reader io.Reader, chatID, model string, onChunk func(line str
 			if finish == "" {
 				finish = "stop"
 			}
+			// issue #172：上游固定报 stop，有工具调用时必须改口成 tool_calls。
+			finish = promoteToolFinish(finish, tools.hasCalls())
 			if onChunk(ChunkLine(chatID, model, map[string]any{}, finish, pendingUsage)) != nil {
 				return false
 			}
@@ -459,7 +705,8 @@ func Aggregate(reader io.Reader, chatID, model string) (map[string]any, *Upstrea
 	finishReason := "stop"
 	var usage TokenUsage
 	var upstreamErr *UpstreamError
-	var toolCalls []any
+	// issue #172：非流式同样跨帧累加后再输出完整调用。
+	tools := newToolCallAccumulator()
 
 	consume := func(event SoloEvent) {
 		switch event.Event {
@@ -467,7 +714,7 @@ func Aggregate(reader io.Reader, chatID, model string) (map[string]any, *Upstrea
 			content.WriteString(event.Response)
 			reasoning.WriteString(event.Reasoning)
 			if len(event.ToolCalls) > 0 {
-				toolCalls = append(toolCalls, ConvertToolCalls(event.ToolCalls)...)
+				tools.absorbAll(event.ToolCalls)
 			}
 		case "token_usage":
 			if event.Usage != nil {
@@ -508,6 +755,9 @@ func Aggregate(reader io.Reader, chatID, model string) (map[string]any, *Upstrea
 	if upstreamErr != nil {
 		return nil, upstreamErr, usage
 	}
+
+	toolCalls := tools.merged()
+	finishReason = promoteToolFinish(finishReason, len(toolCalls) > 0)
 
 	message := map[string]any{
 		"role":    "assistant",

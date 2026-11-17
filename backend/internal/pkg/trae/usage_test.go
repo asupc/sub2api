@@ -201,9 +201,8 @@ func TestBuildEntitlementsPurchasedToday(t *testing.T) {
 	}
 }
 
-// TestParseCreditPackagesExpiryFields 到期字段三态（过期 / 14 天内临期 / 正常）。
-// 临期窗口镜像 Trae 后端 EXPIRING_SOON_SECS = 14 天：10 天后到期的包必须
-// 标临期（旧 7 天口径会漏标，porter 同步 2026-11-04 对齐）。
+// TestParseCreditPackagesExpiryFields 到期字段（过期 / 7 天内临期 / 正常）。
+// 临期窗口与 WorkBuddy 统一为 7 天（trae-workbuddy-switch 25f5982）。
 func TestParseCreditPackagesExpiryFields(t *testing.T) {
 	now := time.Now().Unix()
 	packs := []any{
@@ -217,7 +216,11 @@ func TestParseCreditPackagesExpiryFields(t *testing.T) {
 		},
 		map[string]any{
 			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 10.0}},
-			"expire_time":           float64(now + 10*24*3600),
+			"expire_time":           float64(now + 5*24*3600),
+		},
+		map[string]any{
+			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 10.0}},
+			"expire_time":           float64(now + 8*24*3600),
 		},
 		map[string]any{
 			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 10.0}},
@@ -235,13 +238,16 @@ func TestParseCreditPackagesExpiryFields(t *testing.T) {
 		t.Errorf("临期包 = %+v", packages[1])
 	}
 	if packages[2].Expired || !packages[2].ExpiringSoon {
-		t.Errorf("10 天临期包 = %+v（14 天口径应命中）", packages[2])
+		t.Errorf("5 天临期包 = %+v（7 天口径应命中）", packages[2])
 	}
 	if packages[3].Expired || packages[3].ExpiringSoon {
-		t.Errorf("20 天包 = %+v（不应标临期）", packages[3])
+		t.Errorf("8 天包 = %+v（7 天口径不应命中）", packages[3])
 	}
 	if packages[4].Expired || packages[4].ExpiringSoon {
-		t.Errorf("无到期包 = %+v", packages[4])
+		t.Errorf("20 天包 = %+v（不应标临期）", packages[4])
+	}
+	if packages[5].Expired || packages[5].ExpiringSoon {
+		t.Errorf("无到期包 = %+v", packages[5])
 	}
 }
 
@@ -301,5 +307,31 @@ func TestClassifyError(t *testing.T) {
 	other := int64(2001)
 	if gotType, _ := ClassifyError(200, &other); gotType != "BusinessError" {
 		t.Errorf("非零业务码应为 BusinessError, got %s", gotType)
+	}
+}
+
+// TestBuildEntitlementsExcludesExpiredPacks 覆盖 trae-workbuddy-switch
+// 0f0bf61：已过期包的剩余额度不计入可用 Total，单独落 ExpiredRemaining。
+func TestBuildEntitlementsExcludesExpiredPacks(t *testing.T) {
+	now := time.Now()
+	nowTs := now.Unix()
+	packs := []any{
+		map[string]any{
+			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 100.0}},
+			"usage":                 map[string]any{"credits_amount": 20.0},
+			"expire_time":           float64(nowTs + 86400),
+		},
+		map[string]any{
+			"entitlement_base_info": map[string]any{"quota": map[string]any{"credits_limit": 60.0}},
+			"usage":                 map[string]any{"credits_amount": 20.0},
+			"expire_time":           float64(nowTs - 86400),
+		},
+	}
+	result := BuildEntitlements(packs, now)
+	if result.Total != 80 {
+		t.Errorf("Total = %v, want 80（只算未过期包）", result.Total)
+	}
+	if result.ExpiredRemaining != 40 {
+		t.Errorf("ExpiredRemaining = %v, want 40", result.ExpiredRemaining)
 	}
 }

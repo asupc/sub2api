@@ -281,14 +281,109 @@ func TestAggregateBuildsChatCompletion(t *testing.T) {
 	if call["function"].(map[string]any)["name"] != "read_file" {
 		t.Errorf("tool call = %v", call)
 	}
-	if choice["finish_reason"] != "stop" {
-		t.Errorf("finish_reason = %v", choice["finish_reason"])
+	if choice["finish_reason"] != "tool_calls" {
+		t.Errorf("finish_reason = %v，有工具调用时必须归一为 tool_calls", choice["finish_reason"])
 	}
 	if usage.Total != 7 {
 		t.Errorf("usage = %+v", usage)
 	}
 	if response["usage"].(map[string]any)["total_tokens"] != uint64(7) {
 		t.Error("聚合响应应带 usage")
+	}
+}
+
+// TestToolCallsAccumulateAcrossFrames 覆盖 issue #172：首帧 name、后续帧
+// arguments，聚合后必须只剩一条完整调用。
+func TestToolCallsAccumulateAcrossFrames(t *testing.T) {
+	tools := newToolCallAccumulator()
+	tools.absorbAll(json.RawMessage(`[{"id":"call_a","function_call":{"name":"get_weather"}}]`))
+	tools.absorbAll(json.RawMessage(`[{"function_call":{"arguments":"{\"city\":\"北京\"}"}}]`))
+	merged := tools.merged()
+	if len(merged) != 1 {
+		t.Fatalf("got %d 条，分帧调用应合并为一条", len(merged))
+	}
+	call := merged[0].(map[string]any)
+	if call["id"] != "call_a" {
+		t.Errorf("id = %v", call["id"])
+	}
+	fn := call["function"].(map[string]any)
+	if fn["name"] != "get_weather" || fn["arguments"] != `{"city":"北京"}` {
+		t.Errorf("function = %v", fn)
+	}
+}
+
+// TestToolCallsKeepParallelSlots 并行调用按上游 index 各归各位。
+func TestToolCallsKeepParallelSlots(t *testing.T) {
+	tools := newToolCallAccumulator()
+	tools.absorbAll(json.RawMessage(`[
+		{"index":0,"id":"a","function_call":{"name":"get_weather"}},
+		{"index":1,"id":"b","function_call":{"name":"get_time"}}
+	]`))
+	tools.absorbAll(json.RawMessage(`[{"index":1,"function_call":{"arguments":"{\"tz\":\"UTC\"}"}}]`))
+	tools.absorbAll(json.RawMessage(`[{"index":0,"function_call":{"arguments":"{\"city\":\"上海\"}"}}]`))
+	merged := tools.merged()
+	if len(merged) != 2 {
+		t.Fatalf("got %d 条", len(merged))
+	}
+	first := merged[0].(map[string]any)["function"].(map[string]any)
+	second := merged[1].(map[string]any)["function"].(map[string]any)
+	if first["arguments"] != `{"city":"上海"}` || second["arguments"] != `{"tz":"UTC"}` {
+		t.Errorf("parallel merge = %v / %v", first, second)
+	}
+}
+
+// TestToolCallsStreamingDeltasStableIndex 流式分片用稳定槽位号，id 只在首帧下发。
+func TestToolCallsStreamingDeltasStableIndex(t *testing.T) {
+	tools := newToolCallAccumulator()
+	first := tools.streamingDeltas(json.RawMessage(`[{"id":"call_a","function_call":{"name":"f"}}]`))
+	if len(first) != 1 {
+		t.Fatalf("first = %v", first)
+	}
+	entry := first[0].(map[string]any)
+	if entry["index"] != 0 || entry["id"] != "call_a" {
+		t.Errorf("first entry = %v", entry)
+	}
+	second := tools.streamingDeltas(json.RawMessage(`[{"function_call":{"arguments":"{}"}}]`))
+	if len(second) != 1 {
+		t.Fatalf("second = %v", second)
+	}
+	if _, hasID := second[0].(map[string]any)["id"]; hasID {
+		t.Error("id 只应在首帧下发")
+	}
+	if second[0].(map[string]any)["index"] != 0 {
+		t.Error("续写必须落在同一个槽位")
+	}
+}
+
+// TestToolCallsMissingIDGetsStablePlaceholder 缺 id 时补 call_N。
+func TestToolCallsMissingIDGetsStablePlaceholder(t *testing.T) {
+	tools := newToolCallAccumulator()
+	delta := tools.streamingDeltas(json.RawMessage(`[{"function_call":{"name":"f","arguments":"{}"}}]`))
+	if delta[0].(map[string]any)["id"] != "call_0" {
+		t.Errorf("delta = %v", delta)
+	}
+	if tools.merged()[0].(map[string]any)["id"] != "call_0" {
+		t.Errorf("merged = %v", tools.merged())
+	}
+}
+
+// TestPromoteToolFinish 有工具调用时 stop/空 -> tool_calls，其它原因不覆盖。
+func TestPromoteToolFinish(t *testing.T) {
+	cases := []struct {
+		finish   string
+		hasCalls bool
+		want     string
+	}{
+		{"stop", true, "tool_calls"},
+		{"", true, "tool_calls"},
+		{"stop", false, "stop"},
+		{"length", true, "length"},
+		{"content_filter", true, "content_filter"},
+	}
+	for _, tc := range cases {
+		if got := promoteToolFinish(tc.finish, tc.hasCalls); got != tc.want {
+			t.Errorf("promoteToolFinish(%q,%v) = %q want %q", tc.finish, tc.hasCalls, got, tc.want)
+		}
 	}
 }
 

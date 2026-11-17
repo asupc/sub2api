@@ -169,19 +169,21 @@ type CreditPackage struct {
 	ExpireAt int64 `json:"expire_at"`
 	// Expired 是否已过期（expire_at 存在且 < now）。
 	Expired bool `json:"expired"`
-	// ExpiringSoon 是否 14 天内到期（未过期且 expire_at - now <= 14 天）。
+	// ExpiringSoon 是否 7 天内到期（未过期且 expire_at - now <= 7 天）。
 	ExpiringSoon bool `json:"expiring_soon"`
 }
 
-// expiringSoonWindow 「14 天内到期」的判定窗口（秒）。镜像 Trae 后端
-// EXPIRING_SOON_SECS 口径（trae-workbuddy-switch #144 复核确认为 14 天，
-// 2026-11-04 对齐；旧值 7 天会把 10~14 天内到期的包漏标临期）。
-const expiringSoonWindow int64 = 14 * 24 * 3600
+// expiringSoonWindow 「7 天内到期」的判定窗口（秒）。trae-workbuddy-switch
+// 25f5982（2026-11-09）把 Trae 从 14 天统一为 7 天，与 WorkBuddy 同口径：
+// 同一批积分在三平台分区不能一个标黄一个不标。
+const expiringSoonWindow int64 = 7 * 24 * 3600
 
 // Entitlements 剩余积分查询结果。
 type Entitlements struct {
-	// Total 剩余积分合计（各包 max(limit-used, 0) 之和）。
+	// Total 可用剩余积分合计（仅未过期包，max(limit-used, 0) 之和）。
 	Total float64 `json:"total"`
+	// ExpiredRemaining 已过期包中未用完的额度（单独报告，不计入 Total）。
+	ExpiredRemaining float64 `json:"expired_remaining,omitempty"`
 	// PurchasedToday 今日新购入额度（北京时间口径切日）。
 	PurchasedToday float64 `json:"purchased_today"`
 	// EarliestExpire 最早到期的**有剩余**包的到期时刻（Unix 秒；HasExpire=false 表示无）。
@@ -230,7 +232,14 @@ func BuildEntitlements(packs []any, now time.Time) *Entitlements {
 			continue
 		}
 		used := packCreditsUsed(object)
-		result.Total += math.Max(limit.value-used, 0)
+		remaining := math.Max(limit.value-used, 0)
+		// 已过期包的额度不能再用：只计入 ExpiredRemaining，不虚增可用余额
+		// （trae-workbuddy-switch 0f0bf61）。
+		if expire, ok := object["expire_time"].(float64); ok && int64(expire) > 0 && int64(expire) < nowTs {
+			result.ExpiredRemaining += remaining
+			continue
+		}
+		result.Total += remaining
 
 		base, _ := object["entitlement_base_info"].(map[string]any)
 		chargeAmount, _ := base["charge_amount"].(float64)
@@ -241,6 +250,7 @@ func BuildEntitlements(packs []any, now time.Time) *Entitlements {
 		}
 	}
 	result.Total = round2(result.Total)
+	result.ExpiredRemaining = round2(result.ExpiredRemaining)
 	result.PurchasedToday = round2(result.PurchasedToday)
 	if expire, ok := EarliestLiveExpire(packs, nowTs); ok {
 		result.EarliestExpire = expire
