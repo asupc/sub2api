@@ -138,7 +138,7 @@ func TestChatStreamContext(t *testing.T) {
 	if gotPath != chatCompletionsPath {
 		t.Errorf("path=%s want %s", gotPath, chatCompletionsPath)
 	}
-	if gotUA != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
+	if gotUA != "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0" {
 		t.Errorf("UA=%q", gotUA)
 	}
 	if gotAuth != "Bearer at" {

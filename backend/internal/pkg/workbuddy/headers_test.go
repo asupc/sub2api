@@ -18,10 +18,10 @@ func globalCred() Credentials {
 
 // TestDefaultWorkBuddyUA UA 三段式两态（CN / global 平台段切换）。
 func TestDefaultWorkBuddyUA(t *testing.T) {
-	if got, want := defaultWorkBuddyUA(cnCred()), "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"; got != want {
+	if got, want := defaultWorkBuddyUA(cnCred()), "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0"; got != want {
 		t.Errorf("CN UA=%q want %q", got, want)
 	}
-	if got, want := defaultWorkBuddyUA(globalCred()), "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"; got != want {
+	if got, want := defaultWorkBuddyUA(globalCred()), "WorkBuddy/5.9.4 workbuddy-ai/5.9.4 CLI/2.165.0"; got != want {
 		t.Errorf("global UA=%q want %q", got, want)
 	}
 	// 凭据版本覆盖。
@@ -39,7 +39,7 @@ func TestDefaultWorkBuddyUA(t *testing.T) {
 
 // TestBillingUA billing 域单段 UA。
 func TestBillingUA(t *testing.T) {
-	if got, want := billingUA(cnCred()), "WorkBuddy/5.8.3"; got != want {
+	if got, want := billingUA(cnCred()), "WorkBuddy/5.11.3"; got != want {
 		t.Errorf("billingUA=%q want %q", got, want)
 	}
 }
@@ -138,7 +138,7 @@ func TestChatHeaders(t *testing.T) {
 		"X-CodeBuddy-Request": "1",
 		"X-Agent-Purpose":     "conversation",
 		"X-IDE-Name":          "WorkBuddy",
-		"X-IDE-Version":       "5.8.3",
+		"X-IDE-Version":       "5.11.3",
 		"X-Machine-ID":        deriveAccountStableID("uid-1", "machine"),
 		"X-Session-ID":        deriveAccountStableID("uid-1", "session"),
 		"Accept-Language":     "zh-CN",
@@ -180,7 +180,7 @@ func TestBillingAndRefreshHeaders(t *testing.T) {
 		"X-Enterprise-Id":     "ent-1",
 		"X-Tenant-Id":         "ent-1",
 		"X-Domain":            "copilot.tencent.com",
-		"User-Agent":          "WorkBuddy/5.8.3",
+		"User-Agent":          "WorkBuddy/5.11.3",
 		"X-CodeBuddy-Request": "1",
 	} {
 		if got := req.Header.Get(k); got != v {
@@ -198,7 +198,7 @@ func TestBillingAndRefreshHeaders(t *testing.T) {
 	if req2.Header.Get("X-Auth-Refresh-Source") != "plugin" {
 		t.Error("X-Auth-Refresh-Source 应为 plugin")
 	}
-	if req2.Header.Get("User-Agent") != "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0" {
+	if req2.Header.Get("User-Agent") != "WorkBuddy/5.11.3 WorkBuddy/5.11.3 CLI/2.176.0" {
 		t.Errorf("refresh 应走三段式 UA，got %q", req2.Header.Get("User-Agent"))
 	}
 }

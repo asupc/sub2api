@@ -20,13 +20,15 @@ import (
 // 版本常量（出站 UA 与 X-IDE-Version 用）。
 const (
 	// defaultClientVersionCN / defaultClientVersionGlobal 出站 WorkBuddy 桌面端
-	// 版本段，按 realm 切换（hub wb_identity.py _VERSION_DEFAULTS，2026-10-18 两区
-	// 桌面端实跑/抓包核对值）。Credentials.ClientVersion 可覆盖（空 = 内置默认）。
-	defaultClientVersionCN     = "5.8.3"
-	defaultClientVersionGlobal = "5.8.4"
-	// defaultCliVersion 出站 UA 中 `CLI/<ver>` 段版本 = 客户端内置 CLI 版本
-	//（hub desktop_cli）。Credentials.CLIVersion 可覆盖（空 = 内置默认）。
-	defaultCliVersion = "2.161.0"
+	// 版本段，按 realm 切换（panel 2fa6876：2026-11-16 按 5.11.3 分发包复核，
+	// CN 5.11.3 / global 5.9.4）。Credentials.ClientVersion 可覆盖。
+	defaultClientVersionCN     = "5.11.3"
+	defaultClientVersionGlobal = "5.9.4"
+	// defaultCliVersionCN / defaultCliVersionGlobal 出站 UA 中 `CLI/<ver>` 段 =
+	// 各分发包内置 @genie/agent-cli，随包走（CN 5.11.3 带 2.176.0；国际分包
+	// 最新仍 5.9.4 带 2.165.0）。Credentials.CLIVersion 可覆盖。
+	defaultCliVersionCN     = "2.176.0"
+	defaultCliVersionGlobal = "2.165.0"
 	// defaultSDKVersion / defaultNodeVersion 桌面 chat 兼容档（WB_DESKTOP_CHAT_COMPAT）
 	// 的 x-stainless-* SDK 指纹版本（hub sdk / node，OpenAI Node SDK 6.25.0 默认值）。
 	defaultSDKVersion  = "6.25.0"
@@ -69,20 +71,24 @@ func clientVersion(c Credentials) string {
 	return defaultClientVersionCN
 }
 
-// cliVersion 生效的 CLI 版本：Credentials.CLIVersion 非空则取之。
+// cliVersion 生效的 CLI 版本：Credentials.CLIVersion 非空则取之，否则按
+// realm 取内置默认（两个分发包的 CLI 档不同）。
 func cliVersion(c Credentials) string {
 	if c.CLIVersion != "" {
 		return c.CLIVersion
 	}
-	return defaultCliVersion
+	if c.IsGlobal() {
+		return defaultCliVersionGlobal
+	}
+	return defaultCliVersionCN
 }
 
 // defaultWorkBuddyUA 组装默认客户端出站 UA（官方桌面端 buildUserAgent 形状）：
 // `WorkBuddy/<clientVersion> <platform>/<clientVersion> CLI/<cliVersion>`。
 // 平台段（第二段）按 realm 切换——CN 用 applicationName 同值 `WorkBuddy`，
 // global 用官方国际版 applicationName `workbuddy-ai`（hub wb_identity.py
-// desktop_ua，5.8.4 国际版桌面客户端抓包：`WorkBuddy/5.8.4 workbuddy-ai/5.8.4
-// CLI/2.161.0`）。
+// desktop_ua，5.9.4 国际版桌面客户端：`WorkBuddy/5.9.4 workbuddy-ai/5.9.4
+// CLI/2.165.0`）。
 //
 // 风控注意：平台段送错可能触发上游 403 code 11140 "request illegal" 风控。
 // 官方无任何 UA 随机化，故默认确定性。

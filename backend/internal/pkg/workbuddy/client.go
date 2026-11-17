@@ -155,35 +155,46 @@ func truncate(s string, n int) string {
 // body 读失败（连接中断/截断）返回普通错误（非 *Error）——半截 body 不进
 // ClassifyError，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
 func (c *Client) doJSON(ctx context.Context, req *http.Request) (json.RawMessage, error) {
-	resp, err := c.httpc().Do(req.WithContext(ctx))
+	env, _, err := c.doJSONRaw(ctx, req)
 	if err != nil {
 		return nil, err
+	}
+	return env.Data, nil
+}
+
+// doJSONRaw 与 doJSON 同语义，但额外返回完整信封（签到回执需要区分
+// code=0 的成功/失败/已签到文案）。
+func (c *Client) doJSONRaw(ctx context.Context, req *http.Request) (apiEnvelope, json.RawMessage, error) {
+	var zero apiEnvelope
+	resp, err := c.httpc().Do(req.WithContext(ctx))
+	if err != nil {
+		return zero, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+		return zero, nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
 		kind := classifyString(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RawBody: truncate(string(raw), 512)}
+		return zero, raw, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), RawBody: truncate(string(raw), 512)}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
+		return zero, raw, fmt.Errorf("parse failed: %w (body: %s)", err, truncate(string(raw), 120))
 	}
 	if env.Code != 0 {
 		kind := classifyString(resp.StatusCode, env.Msg)
 		if kind == KindNone {
 			kind = KindClient
 		}
-		return nil, &Error{
+		return env, raw, &Error{
 			Kind: kind, Status: resp.StatusCode,
 			Msg:     fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160)),
 			RawBody: truncate(string(raw), 512),
 		}
 	}
-	return env.Data, nil
+	return env, raw, nil
 }
 
 // RefreshToken 刷新 access token。成功返回更新后的凭证副本（缺省字段保留旧值），

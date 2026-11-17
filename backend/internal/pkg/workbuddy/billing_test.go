@@ -287,3 +287,18 @@ func TestDailyCheckinTransientRetry(t *testing.T) {
 		t.Errorf("calls=%d want 2", calls)
 	}
 }
+
+// TestCheckinReceiptError 覆盖 panel 03a50ce：code=0 的失败回执返回错误，
+// 已签到返回可识别的错误，真正成功返回 nil。
+func TestCheckinReceiptError(t *testing.T) {
+	if err := checkinReceiptError(apiEnvelope{Msg: "签到失败，已签到天数不足 7 天"}, nil); err == nil {
+		t.Fatal("failure receipt must return an error")
+	}
+	err := checkinReceiptError(apiEnvelope{Msg: "今天已签到"}, nil)
+	if err == nil || !IsAlreadyCheckin(err) {
+		t.Fatalf("already receipt must be classifiable: %v", err)
+	}
+	if err := checkinReceiptError(apiEnvelope{}, []byte(`{"credit":100,"streak_days":3}`)); err != nil {
+		t.Fatalf("success receipt must be nil, got %v", err)
+	}
+}

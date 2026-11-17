@@ -158,9 +158,104 @@ func CleanupOrphanToolCalls(messages []any) ([]any, bool) {
 	return kept, true
 }
 
-// 修复链入口：按 hub 顺序调用合并/归批/清理，返回是否发生任何改动。
+// reorderEarlyToolResults 把「早于其 tool_call」出现的 role:tool 结果移到对应
+// assistant(tool_calls) 之后（panel 27b7458 / 11148）。OpenAI 兼容协议按位置
+// 配对：tool 结果必须在声明它的 assistant 之后。Codex 经 cc-switch 类代理转发
+// /v1/responses 时，input 里 function_call_output 可能排在 function_call 之前，
+// 上游判 11148 tool_call_sequence_broken 顶死整条会话。
+//
+// 只调顺序、不改内容；同批结果保持原相对顺序。同名 id 被多条 assistant 声明时
+// 跟最后一次声明走；找不到声明者的孤儿结果不动（交给 CleanupOrphanToolCalls）。
+func reorderEarlyToolResults(messages []any) ([]any, bool) {
+	if len(messages) < 2 {
+		return messages, false
+	}
+	declAt := map[string]int{}
+	for i, raw := range messages {
+		m, ok := raw.(map[string]any)
+		if !ok || m["role"] != "assistant" {
+			continue
+		}
+		tcs, ok := m["tool_calls"].([]any)
+		if !ok {
+			continue
+		}
+		for _, tci := range tcs {
+			tc, ok := tci.(map[string]any)
+			if !ok {
+				continue
+			}
+			if id, _ := tc["id"].(string); id != "" {
+				declAt[id] = i
+			}
+		}
+	}
+	if len(declAt) == 0 {
+		return messages, false
+	}
+	early := make([]bool, len(messages))
+	anyEarly := false
+	for i, raw := range messages {
+		m, ok := raw.(map[string]any)
+		if !ok || m["role"] != "tool" {
+			continue
+		}
+		id, _ := m["tool_call_id"].(string)
+		if j, ok := declAt[id]; ok && j > i {
+			early[i] = true
+			anyEarly = true
+		}
+	}
+	if !anyEarly {
+		return messages, false
+	}
+	group := map[int][]any{}
+	for i, raw := range messages {
+		if !early[i] {
+			continue
+		}
+		m, _ := raw.(map[string]any)
+		id, _ := m["tool_call_id"].(string)
+		group[declAt[id]] = append(group[declAt[id]], raw)
+	}
+
+	out := make([]any, 0, len(messages))
+	var pending []any
+	flush := func() {
+		if len(pending) == 0 {
+			return
+		}
+		out = append(out, pending...)
+		pending = nil
+	}
+	for i, raw := range messages {
+		if early[i] {
+			continue
+		}
+		role := ""
+		if m, ok := raw.(map[string]any); ok {
+			role, _ = m["role"].(string)
+		}
+		if len(pending) > 0 && role != "tool" {
+			flush()
+		}
+		out = append(out, raw)
+		if g, ok := group[i]; ok {
+			pending = g
+		}
+	}
+	flush()
+	return out, true
+}
+
+// 修复链入口：按 panel 顺序调用重排/合并/归批/清理，返回是否发生任何改动。
+// reorderEarly 必须排最前：倒置未修时 repack 会把早到的 tool 当普通消息直通，
+// cleanup 又判配对完整，倒置会一路带上去。
 func RepairToolPairing(messages []any) ([]any, bool) {
 	changedAny := false
+	if out, ch := reorderEarlyToolResults(messages); ch {
+		messages, changedAny = out, true
+	}
 	if out, ch := MergeAdjacentToolCalls(messages); ch {
 		messages, changedAny = out, true
 	}

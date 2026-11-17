@@ -190,6 +190,32 @@ var promptTooLongMarkers = []string{
 // 实测 code=10001/14001）。只对 *Error.Msg 做包含匹配（见 IsAlreadyCheckin）。
 var alreadyCheckinMarkers = []string{"已签到", "already"}
 
+// checkinFailureMarkers 「这次没签成」的硬词（panel 03a50ce）：10001 也承载
+// 「企业账号不支持」等失败，且失败文案可能同时含「已签到」（如「签到失败，
+// 已签到天数不足 7 天」）。失败硬词必须压过 already。
+var checkinFailureMarkers = []string{"失败", "fail", "not started", "未开启", "不支持"}
+
+// isAlreadyCheckinMsg 文案是否表示「今天已签到」：含已签到词且不含失败硬词。
+func isAlreadyCheckinMsg(msg string) bool {
+	lower := strings.ToLower(msg)
+	hasAlready := false
+	for _, m := range alreadyCheckinMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			hasAlready = true
+			break
+		}
+	}
+	if !hasAlready {
+		return false
+	}
+	for _, m := range checkinFailureMarkers {
+		if strings.Contains(lower, strings.ToLower(m)) {
+			return false
+		}
+	}
+	return true
+}
+
 // modelRateLimitCode 明确指向「模型级 429 限流」的业务 code（6004）：
 // 「该模型的使用量超限」而非账号整体被限——账号健康，只是这个模型此刻被限。
 const modelRateLimitCode = "6004"
@@ -629,10 +655,5 @@ func IsAlreadyCheckin(err error) bool {
 	if !errors.As(err, &ue) {
 		return false
 	}
-	for _, m := range alreadyCheckinMarkers {
-		if strings.Contains(ue.Msg, m) || strings.Contains(strings.ToLower(ue.Msg), strings.ToLower(m)) {
-			return true
-		}
-	}
-	return false
+	return isAlreadyCheckinMsg(ue.Msg)
 }

@@ -7,9 +7,11 @@ package workbuddy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -399,7 +401,62 @@ func (c *Client) CreditPackages(ctx context.Context, cred Credentials) ([]Credit
 // 「已签到」等业务错误不重试。
 func (c *Client) DailyCheckin(ctx context.Context, cred Credentials) error {
 	return c.retryBillingTransient(ctx, func() error {
-		_, err := c.billingMeterJSON(ctx, cred, checkinMeterPaths(cred), http.MethodPost, map[string]any{})
-		return err
+		env, raw, err := c.billingMeterRaw(ctx, cred, checkinMeterPaths(cred), http.MethodPost, map[string]any{})
+		if err != nil {
+			return err
+		}
+		return checkinReceiptError(env, raw)
 	})
+}
+
+// billingMeterRaw 同 billingMeterJSON，但返回完整信封与原始 body（签到回执
+// 需要区分 code=0 的成功 / 失败 / 已签到文案）。
+func (c *Client) billingMeterRaw(ctx context.Context, cred Credentials, paths []string, method string, body any) (apiEnvelope, json.RawMessage, error) {
+	var lastErr error
+	for i, path := range paths {
+		req, err := c.newJSONRequest(ctx, method, c.billingBase(cred)+path, body)
+		if err != nil {
+			return apiEnvelope{}, nil, err
+		}
+		BillingHeaders(req, cred)
+		env, raw, err := c.doJSONRaw(ctx, req)
+		if err == nil {
+			return env, raw, nil
+		}
+		lastErr = err
+		var ue *Error
+		if !errors.As(err, &ue) || ue.Kind != KindNotFound || i == len(paths)-1 {
+			return apiEnvelope{}, raw, err
+		}
+	}
+	return apiEnvelope{}, nil, lastErr
+}
+
+// checkinReceiptError 把 code=0 的签到回执按文案归类（panel 03a50ce）：
+//   - 失败硬词（含「签到失败，已签到天数不足 7 天」）→ 返回错误，别再当成功；
+//   - 已签到（且无失败硬词）→ 返回带「已签到」文案的错误，供 IsAlreadyCheckin 识别；
+//   - 其它 → nil（真的签上了）。
+func checkinReceiptError(env apiEnvelope, raw []byte) error {
+	msg := strings.TrimSpace(env.Msg)
+	if msg == "" && len(raw) > 0 {
+		var flat struct {
+			Msg string `json:"msg"`
+		}
+		if json.Unmarshal(raw, &flat) == nil {
+			msg = strings.TrimSpace(flat.Msg)
+		}
+	}
+	if msg == "" {
+		return nil
+	}
+	lower := strings.ToLower(msg)
+	for _, marker := range checkinFailureMarkers {
+		if strings.Contains(lower, strings.ToLower(marker)) {
+			return &Error{Kind: KindClient, Status: http.StatusOK, Msg: msg}
+		}
+	}
+	if isAlreadyCheckinMsg(msg) {
+		return &Error{Kind: KindClient, Status: http.StatusOK, Msg: msg}
+	}
+	return nil
 }

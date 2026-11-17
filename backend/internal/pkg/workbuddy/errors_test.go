@@ -255,3 +255,20 @@ func TestModelBlockReasonFor(t *testing.T) {
 		}
 	}
 }
+
+// TestIsAlreadyCheckinRejectsFailureMarkers 覆盖 panel 03a50ce：10001 也承载
+// 失败（企业账号不支持），失败硬词必须压过 alread。
+func TestIsAlreadyCheckinRejectsFailureMarkers(t *testing.T) {
+	failure := &Error{Kind: KindClient, Status: 200, Msg: `code=10001 msg=签到失败，已签到天数不足 7 天`}
+	if IsAlreadyCheckin(failure) {
+		t.Fatal("failure marker must override already")
+	}
+	unsupported := &Error{Kind: KindClient, Status: 200, Msg: `code=10001 msg=企业账号不支持该操作`}
+	if IsAlreadyCheckin(unsupported) {
+		t.Fatal("unsupported must not be already")
+	}
+	ok := &Error{Kind: KindClient, Status: 400, Msg: `code=10001 msg=今天已签到`}
+	if !IsAlreadyCheckin(ok) {
+		t.Fatal("plain already must still match")
+	}
+}

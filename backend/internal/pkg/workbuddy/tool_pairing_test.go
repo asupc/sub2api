@@ -226,3 +226,51 @@ func TestPrepareChatBodyCleansOrphanToolCalls(t *testing.T) {
 		t.Error("空 name 的 tool_calls 应被删除")
 	}
 }
+
+// TestReorderEarlyToolResults 覆盖 panel 27b7458：结果早于调用时移到所属
+// assistant 之后；顺序本就正确的请求零改动。
+func TestReorderEarlyToolResults(t *testing.T) {
+	messages := wbMsgs(t, `[
+		{"role":"system","content":"s"},
+		{"role":"user","content":"u"},
+		{"role":"tool","tool_call_id":"c0","content":"result"},
+		{"role":"assistant","content":"","tool_calls":[{"id":"c0","type":"function","function":{"name":"f","arguments":"{}"}}]},
+		{"role":"user","content":"next"}
+	]`)
+	out, changed := reorderEarlyToolResults(messages)
+	if !changed {
+		t.Fatal("early tool result must be reordered")
+	}
+	roles := make([]string, 0, len(out))
+	for _, raw := range out {
+		m := raw.(map[string]any)
+		roles = append(roles, m["role"].(string))
+	}
+	want := "system,user,assistant,tool,user"
+	if strings.Join(roles, ",") != want {
+		t.Fatalf("roles = %v want %s", roles, want)
+	}
+
+	ordered := wbMsgs(t, `[
+		{"role":"assistant","content":"","tool_calls":[{"id":"c0","type":"function","function":{"name":"f","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"c0","content":"result"}
+	]`)
+	if _, changed := reorderEarlyToolResults(ordered); changed {
+		t.Fatal("already ordered messages must be unchanged")
+	}
+}
+
+// TestRepairToolPairingReordersBeforeRepack 管线顺序：倒置必须在 repack 前修好。
+func TestRepairToolPairingReordersBeforeRepack(t *testing.T) {
+	messages := wbMsgs(t, `[
+		{"role":"tool","tool_call_id":"c0","content":"result"},
+		{"role":"assistant","content":"","tool_calls":[{"id":"c0","type":"function","function":{"name":"f","arguments":"{}"}}]}
+	]`)
+	out, changed := RepairToolPairing(messages)
+	if !changed {
+		t.Fatal("pairing must change")
+	}
+	if role := out[0].(map[string]any)["role"]; role != "assistant" {
+		t.Fatalf("first role = %v, want assistant", role)
+	}
+}

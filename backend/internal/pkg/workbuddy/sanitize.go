@@ -160,6 +160,71 @@ var sanitizeCodexIntroRe = regexp.MustCompile(`(?i)You are a coding agent runnin
 // sanitizeClaudeCodeIntroReplacement 同值但独立维护，对齐 hub 双常量形态）。
 const sanitizeCodexIntroReplacement = "You are a helpful AI assistant."
 
+// ---------------------------------------------------------------------------
+// 上游注入身份指令（issue #187 / panel 767056c）：只清洗**回流载体**
+// （assistant 正文与 reasoning_content / reasoning），system/user 里同形句
+// 是用户自己写的人设，不能改写。
+// ---------------------------------------------------------------------------
+
+const (
+	injectedIdentityProbe = "identify yourself as"
+	modelIdentityTagProbe = "model_identity"
+)
+
+// sanitizeInjectedIdentityRe 匹配上游注入的「身份指令」整句。句尾用
+// 「后面不接字母数字的句号」并用捕获组接回分隔符（RE2 无零宽断言）。
+var sanitizeInjectedIdentityRe = regexp.MustCompile(
+	`(?i)when asked about your[^.\n]{0,60}?identity[^.\n]{0,60}?,\s*identify yourself as\s+[^\n]{1,80}?\.(\W|$)`)
+
+// sanitizeInjectedIdentityReplacement 中性替换句；保留捕获到的分隔符。
+const sanitizeInjectedIdentityReplacement = "When asked about your capabilities, answer using only the information available in this conversation.${1}"
+
+// sanitizeModelIdentityTagRe 去掉 <model_identity> 包裹标签（保留内部文本）。
+var sanitizeModelIdentityTagRe = regexp.MustCompile(`(?i)</?model_identity>`)
+
+// scrubInjectedIdentity 清洗回流载体里的注入身份指令与标签；不 TrimSpace。
+func scrubInjectedIdentity(text string) string {
+	if text == "" {
+		return text
+	}
+	lower := strings.ToLower(text)
+	if strings.Contains(lower, injectedIdentityProbe) {
+		text = sanitizeInjectedIdentityRe.ReplaceAllString(text, sanitizeInjectedIdentityReplacement)
+	}
+	if strings.Contains(lower, modelIdentityTagProbe) {
+		text = sanitizeModelIdentityTagRe.ReplaceAllString(text, "")
+	}
+	return text
+}
+
+// scrubInjectedIdentityContent 对字符串 content 或多模态数组的 text part
+// 应用 scrubInjectedIdentity。
+func scrubInjectedIdentityContent(v any) (any, bool) {
+	switch c := v.(type) {
+	case string:
+		s := scrubInjectedIdentity(c)
+		return s, s != c
+	case []any:
+		changed := false
+		for _, part := range c {
+			m, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			text, ok := m["text"].(string)
+			if !ok {
+				continue
+			}
+			if s := scrubInjectedIdentity(text); s != text {
+				m["text"] = s
+				changed = true
+			}
+		}
+		return c, changed
+	}
+	return v, false
+}
+
 // sanitizeText 单段文本净化。identity=true 时应用身份句族（通用身份句正则 /
 // DSH GUI 段 / DSH 文件引用段——仅 system/developer/assistant 角色传 true）；
 // 固定句改写 / 11-128 / header 剥离 / OmO 对全角色生效。预检不中 → 返回原串。
@@ -342,11 +407,20 @@ func sanitizeMessages(messages []any) bool {
 				m["content"] = nc
 				changed = true
 			}
+			// panel 767056c：注入身份指令只清洗回流载体（assistant 正文）。
+			if role == "assistant" {
+				if nc, ch := scrubInjectedIdentityContent(m["content"]); ch {
+					m["content"] = nc
+					changed = true
+				}
+			}
 		}
 		// reasoning_content（思维链回填字段）实测同样携带指纹，与 content 同等净化
-		// （identity=false：思维链是模型自己的输出数据，hub 同款）。
+		// （identity=false：思维链是模型自己的输出数据，hub 同款）。注入身份指令
+		// 属于回流载体，额外清洗（panel 767056c）。
 		if rc, ok := m["reasoning_content"].(string); ok {
-			if s := sanitizeText(rc, false); s != rc {
+			s := scrubInjectedIdentity(sanitizeText(rc, false))
+			if s != rc {
 				m["reasoning_content"] = s
 				changed = true
 			}
@@ -355,7 +429,7 @@ func sanitizeMessages(messages []any) bool {
 		// reasoning_content 镜像进 reasoning（反之亦然），镜像进的指纹
 		// （裸 "11-128" 这种反探测串）同样致命。
 		if r, ok := m["reasoning"].(string); ok {
-			if s := sanitizeText(r, false); s != r {
+			if s := scrubInjectedIdentity(sanitizeText(r, false)); s != r {
 				m["reasoning"] = s
 				changed = true
 			}
