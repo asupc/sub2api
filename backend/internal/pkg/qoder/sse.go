@@ -1093,9 +1093,150 @@ type finishedFrame struct {
 	fin     any
 }
 
+// ---------------------------------------------------------------------------
+// tool_call index 归一化（移植 qoder2api-hub fa44d07 / issue #157）
+// ---------------------------------------------------------------------------
+
+// toolIndexSlot 一条上游工具调用在归一化后的稳定槽位。
+type toolIndexSlot struct {
+	index int
+	id    string
+}
+
+// toolIndexState 单个 choice 的归一化状态：id 索引、上游 index 的当前映射、
+// 已占用的稳定槽位号。
+type toolIndexState struct {
+	ids    map[string]*toolIndexSlot
+	active map[int]*toolIndexSlot
+	slots  map[int]*toolIndexSlot
+}
+
+func newToolIndexState() *toolIndexState {
+	return &toolIndexState{
+		ids:    map[string]*toolIndexSlot{},
+		active: map[int]*toolIndexSlot{},
+		slots:  map[int]*toolIndexSlot{},
+	}
+}
+
+// toolIndexNormalizer 修正上游复用 index 的 tool_calls：Qoder 并行调用可能
+// 全部报 index=0（或缺失 index），若继续按 index 归位，无名/截断守卫和非流式
+// 聚合会把不同调用串成一条。这里先用上游 id 认领已有槽位，再为无主的初始
+// index 分配稳定槽位号；下游仍按 index 拼接，但 index 已唯一。
+type toolIndexNormalizer struct {
+	src    FrameIter
+	states map[int]*toolIndexState
+}
+
+// NormalizeToolCallIndices 包装一个帧迭代器，把 tool_calls[].index 归一化为
+// 每个 choice 内唯一且稳定的槽位号。
+func NormalizeToolCallIndices(src FrameIter) FrameIter {
+	return &toolIndexNormalizer{src: src, states: map[int]*toolIndexState{}}
+}
+
+func (n *toolIndexNormalizer) Next() ([]byte, error) {
+	frame, err := n.src.Next()
+	if err != nil {
+		return nil, err
+	}
+	return n.rewrite(frame), nil
+}
+
+func (n *toolIndexNormalizer) rewrite(frame []byte) []byte {
+	data := StripDataPrefix(string(frame))
+	if data == "" || data == "[DONE]" {
+		return frame
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(data), &payload) != nil {
+		return frame
+	}
+	choices, _ := payload["choices"].([]any)
+	if len(choices) == 0 {
+		return frame
+	}
+	changed := false
+	for choicePos, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			continue
+		}
+		calls, _ := delta["tool_calls"].([]any)
+		if len(calls) == 0 {
+			continue
+		}
+		choiceIdx := choicePos
+		if v, ok := choice["index"].(float64); ok {
+			choiceIdx = int(v)
+		}
+		state := n.states[choiceIdx]
+		if state == nil {
+			state = newToolIndexState()
+			n.states[choiceIdx] = state
+		}
+		for callPos, rawCall := range calls {
+			call, ok := rawCall.(map[string]any)
+			if !ok {
+				continue
+			}
+			wireIdx := callPos
+			if v, ok := call["index"].(float64); ok {
+				wireIdx = int(v)
+			}
+			callID, _ := call["id"].(string)
+			callID = strings.TrimSpace(callID)
+
+			var slot *toolIndexSlot
+			if callID != "" {
+				slot = state.ids[callID]
+			}
+			if slot == nil {
+				slot = state.active[wireIdx]
+				if slot != nil && callID != "" && slot.id != "" && slot.id != callID {
+					slot = nil
+				}
+			}
+			if slot == nil {
+				normalized := wireIdx
+				if _, exists := state.slots[normalized]; exists {
+					maxIdx := -1
+					for idx := range state.slots {
+						if idx > maxIdx {
+							maxIdx = idx
+						}
+					}
+					normalized = maxIdx + 1
+				}
+				slot = &toolIndexSlot{index: normalized, id: callID}
+				state.slots[normalized] = slot
+			}
+			if callID != "" {
+				slot.id = callID
+				state.ids[callID] = slot
+			}
+			state.active[wireIdx] = slot
+
+			current, hasIndex := call["index"].(float64)
+			if !hasIndex || int(current) != slot.index {
+				call["index"] = slot.index
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return frame
+	}
+	return []byte("data: " + marshalNoEscape(payload) + "\n\n")
+}
+
 // RecoverLeakedToolCalls 包装一个 "data: {...}" 帧迭代器。
 func RecoverLeakedToolCalls(src FrameIter, allowedNames map[string]bool) FrameIter {
-	return &leakRecover{src: src, allowed: allowedNames}
+	// hub fa44d07：归一化必须发生在无名/截断守卫与泄漏回读之前。
+	return &leakRecover{src: NormalizeToolCallIndices(src), allowed: allowedNames}
 }
 
 func (lr *leakRecover) emit(frame []byte) {
@@ -1363,7 +1504,13 @@ func (lr *leakRecover) finishStream() {
 				lr.emitContent(clean)
 			}
 		} else if leakedPartialDroppable(lr.hold, lr.allowed) {
-			// issue #9：截断的 marker+JSON 回声无法还原，吞掉整段
+			// hub 4be8084 / issue #72：声明了 tools 却只拿到截断的回声，不能
+			// 静默按成功结束——coding agent 会误判任务完成。保留已放行正文，
+			// 由 Next 在 pending 排空后返回错误，且不下发成功收尾帧。
+			lr.failErr = fmt.Errorf(
+				"qoder: dropped truncated leaked tool-call echo (%d chars) with tools declared — failing the turn closed",
+				len(lr.hold))
+			return
 		} else if leakedMalformedEcho(lr.hold, lr.allowed) {
 			// 畸形回声（转义损坏，数组已闭合但 JSON 非法）：无法可靠还原，
 			// 吞掉整段；还原为工具调用必须零偏差，否则宁可放弃（见函数注释）
@@ -1793,6 +1940,156 @@ func (g *truncatedArgsGuard) observe(frame []byte) {
 }
 
 // ---------------------------------------------------------------------------
+// 正文伪工具调用守卫（移植 qoder2api-hub 4be8084）
+// ---------------------------------------------------------------------------
+
+// namedToolEchoRe 正文里的具名伪工具调用行：`[Bash 工具调用]` 后跟 JSON。
+// 源正则带 `(?=[{\[])` 前瞻；RE2 不支持前瞻，这里匹配到标记与尾随空白，
+// 再由调用方检查下一个字符。
+var namedToolEchoRe = regexp.MustCompile(`(?m)^[ \t]*\[([A-Za-z_][A-Za-z0-9_.:\-]*)[ \t]+工具调用\][ \t\r\n]*`)
+
+// stripFencedBlocks 去掉 Markdown 代码围栏内的内容（围栏行一并去掉），
+// 防止讲解示例里的 `[Bash 工具调用]` 被误判成真实泄漏（hub _outside_fences）。
+func stripFencedBlocks(text string) string {
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// containsNamedToolEcho 正文是否出现「已声明工具名 + 工具调用 + JSON 起始」
+// 的伪调用（排除围栏内示例）。
+func containsNamedToolEcho(text string, allowedNames map[string]bool) bool {
+	if text == "" || len(allowedNames) == 0 {
+		return false
+	}
+	text = stripFencedBlocks(text)
+	for _, m := range namedToolEchoRe.FindAllStringSubmatchIndex(text, -1) {
+		if len(m) < 4 {
+			continue
+		}
+		name := text[m[2]:m[3]]
+		if !allowedNames[name] {
+			continue
+		}
+		if m[1] >= len(text) {
+			continue
+		}
+		if c := text[m[1]]; c == '{' || c == '[' {
+			return true
+		}
+	}
+	return false
+}
+
+// unstructuredEchoGuard 在发送成功收尾前检查正文伪工具调用（hub
+// _sse_guard_unstructured_tool_echo）：正文仍即时输出，finish/usage/[DONE]
+// 延后到流末；若本轮没有任何结构化 tool_calls 且正文命中伪调用 -> 报错。
+type unstructuredEchoGuard struct {
+	src       FrameIter
+	allowed   map[string]bool
+	content   strings.Builder
+	hasCalls  bool
+	deferred [][]byte
+	failErr  error
+	done     bool
+}
+
+// GuardUnstructuredToolEcho 包装帧迭代器，流末拒绝正文里的具名伪工具调用。
+func GuardUnstructuredToolEcho(src FrameIter, allowedNames map[string]bool) FrameIter {
+	if len(allowedNames) == 0 {
+		return src
+	}
+	return &unstructuredEchoGuard{src: src, allowed: allowedNames}
+}
+
+func (g *unstructuredEchoGuard) Next() ([]byte, error) {
+	for {
+		if g.failErr != nil {
+			err := g.failErr
+			g.failErr = nil
+			return nil, err
+		}
+		if g.done {
+			if len(g.deferred) > 0 {
+				f := g.deferred[0]
+				g.deferred = g.deferred[1:]
+				return f, nil
+			}
+			return nil, io.EOF
+		}
+		raw, err := g.src.Next()
+		if err == io.EOF {
+			g.done = true
+			if !g.hasCalls && containsNamedToolEcho(g.content.String(), g.allowed) {
+				g.failErr = fmt.Errorf(
+					"qoder: unstructured named tool-call echo — failing the turn closed")
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		g.observe(raw)
+		if len(g.deferred) > 0 {
+			continue
+		}
+		return raw, nil
+	}
+}
+
+// observe 累计正文并识别收尾帧；出现 finish_reason 后所有帧延后。
+func (g *unstructuredEchoGuard) observe(frame []byte) {
+	data := StripDataPrefix(string(frame))
+	if data == "" || data == "[DONE]" {
+		if len(g.deferred) > 0 {
+			g.deferred = append(g.deferred, frame)
+		}
+		return
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(data), &payload) != nil {
+		if len(g.deferred) > 0 {
+			g.deferred = append(g.deferred, frame)
+		}
+		return
+	}
+	finish := false
+	for _, rawChoice := range anyList(payload["choices"]) {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			continue
+		}
+		if truthy(choice["finish_reason"]) {
+			finish = true
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			continue
+		}
+		if c, ok := delta["content"].(string); ok && c != "" {
+			g.content.WriteString(c)
+		}
+		if truthy(delta["tool_calls"]) {
+			g.hasCalls = true
+		}
+	}
+	if finish || len(g.deferred) > 0 {
+		// 连同 usage / [DONE] 保持原顺序；失败时绝不先发成功收尾。
+		g.deferred = append(g.deferred, frame)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 顶层转换器：私有 SSE 流 -> OpenAI chat.completion.chunk 流
 // ---------------------------------------------------------------------------
 
@@ -1837,6 +2134,8 @@ func NewChatStream(r io.Reader, opts ChatStreamOptions) FrameIter {
 	// issue #112：流末工具参数完整性守卫（上游中途 EOF 时 fail-closed；
 	// ToolEchoLenient 时按正常完成收尾，hub #135）
 	var src FrameIter = GuardTruncatedToolArgs(nameless, opts.ToolEchoLenient)
+	// hub 4be8084：正文里的具名伪工具调用必须在成功收尾前拦截。
+	src = GuardUnstructuredToolEcho(src, opts.AllowedToolNames)
 	if opts.HeartbeatInterval > 0 {
 		src = WithHeartbeat(src, opts.HeartbeatInterval, opts.IdleLimit)
 	}
@@ -1951,7 +2250,8 @@ func AggregateStream(r io.Reader, model string, usage *UsageHolder, allowedNames
 	created := int64(0)
 	var firstChunkAt *float64
 
-	it := NewInnerSSE(r, usage)
+	// hub fa44d07：非流式聚合同样先归一化 index，否则并行调用会被合并。
+	it := NormalizeToolCallIndices(NewInnerSSE(r, usage))
 	for {
 		frame, err := it.Next()
 		if err == io.EOF {
@@ -2096,7 +2396,11 @@ func AggregateStream(r io.Reader, model string, usage *UsageHolder, allowedNames
 					toolCalls[i] = &cc
 				}
 			} else if leakedPartialDroppable(echoSrc, allowedNames) {
-				msg.Content = head16
+				// hub 4be8084 / issue #72：非流式同样 fail-closed，不把截断
+				// 工具回声当作正常完成返回。
+				return nil, fmt.Errorf(
+					"qoder: dropped truncated leaked tool-call echo (%d chars) with tools declared — failing the turn closed",
+					len(echoSrc))
 			} else if leakedMalformedEcho(echoSrc, allowedNames) {
 				// 畸形回声（转义损坏）：吞掉不还原（同流式路径）
 				msg.Content = head16
@@ -2114,6 +2418,10 @@ func AggregateStream(r io.Reader, model string, usage *UsageHolder, allowedNames
 				}
 			}
 		}
+	}
+	// hub 4be8084：非流式正文出现具名伪工具调用且本轮无结构化调用 -> fail-closed。
+	if len(toolCalls) == 0 && containsNamedToolEcho(msg.Content, allowedNames) {
+		return nil, fmt.Errorf("qoder: unstructured named tool-call echo — failing the turn closed")
 	}
 	// 二次防御：剔除「无函数名」的空 tool_call，防止客户端死等
 	hasCalls := false

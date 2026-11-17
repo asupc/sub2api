@@ -898,3 +898,82 @@ func TestLeakMarkerVariants(t *testing.T) {
 		t.Fatalf("prose+marker same frame: emit=%q hold=%q", emit, hold)
 	}
 }
+
+// TestNormalizeToolCallIndicesReusedIndex 覆盖 hub fa44d07 / issue #157：
+// 上游把并行调用都写成 index=0 时，按 id 归一成 0/1 两个稳定槽位。
+func TestNormalizeToolCallIndicesReusedIndex(t *testing.T) {
+	first := rawFrame(t, map[string]any{
+		"tool_calls": []any{
+			map[string]any{"index": float64(0), "id": "call_a", "function": map[string]any{"name": "get_weather"}},
+			map[string]any{"index": float64(0), "id": "call_b", "function": map[string]any{"name": "get_time"}},
+		},
+	}, nil, nil)
+	frames, err := collectFrames(t, NormalizeToolCallIndices(FramesOf(first)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 1 {
+		t.Fatalf("got %d frames", len(frames))
+	}
+	var payload map[string]any
+	data := StripDataPrefix(string(frames[0]))
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		t.Fatal(err)
+	}
+	choice := anyList(payload["choices"])[0].(map[string]any)
+	delta := choice["delta"].(map[string]any)
+	calls := anyList(delta["tool_calls"])
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls", len(calls))
+	}
+	if calls[0].(map[string]any)["index"] != float64(0) ||
+		calls[1].(map[string]any)["index"] != float64(1) {
+		t.Fatalf("indices = %v / %v", calls[0], calls[1])
+	}
+}
+
+// TestAggregateStreamParallelCallsReusedIndex 同一 index 的两条调用在非流式
+// 聚合里必须保持独立，不能把 name/arguments 串在一起。
+func TestAggregateStreamPreservesParallelCallsReusedIndex(t *testing.T) {
+	raw := string(envFrame(t, map[string]any{
+		"id": "c1", "model": "m", "created": 1,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{
+			"tool_calls": []any{
+				map[string]any{"index": float64(0), "id": "call_a", "function": map[string]any{"name": "get_weather"}},
+				map[string]any{"index": float64(0), "id": "call_b", "function": map[string]any{"name": "get_time"}},
+			},
+		}, "finish_reason": nil}},
+	})) + string(envFrame(t, map[string]any{
+		"id": "c1", "model": "m", "created": 1,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{
+			"tool_calls": []any{
+				map[string]any{"index": float64(0), "id": "call_a", "function": map[string]any{"arguments": `{"city":"上海"}`}},
+			},
+		}, "finish_reason": nil}},
+	})) + string(envFrame(t, map[string]any{
+		"id": "c1", "model": "m", "created": 1,
+		"choices": []any{map[string]any{"index": 0, "delta": map[string]any{
+			"tool_calls": []any{
+				map[string]any{"index": float64(0), "id": "call_b", "function": map[string]any{"arguments": `{"tz":"UTC"}`}},
+			},
+		}, "finish_reason": "tool_calls"}},
+	}))
+
+	agg, err := AggregateStream(strings.NewReader(raw), "m", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agg.Message.ToolCalls) != 2 {
+		t.Fatalf("got %d tool calls, want 2: %+v", len(agg.Message.ToolCalls), agg.Message.ToolCalls)
+	}
+	byName := map[string]ToolCall{}
+	for _, call := range agg.Message.ToolCalls {
+		byName[call.Name] = call
+	}
+	if got := byName["get_weather"].Arguments; got != `{"city":"上海"}` {
+		t.Errorf("get_weather args = %q", got)
+	}
+	if got := byName["get_time"].Arguments; got != `{"tz":"UTC"}` {
+		t.Errorf("get_time args = %q", got)
+	}
+}

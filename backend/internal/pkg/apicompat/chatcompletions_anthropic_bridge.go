@@ -3,6 +3,7 @@ package apicompat
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -278,7 +279,7 @@ func anthropicAssistantToChatMessages(raw json.RawMessage) ([]ChatMessage, error
 		}
 		args := "{}"
 		if len(b.Input) > 0 {
-			args = string(b.Input)
+			args = normalizeAnthropicHistoryToolInput(b.Input)
 		}
 		msg.ToolCalls = append(msg.ToolCalls, ChatToolCall{
 			ID:   b.ID,
@@ -402,6 +403,18 @@ func joinResponsesContentPartText(parts []ResponsesContentPart) string {
 // Non-streaming response: ChatCompletionsResponse → AnthropicResponse
 // ---------------------------------------------------------------------------
 
+// AnthropicThinkingEnabled 报告 CC→Anthropic 是否把 reasoning_content 转成
+// thinking 块（qoder2api-hub 9a27ae2 / issue #146 的可配置输出）。
+//
+// 环境变量 ANTHROPIC_THINKING_MODE：
+//   - off   -> 不输出 thinking 块（不含空签名壳）；
+//   - empty -> 输出 thinking 块（签名为空；默认，保持既有行为）。
+//
+// 源实现在面板/Key 级配置；本仓库没有对应粒度，改用进程级环境变量。
+func AnthropicThinkingEnabled() bool {
+	return strings.ToLower(strings.TrimSpace(os.Getenv("ANTHROPIC_THINKING_MODE"))) != "off"
+}
+
 // ChatCompletionsResponseToAnthropic converts a Chat Completions response
 // directly into an Anthropic Messages response, without materializing a
 // ResponsesResponse. It is semantically equivalent to composing
@@ -457,7 +470,7 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	var blocks []AnthropicContentBlock
 	reasoning := message.reasoningText()
 
-	if reasoning != "" {
+	if reasoning != "" && AnthropicThinkingEnabled() {
 		blocks = append(blocks, AnthropicContentBlock{
 			Type:     "thinking",
 			Thinking: reasoning,
@@ -475,15 +488,11 @@ func chatMessageToAnthropicBlocks(message ChatMessage) []AnthropicContentBlock {
 	}
 
 	for _, toolCall := range message.ToolCalls {
-		arguments := toolCall.Function.Arguments
-		if strings.TrimSpace(arguments) == "" {
-			arguments = "{}"
-		}
 		blocks = append(blocks, AnthropicContentBlock{
 			Type:  "tool_use",
 			ID:    fromResponsesCallID(toolCall.ID),
 			Name:  toolCall.Function.Name,
-			Input: sanitizeAnthropicToolUseInput(toolCall.Function.Name, arguments),
+			Input: normalizeAnthropicToolUseInput(toolCall.Function.Name, toolCall.Function.Arguments),
 		})
 	}
 
@@ -642,7 +651,7 @@ func ChatCompletionsChunkToAnthropicEvents(
 	for _, choice := range chunk.Choices {
 		// Reasoning content → thinking block.
 		reasoning := choice.Delta.reasoningText()
-		if reasoning != nil && *reasoning != "" {
+		if reasoning != nil && *reasoning != "" && AnthropicThinkingEnabled() {
 			events = append(events, ensureCCAnthropicThinkingBlock(state)...)
 			events = append(events, ccAnthropicDelta(state, &AnthropicDelta{
 				Type:     "thinking_delta",

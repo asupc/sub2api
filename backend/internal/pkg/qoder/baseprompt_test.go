@@ -228,12 +228,18 @@ func TestStructuredToolHistoryGate(t *testing.T) {
 	if !StructuredToolHistoryEnabled("cn", "DeepSeek-V4-Flash", "dfmodel", msgs) {
 		t.Fatal("auto/cn/dfmodel key must enable")
 	}
-	if StructuredToolHistoryEnabled("cn", "kimi-k2.8", "kmodel", msgs) {
-		t.Fatal("auto/cn/kimi must not enable")
+	if !StructuredToolHistoryEnabled("cn", "kimi-k2.8", "kmodel", msgs) {
+		t.Fatal("auto/cn/kimi must enable (#153)")
 	}
+	if !StructuredToolHistoryEnabled("intl", "qwen3.8-max", "qmodel_38max", msgs) {
+		t.Fatal("auto/intl must enable by default (4be8084)")
+	}
+	// 显式缩小出口范围可回退到仅 cn。
+	t.Setenv(structuredToolHistoryRealmsEnv, "cn")
 	if StructuredToolHistoryEnabled("intl", "qwen3.8-max", "qmodel_38max", msgs) {
-		t.Fatal("auto/intl must not enable")
+		t.Fatal("QD_STRUCTURED_TOOL_HISTORY_REALMS=cn must disable intl")
 	}
+	t.Setenv(structuredToolHistoryRealmsEnv, "")
 	t.Setenv(structuredToolHistoryEnv, "banana")
 	if !StructuredToolHistoryEnabled("cn", "qwen3.8-max", "qmodel_38max", msgs) {
 		t.Fatal("illegal env value must fall back to auto")
@@ -672,8 +678,8 @@ func TestStructuredRejectMemory(t *testing.T) {
 	if StructuredToolHistoryEnabled("cn", "deepseek-v4-flash", "dfmodel", msgs) {
 		t.Fatal("rejected model must fall back to text mode")
 	}
-	if StructuredToolHistoryEnabled("intl", "deepseek-v4-flash", "dfmodel", msgs) {
-		t.Fatal("intl must never enable (realm gate)")
+	if !StructuredToolHistoryEnabled("intl", "deepseek-v4-flash", "dfmodel", msgs) {
+		t.Fatal("intl must enable independently of cn rejection memory")
 	}
 	// 显式 on 压过记忆（用户手动强制时承担 400）。
 	t.Setenv(structuredToolHistoryEnv, "on")
@@ -861,5 +867,38 @@ func TestBuildAgentChatBodySessionAffinity(t *testing.T) {
 	body5 := decodeBody(t, mustBuild(t, reqOther, sess, "cn"))
 	if body5["session_id"] == body3["session_id"] {
 		t.Fatal("different model must not share session")
+	}
+}
+
+// TestApplyKimiToolProtocol 覆盖 2fad95d：Kimi 带工具时追加稳定约束，
+// tool_choice=none 或非 Kimi 不追加。
+func TestApplyKimiToolProtocol(t *testing.T) {
+	newBody := func() map[string]any {
+		return map[string]any{
+			"tools": []any{map[string]any{"type": "function"}},
+			"messages": []any{map[string]any{
+				"role": "system", "content": "base",
+			}},
+		}
+	}
+	body := newBody()
+	applyKimiToolProtocol(body, map[string]any{"model": "Kimi-K3"}, "")
+	system := body["messages"].([]any)[0].(map[string]any)
+	if content, _ := system["content"].(string); !strings.Contains(content, kimiToolProtocolPrompt) {
+		t.Fatal("Kimi 请求应追加工具协议约束")
+	}
+
+	body = newBody()
+	applyKimiToolProtocol(body, map[string]any{"model": "Kimi-K3", "tool_choice": "none"}, "")
+	system = body["messages"].([]any)[0].(map[string]any)
+	if content, _ := system["content"].(string); strings.Contains(content, kimiToolProtocolPrompt) {
+		t.Fatal("tool_choice=none 不得追加约束")
+	}
+
+	body = newBody()
+	applyKimiToolProtocol(body, map[string]any{"model": "GLM-5.3"}, "")
+	system = body["messages"].([]any)[0].(map[string]any)
+	if content, _ := system["content"].(string); strings.Contains(content, kimiToolProtocolPrompt) {
+		t.Fatal("非 Kimi 不得追加约束")
 	}
 }

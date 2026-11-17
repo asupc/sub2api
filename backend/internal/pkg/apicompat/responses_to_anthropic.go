@@ -139,6 +139,71 @@ func containsAnthropicToolUseBlock(blocks []AnthropicContentBlock) bool {
 	return false
 }
 
+// parseAnthropicToolArguments 解析工具参数 JSON，并额外解开一层「JSON 字符串
+// 里再套一个对象/数组」的历史脏数据（qoder2api-hub a858922 / _parse_tool_arguments）。
+// 语法错误返回 ok=false，由调用方沿用原值。
+func parseAnthropicToolArguments(raw string) (any, bool) {
+	var input any
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		return nil, false
+	}
+	if text, ok := input.(string); ok {
+		var decoded any
+		if json.Unmarshal([]byte(text), &decoded) == nil {
+			input = decoded
+		}
+	}
+	return input, true
+}
+
+// normalizeAnthropicHistoryToolInput 把 Anthropic 历史里的 tool_use.input 转成
+// Chat Completions 的 arguments 文本。旧历史可能把对象多编码了一层字符串；
+// 能解开且结果是对象/数组时改用解开的 JSON，避免继续向模型示范字符串参数。
+func normalizeAnthropicHistoryToolInput(raw json.RawMessage) string {
+	var input any
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return string(raw)
+	}
+	if text, ok := input.(string); ok {
+		if decoded, ok := parseAnthropicToolArguments(text); ok {
+			switch decoded.(type) {
+			case map[string]any, []any:
+				if out, err := json.Marshal(decoded); err == nil {
+					return string(out)
+				}
+			}
+		}
+		// 源实现：input 本身是普通字符串且解不开时按原字符串出网。
+		return text
+	}
+	return string(raw)
+}
+
+// normalizeAnthropicToolUseInput 生成 Anthropic tool_use.input。参数必须是
+// JSON 对象；非对象值包成 {"value": ...}（qoder2api-hub a858922）。空参数与
+// 非法 JSON 归一为 {}，与既有空参数行为一致；Read 的 pages 空串清理保留。
+func normalizeAnthropicToolUseInput(name, raw string) json.RawMessage {
+	if strings.TrimSpace(raw) == "" {
+		return json.RawMessage("{}")
+	}
+	input, ok := parseAnthropicToolArguments(raw)
+	if !ok {
+		return json.RawMessage("{}")
+	}
+	out, err := json.Marshal(input)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	if _, isObject := input.(map[string]any); !isObject {
+		wrapped, err := json.Marshal(map[string]any{"value": input})
+		if err != nil {
+			return json.RawMessage("{}")
+		}
+		out = wrapped
+	}
+	return sanitizeAnthropicToolUseInput(name, string(out))
+}
+
 func sanitizeAnthropicToolUseInput(name string, raw string) json.RawMessage {
 	if name != "Read" || raw == "" {
 		return json.RawMessage(raw)

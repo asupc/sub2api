@@ -689,16 +689,43 @@ func toolIDsOK(messages []any) bool {
 	return true
 }
 
+// structuredToolHistoryRealmsEnv 允许结构化历史直传的出口列表（逗号分隔）。
+// 源实现 _structured_realms L6557-6570：缺省 cn,intl（INTL GLM-5.3 已实测
+// 接受配对的历史），显式设为 cn 可回退到旧范围。
+const structuredToolHistoryRealmsEnv = "QD_STRUCTURED_TOOL_HISTORY_REALMS"
+
+// structuredRealms auto 模式允许结构化历史直传的出口集合。
+func structuredRealms() map[string]bool {
+	raw := strings.TrimSpace(os.Getenv(structuredToolHistoryRealmsEnv))
+	if raw == "" {
+		return map[string]bool{"cn": true, "intl": true}
+	}
+	out := map[string]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.ToLower(strings.TrimSpace(part)); p != "" {
+			out[p] = true
+		}
+	}
+	if len(out) == 0 {
+		return map[string]bool{"cn": true, "intl": true}
+	}
+	return out
+}
+
 // StructuredToolHistoryWhitelistHit 报告 model（显示名或上游 key）是否命中
 // auto 模式的白名单前缀（不含 toolIDsOK / 运行时记忆判定）。错误路径的
 // 降级记忆判定用——建体时的完整判定见 StructuredToolHistoryEnabled。
 func StructuredToolHistoryWhitelistHit(realm, model string) bool {
-	if realm != "cn" {
+	if !structuredRealms()[strings.ToLower(pyStrip(realm))] {
 		return false
 	}
 	low := strings.ToLower(pyStrip(model))
 	if low == "" {
 		return false
+	}
+	// source #153：Kimi 走结构化（kmodel / kmodel_latest / 显示名）。
+	if IsKimiModel(model, model) {
+		return true
 	}
 	for _, prefix := range structuredToolHistoryWhitelist {
 		if strings.HasPrefix(low, prefix) {
@@ -713,8 +740,9 @@ func StructuredToolHistoryWhitelistHit(realm, model string) bool {
 //  1. toolIDsOK 不满足 → false（任何模式都不可覆盖，fail-safe 回退文本化）；
 //  2. off → false（一键回退）；
 //  3. on → true（显式强制：DeepSeek / Kimi / INTL 补验证用）；
-//  4. auto：realm 必须为 cn（INTL 未实测，故 auto 不启用）；
-//  5. auto：候选 (modelKey, model) 依次小写前缀命中白名单 → true；
+//  4. auto：realm 必须在允许集合内（默认 cn + intl，可用
+//     QD_STRUCTURED_TOOL_HISTORY_REALMS 缩小范围）；
+//  5. auto：候选 (modelKey, model) 依次小写前缀命中白名单（含 Kimi）→ true；
 //  6. auto：命中 StructuredRejected 运行时记忆（该区域+模型的结构化已被
 //     上游按参数错拒过）→ false。
 func StructuredToolHistoryEnabled(realm, model, modelKey string, messages []any) bool {
@@ -763,6 +791,73 @@ func IsDeepSeekModel(model, modelKey string) bool {
 		return true
 	}
 	return strings.Contains(low, "deepseek")
+}
+
+// kimiModelKeys Kimi 上游 model key（qoder_proxy.py L4042 is_kimi_model）。
+var kimiModelKeys = map[string]bool{"kmodel": true, "kmodel_latest": true}
+
+// kimiModelNameRe 显示名里的 Kimi 标记（源正则逐字：前后不得紧邻 ASCII
+// 字母/数字，避免匹配到 "kimono" 之类的普通词）。
+var kimiModelNameRe = regexp.MustCompile(`(?:^|[^a-z0-9])kimi(?:$|[^a-z0-9])`)
+
+// IsKimiModel 判断请求最终是否打到 Kimi（is_kimi_model L4042-4049：
+// 同时看上游 key 与客户端写的显示名）。
+func IsKimiModel(model, modelKey string) bool {
+	for _, cand := range []string{modelKey, model} {
+		low := strings.ToLower(strings.TrimSpace(cand))
+		if low == "" {
+			continue
+		}
+		if kimiModelKeys[low] || kimiModelNameRe.MatchString(low) {
+			return true
+		}
+	}
+	return false
+}
+
+// kimiToolProtocolPrompt Kimi 原生工具调用约束（字节级取自
+// qoder2api-hub 2fad95d / issue #153，禁止人工转写）。
+const kimiToolProtocolPrompt = "[Tool protocol requirements]\nWhen tools are available, use the native tool_calls channel for actual tool calls.\nHistorical tool-call text and tool-result messages are records, not output templates.\nDo not repeat textual tool-call markers, XML/DSML tags, JSON call envelopes, or\nMarkdown fences as a substitute for a native tool call. Ordinary answers remain\nordinary text; the presence of tools does not require calling one.\nFor each tool call, arguments must encode one complete valid JSON object matching\nthat tool's declared parameters, required fields and value types. Use double-quoted\nJSON keys and strings; escape inner quotes, backslashes, newlines, tabs and control\ncharacters. Preserve code/file/command content exactly through JSON escaping.\nDo not use Python literals, comments, trailing commas, NaN/Infinity, or expressions\nas JSON values, or a JSON-encoded string instead of the arguments object.\nBefore emitting the call, check the full JSON syntax and schema. For long file writes\nor edits, prefer smaller complete calls when the tool schema and task permit; never\ntruncate a JSON string/object. Do not claim execution until a tool result arrives.\n[/Tool protocol requirements]"
+
+// applyKimiToolProtocol 在 Kimi 请求带工具且未显式禁止调用时，把稳定的
+// JSON/原生调用约束追加到 system（没有 system 则插到最前）。源实现
+// _apply_kimi_tool_protocol L4052-4066：重复请求不重复追加。
+func applyKimiToolProtocol(body, payload map[string]any, modelKey string) {
+	model, _ := payload["model"].(string)
+	if !IsKimiModel(model, modelKey) {
+		return
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) == 0 {
+		return
+	}
+	switch choice := payload["tool_choice"].(type) {
+	case string:
+		if strings.EqualFold(strings.TrimSpace(choice), "none") {
+			return
+		}
+	case map[string]any:
+		if typ, _ := choice["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "none") {
+			return
+		}
+	}
+	messages, _ := body["messages"].([]any)
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, _ := msg["role"].(string); role == "system" {
+			content, _ := msg["content"].(string)
+			if !strings.Contains(content, kimiToolProtocolPrompt) {
+				msg["content"] = content + "\n\n" + kimiToolProtocolPrompt
+			}
+			return
+		}
+	}
+	body["messages"] = append([]any{map[string]any{
+		"role": "system", "content": kimiToolProtocolPrompt,
+	}}, messages...)
 }
 
 // backfillReasoningContent DeepSeek 多轮一致性：assistant 历史补
@@ -1234,6 +1329,8 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	} else {
 		body["tools"] = []any{}
 	}
+	// source #153：Kimi 有工具时追加稳定的原生调用/JSON 约束（不影响 tool_choice=none）。
+	applyKimiToolProtocol(body, openAIReq, modelKey)
 
 	// business 会话卡片
 	biz, _ := body["business"].(map[string]any)

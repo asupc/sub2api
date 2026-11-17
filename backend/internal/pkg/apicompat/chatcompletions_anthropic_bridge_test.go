@@ -1142,3 +1142,66 @@ func TestChatCompletionsResponseToAnthropic_ContentFilterWithToolUse(t *testing.
 	out := ChatCompletionsResponseToAnthropic(resp, "claude-sonnet-4-20250514")
 	require.Equal(t, "tool_use", AnthropicStopReasonString(out.StopReason))
 }
+
+// TestNormalizeAnthropicHistoryToolInputUnwrapsDoubleEncoding 覆盖
+// qoder2api-hub a858922：旧历史里 tool_use.input 被多编码成 JSON 字符串时
+// 要解开一层，避免继续向模型示范字符串参数。
+func TestNormalizeAnthropicHistoryToolInputUnwrapsDoubleEncoding(t *testing.T) {
+	raw := json.RawMessage(`"{\"path\":\"/tmp/a\",\"limit\":10}"`)
+	got := normalizeAnthropicHistoryToolInput(raw)
+	if got != `{"path":"/tmp/a","limit":10}` {
+		t.Fatalf("got %q", got)
+	}
+	// 普通对象保持原样（字节级不变）。
+	raw = json.RawMessage(`{"path":"/tmp/a"}`)
+	if got := normalizeAnthropicHistoryToolInput(raw); got != `{"path":"/tmp/a"}` {
+		t.Fatalf("object got %q", got)
+	}
+}
+
+// TestNormalizeAnthropicToolUseInputWrapsNonObject 非对象参数必须包成
+// {"value": ...}，否则 Anthropic 客户端拿到非法 input。
+func TestNormalizeAnthropicToolUseInputWrapsNonObject(t *testing.T) {
+	cases := map[string]string{
+		`"hello"`:  `{"value":"hello"}`,
+		`[1,2]`:    `{"value":[1,2]}`,
+		`42`:       `{"value":42}`,
+		`{}`:       `{}`,
+		`not json`: `{}`,
+		``:         `{}`,
+	}
+	for input, want := range cases {
+		if got := string(normalizeAnthropicToolUseInput("Bash", input)); got != want {
+			t.Errorf("normalize(%q) = %q want %q", input, got, want)
+		}
+	}
+}
+
+// TestAnthropicThinkingModeOffDropsThinking 覆盖 9a27ae2：环境变量关闭时
+// 非流式响应不再输出 thinking 块；默认仍保留（空签名）。
+func TestAnthropicThinkingModeOffDropsThinking(t *testing.T) {
+	msg := ChatMessage{
+		Role:             "assistant",
+		Content:          json.RawMessage(`"answer"`),
+		ReasoningContent: "plan",
+	}
+	t.Setenv("ANTHROPIC_THINKING_MODE", "")
+	blocks := chatMessageToAnthropicBlocks(msg)
+	hasThinking := false
+	for _, block := range blocks {
+		if block.Type == "thinking" {
+			hasThinking = true
+		}
+	}
+	if !hasThinking {
+		t.Fatal("默认应输出 thinking 块")
+	}
+
+	t.Setenv("ANTHROPIC_THINKING_MODE", "off")
+	blocks = chatMessageToAnthropicBlocks(msg)
+	for _, block := range blocks {
+		if block.Type == "thinking" {
+			t.Fatal("off 模式不得输出 thinking 块")
+		}
+	}
+}
