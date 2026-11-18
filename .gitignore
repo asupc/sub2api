@@ -120,7 +120,6 @@ tests
 !deploy/tests/
 !deploy/tests/**
 CLAUDE.md
-.claude
 scripts
 !backend/scripts/
 !backend/scripts/resolve-version.sh
@@ -173,4 +172,6 @@ issues/
 
 # pnpm 容器安装缓存（NAS 构建临时产物）
 frontend/.pnpm-store/
-.claude/
+
+# Claude Code 工程技能纳入版本控制；个人本地设置不提交
+.claude/settings.local.json
