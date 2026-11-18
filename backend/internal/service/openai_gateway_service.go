@@ -227,6 +227,8 @@ type OpenAIUsage struct {
 	ImageCacheReadTokens        int `json:"image_cache_read_tokens,omitempty"`
 	OutputTokens                int `json:"output_tokens"`
 	CacheCreationInputTokens    int `json:"cache_creation_input_tokens,omitempty"`
+	CacheCreation5mTokens       int `json:"cache_creation_5m_tokens,omitempty"`
+	CacheCreation1hTokens       int `json:"cache_creation_1h_tokens,omitempty"`
 	CacheCreation30mInputTokens int `json:"cache_creation_30m_input_tokens,omitempty"`
 	CacheCreation12hInputTokens int `json:"cache_creation_12h_input_tokens,omitempty"`
 	CacheReadInputTokens        int `json:"cache_read_input_tokens,omitempty"`
@@ -235,6 +237,8 @@ type OpenAIUsage struct {
 	// credit 单数，见 account_daily_credit.go）。仅 qoder/workbuddy 会非零；
 	// 不参与美元计费，只供账号列表「今日积分消耗」统计。
 	Credits float64 `json:"credits,omitempty"`
+
+	cacheCreationInputTokensPresent bool
 }
 
 // OpenAIForwardResult represents the result of forwarding

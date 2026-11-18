@@ -407,3 +407,25 @@
 - **改动文件**：`backend/internal/pkg/qoder/realms.go`、`backend/cmd/server/wire_gen.go`、`CHANGELOG-SO.md`（本条）。
 - **验证**：`docker build --target backend-builder`（复用 BuildKit 的 `sub2api-gomod` / `sub2api-gobuild` 缓存）编译通过；完整镜像 `sub2api:0.2.22-so-20261117` 构建成功，经 `deploy/build-and-deploy-nas.sh` 部署到 NAS，容器 `Up (healthy)`、`/health` 返回 200。
 - **合并影响**：无（纯编译修复，不改变上游语义；`wire_gen.go` 继续维持二开手工接线）。
+
+### 同步 v0.2.23（2026-11-18）
+
+- **区间与规模**：`15871f90 → 2af3f1e1`（32 提交 / 20 非合并 / 90 文件，+5251/-453），v0.2.22 → v0.2.23。二开侧：39 个未改文件直接覆盖、16 个上游新增复制、27 个三路自动合并、2 个冲突手工裁决、6 个跳过（en 语言包 ×2、已裁剪渠道管理前端 ×4）。版本号 `VERSION`→0.2.23（tag `v0.2.23` 一致）。
+- **同步功能（按主题）**：
+  - **GPT-6.2 Sol / Astra**：新增 `openai.GPT62ModelID` 与两份 Codex 目录（`codex_gpt62_sol.json` / `codex_gpt62_astra.json`）；模型元数据、Codex 目录服务、模型别名、转换层、`useModelWhitelist`、`UseKeyModal` 的 OpenCode 配置全部接入。计费新增 Astra / Sol fallback 价（Sol 复用 6.1 Sol 静态价）、Fast 2 倍、缓存写溢价、`pricing_service` 兜底条目与 `model_prices_and_context_window.json` 条目。
+  - **Ultra Fast 计费与渠道倍率**：Ultrafast 倍率按请求时点计算（GPT-6.2 在 2027-03-01 08:00 UTC 前 3 倍，之后 6 倍，`openAIUltrafastMultiplier`）；分组强制 Ultrafast 对 GPT-6.2 先校验 Pro 套餐 / 账号目录档位（`gpt62PlanIncludesUltrafast`），不可用时按强制 Fast 或跟随客户端；渠道新增 `ultrafast_multiplier`（迁移 `252_channel_pricing_ultrafast_multiplier.sql`、`ChannelModelPricing` / repository / handler / 校验、前端 `PricingEntryCard` / `types` / zh 文案）。
+  - **缓存用量计费对齐**：apicompat `AnthropicUsage` 增加 `CacheCreationInputTokensPresent` / `CacheReadInputTokensPresent`，跨 Anthropic ⇄ Responses ⇄ CC 转换保留显式零值；`ClaudeUsage` / `OpenAIUsage` 新增 `billingUsageTokens()` 统一互斥桶组装，聚合缓存写缺失时用 5m+1h 明细回填，新增 `allocateCacheCreationBillingTokens` 把聚合余量分配给 5m；账号统计与 OpenAI `usage_logs` 同步 5m/1h 明细。
+  - **流式性能与空闲超时**：原生 CC 流式透传改为「等待上游读取前 flush」（`flushBeforeUpstreamRead`，合并多行写）；DeepSeek reasoning 占位与 Ollama Cloud reasoning 回填改为单遍 `setStringFieldInJSONObjects`（`openai_json_object_field_edit.go`）；流空闲计时改用 `time.Timer` 按最后读取时刻重置；OpenAI 首批输出前空闲超时进入 failover（计入 first-output 预算，`SafeToFailoverAfterWrite`）；Anthropic 流终态 usage 优先取 event 级 usage。
+  - **计费入口统一**：`CalculateCostUnified` 成为统一计费入口（替代 `calculateCostWithServiceTierPolicy`），`getModelPricingAt` 支持按计费时点取价。
+- **冲突裁决（2 文件）**：
+  - `service/gateway_usage_billing.go`：账号统计 token 改用上游 `result.Usage.billingUsageTokens()`，但保留二开删除的显式缓存存储计费族——`cost.TotalCost` 不扣 `cacheStorageCost`，不引入 `cacheStoragePrice` / `isCacheStorageOnlyResult` / `CacheStoragePriced` / `addCacheStorageToAccountStatsCost`（与 v0.2.22 裁决一致）。
+  - `service/openai_gateway_service.go`：保留二开 `Credits` 字段，并入上游私有字段 `cacheCreationInputTokensPresent`。
+- **跳过项**：`frontend/src/i18n/locales/en/admin/{channels,overview}.ts`（en 语言包永久跳过）；`views/admin/ChannelsView.vue`、`views/admin/__tests__/ChannelsView.ultrafastPricing.spec.ts`、`api/admin/channels.ts`、`components/admin/channel/__tests__/PricingEntryCard.modelDefaultPrice.spec.ts`（渠道管理前端已永久裁剪）。
+- **测试适配**：上游 Go 测试原样并入；`PricingEntryCard.timePricing.spec.ts` 保留二开已移除的默认价自动填充用例删除状态，仅并入 `ultrafast_multiplier` 字段。`views/admin/__tests__/groupsOpenAIFast.spec.ts`（二开本地 spec）原先断言 `ultrafastHint` 含 `service_tier=ultrafast`，上游 v0.2.23 重写该文案后不再包含此片段，已按新行为改为断言含 `Ultra Fast`，并保留 `GPT-6 Astra` / `GPT-6.1 Sol` 模型名断言。
+- **依赖/构建链**：`backend/go.mod`、`frontend/package.json` / `pnpm-lock.yaml` 在本区间净零变更（Go 1.27.4 与 follow-redirects 补丁已在 v0.2.22 基准内），无需 `go mod tidy` 或重生成 lock。新迁移占用 252，二开迁移下次从 **253** 起。
+- **验证**：
+  - 后端：`docker run golang:1.27.4-alpine go build ./...` 通过；`go vet ./...` 通过。
+  - `go test -tags=unit ./...`：10 个失败，均与 HEAD 基线一致。除 CLAUDE.md 原列的 6 项（Gemini thinking variant、复合分组族 ×2、antigravity 目录跳过、effort 透传、prompt-audit 路由覆盖）外，另 4 项（`TestNormalizeAnthropicHistoryToolInputUnwrapsDoubleEncoding`、qoder `TestRealmFallbacks` / `TestRecoverTruncatedEchoSwallowed`、`TestSchedulerMetadataKeepsOpenAICapabilities`）已用 HEAD 干净 worktree 逐项复跑确认为存量失败。本次同步未引入新失败；CLAUDE.md 的测试基线已由 6 项校正为实际 10 项。
+  - 前端：`pnpm install --frozen-lockfile`（pnpm 9.15.9）成功；`pnpm typecheck` 通过；`pnpm test:run` 298 文件 / 2371 用例全部通过（修正 `groupsOpenAIFast.spec.ts` 的过期断言后）；`pnpm build` 通过，产物写入 `backend/internal/web/dist/`。
+  - 版本号一致性：`git describe --tags 2af3f1e1` → `v0.2.23`；`backend/cmd/server/VERSION`=0.2.23；`UPSTREAM-BASE`=`2af3f1e15c98c893a89255a037f551046883b8c0`。
+- **合并影响**：支付链路与 en 语言包零变更（`git status` 复核）；显式缓存存储计费、渠道管理视图继续维持二开裁剪。
