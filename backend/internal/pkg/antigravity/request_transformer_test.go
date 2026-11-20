@@ -104,6 +104,27 @@ func TestBuildParts_ToolUseSignatureHandling(t *testing.T) {
 	]`
 
 	t.Run("Gemini preserves provided tool_use signature", func(t *testing.T) {
+		// Real Gemini thought signatures are protobuf blobs encoded as base64.
+		realSignature := "EpABCo0BAWkUfRMfAjekqUshrLDYaZSCAwjfa3FHGOQrTsWwi3QyuCgpaN1bRdMbTVuv74TrRctAZwN6CGvqCjZfxOfB2LltnDABADxq6orIeJLGQpVB8BHDB18l7c5B3zM7DaDEuR6epapfyJcg9j9jOEQ1JNuyIFXw/zMo7z7AB6J2KM5QTenzH6F7ZDTlQ2o1"
+		validContent := `[
+			{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}, "signature": "` + realSignature + `"}
+		]`
+		toolIDToName := make(map[string]string)
+		parts, _, err := buildParts(json.RawMessage(validContent), toolIDToName, true, false)
+		if err != nil {
+			t.Fatalf("buildParts() error = %v", err)
+		}
+		if len(parts) != 1 || parts[0].FunctionCall == nil {
+			t.Fatalf("expected 1 functionCall part, got %+v", parts)
+		}
+		if parts[0].ThoughtSignature != realSignature {
+			t.Fatalf("expected preserved tool signature %q, got %q", realSignature, parts[0].ThoughtSignature)
+		}
+	})
+
+	t.Run("Gemini replaces implausible tool_use signature with dummy", func(t *testing.T) {
+		// A Claude-issued or truncated signature is rejected upstream as
+		// TYPE_BYTES, so the transformer must substitute the validator-skip token.
 		toolIDToName := make(map[string]string)
 		parts, _, err := buildParts(json.RawMessage(content), toolIDToName, true, false)
 		if err != nil {
@@ -112,8 +133,8 @@ func TestBuildParts_ToolUseSignatureHandling(t *testing.T) {
 		if len(parts) != 1 || parts[0].FunctionCall == nil {
 			t.Fatalf("expected 1 functionCall part, got %+v", parts)
 		}
-		if parts[0].ThoughtSignature != "sig_tool_abc" {
-			t.Fatalf("expected preserved tool signature %q, got %q", "sig_tool_abc", parts[0].ThoughtSignature)
+		if parts[0].ThoughtSignature != DummyThoughtSignature {
+			t.Fatalf("expected dummy tool signature %q, got %q", DummyThoughtSignature, parts[0].ThoughtSignature)
 		}
 	})
 

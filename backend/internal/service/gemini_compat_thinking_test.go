@@ -271,10 +271,17 @@ func TestConvertClaudeMessagesToGemini_DropsHistoryThinkingBlocks(t *testing.T) 
 	require.NotContains(t, string(out), "opaque")
 
 	contents := gjson.GetBytes(out, "contents").Array()
-	require.Len(t, contents, 4)
+	// The thought-only assistant turn is dropped, which makes the two adjacent
+	// user turns merge into one — Gemini only accepts alternating roles.
+	require.Len(t, contents, 3)
+	require.Equal(t, "user", contents[0].Get("role").String())
 	require.Equal(t, "model", contents[1].Get("role").String())
 	require.Len(t, contents[1].Get("parts").Array(), 1)
 	require.Equal(t, "Hello", contents[1].Get("parts.0.text").String())
+	require.Equal(t, "user", contents[2].Get("role").String())
+	require.Len(t, contents[2].Get("parts").Array(), 2)
+	require.Equal(t, "again", contents[2].Get("parts.0.text").String())
+	require.Equal(t, "last", contents[2].Get("parts.1.text").String())
 	for i, content := range contents {
 		require.NotEmpty(t, content.Get("parts").Array(), "contents[%d] has empty parts", i)
 	}

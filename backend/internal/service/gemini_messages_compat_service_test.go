@@ -619,27 +619,16 @@ func TestCleanToolSchema_TraversesRetainedSchemaValuedKeywords(t *testing.T) {
 
 	cleaned, ok := cleanToolSchema(schema).(map[string]any)
 	require.True(t, ok)
-	expectedEnums := map[string][]any{
-		"additionalItems":       {"additional"},
-		"unevaluatedItems":      {"unevaluated item"},
-		"unevaluatedProperties": {"unevaluated property"},
+	// Google AI Studio rejects the whole request with 400 "Unknown name" for
+	// these keywords, so they must not survive the sanitizer at any depth.
+	for _, keyword := range []string{"additionalItems", "unevaluatedItems", "unevaluatedProperties", "dependencies"} {
+		require.NotContains(t, cleaned, keyword)
 	}
-	for keyword, expectedEnum := range expectedEnums {
-		child, ok := cleaned[keyword].(map[string]any)
-		require.True(t, ok)
-		require.Equal(t, expectedEnum, child["enum"])
-		require.NotContains(t, child, "const")
-		require.NotContains(t, child, "examples")
+	encoded, err := json.Marshal(cleaned)
+	require.NoError(t, err)
+	for _, keyword := range []string{"additionalItems", "unevaluatedItems", "unevaluatedProperties", "dependencies", "const", "examples"} {
+		require.NotContains(t, string(encoded), `"`+keyword+`"`)
 	}
-
-	dependencies, ok := cleaned["dependencies"].(map[string]any)
-	require.True(t, ok)
-	dependencySchema, ok := dependencies["schema dependency"].(map[string]any)
-	require.True(t, ok)
-	require.Equal(t, []any{"dependency"}, dependencySchema["enum"])
-	require.NotContains(t, dependencySchema, "const")
-	require.NotContains(t, dependencySchema, "examples")
-	require.Equal(t, []any{"first", "second"}, dependencies["required dependency"])
 }
 
 func TestCleanToolSchema_IntersectsStringConstWithEnum(t *testing.T) {
@@ -718,12 +707,15 @@ func TestCleanToolSchema_PreservesNestedOneOfCombinator(t *testing.T) {
 	require.True(t, ok)
 	valueSchema, ok := properties["value"].(map[string]any)
 	require.True(t, ok)
-	oneOf, ok := valueSchema["oneOf"].([]any)
+	// Gemini understands anyOf but not oneOf; the sanitizer folds oneOf into
+	// anyOf so the union semantics survive the Schema proto.
+	require.NotContains(t, valueSchema, "oneOf")
+	anyOf, ok := valueSchema["anyOf"].([]any)
 	require.True(t, ok)
-	require.Len(t, oneOf, 2)
-	firstBranch, ok := oneOf[0].(map[string]any)
+	require.Len(t, anyOf, 2)
+	firstBranch, ok := anyOf[0].(map[string]any)
 	require.True(t, ok)
-	secondBranch, ok := oneOf[1].(map[string]any)
+	secondBranch, ok := anyOf[1].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, []any{"a"}, firstBranch["enum"])
 	require.Equal(t, []any{"b"}, secondBranch["enum"])

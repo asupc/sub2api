@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -468,6 +469,20 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 		if len(parts) == 0 {
 			continue
 		}
+		// Gemini/v1internal requires functionResponse parts to live in a user
+		// turn; a mid-conversation tool result occasionally arrives attached to
+		// an assistant message when clients replay compacted histories.
+		if role != "user" && partsContainFunctionResponse(parts) {
+			role = "user"
+		}
+
+		// Claude clients emit several consecutive user turns (tool_result then
+		// the next prompt). Antigravity expects alternating roles, so merge
+		// adjacent turns with the same role instead of sending them separately.
+		if n := len(contents); n > 0 && contents[n-1].Role == role {
+			contents[n-1].Parts = append(contents[n-1].Parts, parts...)
+			continue
+		}
 
 		contents = append(contents, GeminiContent{
 			Role:  role,
@@ -475,13 +490,68 @@ func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isT
 		})
 	}
 
+	// A trailing model turn carrying only thinking leaves the model with
+	// nothing to answer and is rejected by some endpoints.
+	if n := len(contents); n > 0 && contents[n-1].Role == "model" && partsThoughtOnly(contents[n-1].Parts) {
+		contents = contents[:n-1]
+	}
+
 	return contents, systemParts, strippedThinking, nil
+}
+
+func partsContainFunctionResponse(parts []GeminiPart) bool {
+	for _, part := range parts {
+		if part.FunctionResponse != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func partsThoughtOnly(parts []GeminiPart) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	for _, part := range parts {
+		if !part.Thought {
+			return false
+		}
+	}
+	return true
 }
 
 // DummyThoughtSignature 用于跳过 Gemini 3 thought_signature 验证
 // 参考: https://ai.google.dev/gemini-api/docs/thought-signatures
 // 导出供跨包使用（如 gemini_native_signature_cleaner 跨账号修复）
 const DummyThoughtSignature = "skip_thought_signature_validator"
+
+// sanitizeGeminiThoughtSignature returns a signature that the Antigravity
+// Gemini endpoint can accept as protobuf `TYPE_BYTES`. Claude-issued, truncated
+// or non-base64 signatures make the upstream answer 400 `Invalid value at
+// 'request.contents[..].thought_signature'`, which costs a full retry through
+// the signature rectifier. Empty string means "use DummyThoughtSignature".
+func sanitizeGeminiThoughtSignature(signature string) string {
+	signature = strings.TrimSpace(signature)
+	if signature == "" || signature == DummyThoughtSignature {
+		return signature
+	}
+	// Real Gemini thought signatures are protobuf blobs, far longer than the
+	// short opaque strings some clients echo back.
+	if len(signature) < 40 {
+		return ""
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if _, err := encoding.DecodeString(signature); err == nil {
+			return signature
+		}
+	}
+	return ""
+}
 
 // buildParts 构建消息的 parts
 // allowDummyThought: 只有 Gemini 模型支持 dummy thought signature
@@ -519,19 +589,22 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 			}
 			// signature 处理：
 			// - Claude 模型（allowDummyThought=false）：必须是上游返回的真实 signature（dummy 视为缺失）
-			// - Gemini 模型（allowDummyThought=true）：优先透传真实 signature，缺失时使用 dummy signature
-			if block.Signature != "" && (allowDummyThought || block.Signature != DummyThoughtSignature) {
+			// - Gemini 模型（allowDummyThought=true）：只透传能作为 TYPE_BYTES 接受的真实签名，
+			//   缺失或明显非法（Claude 签发/截断/非 base64）时使用 dummy signature
+			if allowDummyThought {
+				part.ThoughtSignature = sanitizeGeminiThoughtSignature(block.Signature)
+				if part.ThoughtSignature == "" {
+					part.ThoughtSignature = DummyThoughtSignature
+				}
+			} else if block.Signature != "" && block.Signature != DummyThoughtSignature {
 				part.ThoughtSignature = block.Signature
-			} else if !allowDummyThought {
+			} else {
 				// Claude 模型需要有效 signature；在缺失时降级为普通文本，并在上层禁用 thinking mode。
 				if strings.TrimSpace(block.Thinking) != "" {
 					parts = append(parts, GeminiPart{Text: block.Thinking})
 				}
 				strippedThinking = true
 				continue
-			} else {
-				// Gemini 模型使用 dummy signature
-				part.ThoughtSignature = DummyThoughtSignature
 			}
 			parts = append(parts, part)
 
@@ -560,11 +633,14 @@ func buildParts(content json.RawMessage, toolIDToName map[string]string, allowDu
 			}
 			// tool_use 的 signature 处理：
 			// - Claude 模型（allowDummyThought=false）：必须是上游返回的真实 signature（dummy 视为缺失）
-			// - Gemini 模型（allowDummyThought=true）：优先透传真实 signature，缺失时使用 dummy signature
-			if block.Signature != "" && (allowDummyThought || block.Signature != DummyThoughtSignature) {
+			// - Gemini 模型（allowDummyThought=true）：校验后透传，非法/缺失时使用 dummy signature
+			if allowDummyThought {
+				part.ThoughtSignature = sanitizeGeminiThoughtSignature(block.Signature)
+				if part.ThoughtSignature == "" {
+					part.ThoughtSignature = DummyThoughtSignature
+				}
+			} else if block.Signature != "" && block.Signature != DummyThoughtSignature {
 				part.ThoughtSignature = block.Signature
-			} else if allowDummyThought {
-				part.ThoughtSignature = DummyThoughtSignature
 			}
 			parts = append(parts, part)
 

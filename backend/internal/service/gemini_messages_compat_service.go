@@ -3706,7 +3706,10 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 					}
 					signature, _ := bm["signature"].(string)
 					signature = strings.TrimSpace(signature)
-					if signature == "" {
+					// A signature the API cannot parse as TYPE_BYTES (Claude-issued,
+					// truncated or non-base64) is rejected with a 400; fall back to
+					// the documented validator-skip token instead.
+					if !isPlausibleGeminiThoughtSignature(signature) {
 						signature = geminiDummyThoughtSignature
 					}
 					parts = append(parts, map[string]any{
@@ -3774,7 +3777,124 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 			"parts": parts,
 		})
 	}
-	return out, nil
+	return normalizeGeminiContents(out), nil
+}
+
+// normalizeGeminiContents keeps the Gemini request structurally valid for agent
+// loops: functionResponse parts always live in a user turn, roles always
+// alternate, and a trailing model turn that only carries thinking is dropped
+// (some Gemini endpoints reject it). Claude clients routinely emit several
+// consecutive user turns (tool_result followed by the next user prompt), which
+// upstreams otherwise see as an invalid role sequence.
+// isPlausibleGeminiThoughtSignature reports whether a client-supplied
+// signature can be sent to the Gemini API as protobuf TYPE_BYTES.
+func isPlausibleGeminiThoughtSignature(signature string) bool {
+	signature = strings.TrimSpace(signature)
+	if signature == "" {
+		return false
+	}
+	if signature == geminiDummyThoughtSignature {
+		return true
+	}
+	if len(signature) < 40 {
+		return false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		if _, err := encoding.DecodeString(signature); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeGeminiContents(contents []any) []any {
+	if len(contents) == 0 {
+		return contents
+	}
+
+	normalized := make([]any, 0, len(contents))
+	for _, raw := range contents {
+		content, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		parts, _ := content["parts"].([]any)
+		if len(parts) == 0 {
+			continue
+		}
+		role, _ := content["role"].(string)
+		if role != "model" {
+			role = "user"
+		}
+		if role != "user" && geminiPartsContainFunctionResponse(parts) {
+			role = "user"
+		}
+
+		if last, ok := normalizedLastContent(normalized, role); ok {
+			last["parts"] = append(last["parts"].([]any), parts...)
+			continue
+		}
+		content["role"] = role
+		content["parts"] = parts
+		normalized = append(normalized, content)
+	}
+
+	// Drop a trailing model turn whose only content is thinking/reasoning: the
+	// API has nothing to answer and rejects thought-only turns downstream.
+	if n := len(normalized); n > 0 {
+		last, _ := normalized[n-1].(map[string]any)
+		if role, _ := last["role"].(string); role == "model" && geminiPartsThoughtOnly(last["parts"]) {
+			normalized = normalized[:n-1]
+		}
+	}
+
+	return normalized
+}
+
+func normalizedLastContent(contents []any, role string) (map[string]any, bool) {
+	if len(contents) == 0 {
+		return nil, false
+	}
+	last, ok := contents[len(contents)-1].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if lastRole, _ := last["role"].(string); lastRole != role {
+		return nil, false
+	}
+	return last, true
+}
+
+func geminiPartsContainFunctionResponse(parts []any) bool {
+	for _, raw := range parts {
+		part, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, ok := part["functionResponse"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func geminiPartsThoughtOnly(parts any) bool {
+	items, ok := parts.([]any)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	for _, raw := range items {
+		part, ok := raw.(map[string]any)
+		if !ok || part["thought"] != true {
+			return false
+		}
+	}
+	return true
 }
 
 func extractClaudeContentText(v any) string {
@@ -3967,6 +4087,27 @@ func cleanToolSchema(schema any) any {
 	return cleanToolSchemaNode(schema, true)
 }
 
+// geminiUnsupportedSchemaKeywords lists JSON Schema keywords that the Gemini
+// generateContent Schema proto does not understand. Google rejects the whole
+// request with 400 `Invalid JSON payload received. Unknown name "..."` when one
+// leaks through, which is exactly what agent tool schemas (Claude Code, Codex,
+// MCP servers) trigger — e.g. `propertyNames` inside a tool's input_schema.
+var geminiUnsupportedSchemaKeywords = map[string]struct{}{
+	"$schema": {}, "$id": {}, "$ref": {}, "$anchor": {}, "$comment": {},
+	"$dynamicRef": {}, "$recursiveRef": {}, "$defs": {}, "definitions": {},
+	"additionalProperties": {}, "patternProperties": {}, "propertyNames": {},
+	"unevaluatedProperties": {}, "unevaluatedItems": {}, "additionalItems": {},
+	"dependencies": {}, "dependentSchemas": {}, "dependentRequired": {},
+	"if": {}, "then": {}, "else": {}, "not": {},
+	"contains": {}, "minContains": {}, "maxContains": {},
+	"contentSchema": {}, "contentEncoding": {}, "contentMediaType": {},
+	"deprecated": {}, "examples": {}, "readOnly": {}, "writeOnly": {},
+	// Gemini Schema has no exclusive bounds and the compat path historically
+	// dropped these length/size constraints; keep that behavior stable.
+	"minLength": {}, "maxLength": {}, "minItems": {}, "maxItems": {},
+	"exclusiveMinimum": {}, "exclusiveMaximum": {},
+}
+
 func cleanToolSchemaNode(schema any, schemaNode bool) any {
 	if schema == nil {
 		return nil
@@ -3982,19 +4123,20 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 			return cleaned
 		}
 
+		// Gemini only supports a single schema per node: flatten allOf and
+		// translate oneOf/prefixItems into their supported equivalents.
+		flattenAllOfSchema(v)
+		normalizeOneOfSchema(v)
+		normalizePrefixItemsSchema(v)
+
 		cleaned := make(map[string]any)
 		for key, value := range v {
-			// 跳过不支持的字段
-			if key == "$schema" || key == "$id" || key == "$ref" ||
-				key == "$defs" || key == "definitions" ||
-				key == "additionalProperties" || key == "patternProperties" || key == "minLength" ||
-				key == "maxLength" || key == "minItems" || key == "maxItems" || key == "exclusiveMinimum" ||
-				key == "deprecated" || key == "examples" {
+			if _, unsupported := geminiUnsupportedSchemaKeywords[key]; unsupported {
 				continue
 			}
 
 			switch key {
-			case "properties", "dependentSchemas":
+			case "properties":
 				if propertySchemas, ok := value.(map[string]any); ok {
 					cleanedProperties := make(map[string]any, len(propertySchemas))
 					for propertyName, propertySchema := range propertySchemas {
@@ -4004,24 +4146,9 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 				} else {
 					cleaned[key] = cleanToolSchemaNode(value, false)
 				}
-			case "items", "contains", "propertyNames", "if", "then", "else", "not", "contentSchema",
-				"additionalItems", "unevaluatedItems", "unevaluatedProperties":
+			case "items":
 				cleaned[key] = cleanToolSchemaNode(value, true)
-			case "dependencies":
-				if dependencies, ok := value.(map[string]any); ok {
-					cleanedDependencies := make(map[string]any, len(dependencies))
-					for propertyName, dependency := range dependencies {
-						if dependencySchema, ok := dependency.(map[string]any); ok {
-							cleanedDependencies[propertyName] = cleanToolSchemaNode(dependencySchema, true)
-						} else {
-							cleanedDependencies[propertyName] = cleanToolSchemaNode(dependency, false)
-						}
-					}
-					cleaned[key] = cleanedDependencies
-				} else {
-					cleaned[key] = cleanToolSchemaNode(value, false)
-				}
-			case "anyOf", "allOf", "oneOf", "prefixItems":
+			case "anyOf", "oneOf":
 				if schemas, ok := value.([]any); ok {
 					cleanedSchemas := make([]any, len(schemas))
 					for i, childSchema := range schemas {
@@ -4096,6 +4223,112 @@ func cleanToolSchemaNode(schema any, schemaNode bool) any {
 	default:
 		return v
 	}
+}
+
+// flattenAllOfSchema merges every allOf branch into the parent node, because
+// Gemini's Schema proto has no allOf. Properties and required are unioned;
+// other keywords only fill gaps so the parent's explicit value wins.
+func flattenAllOfSchema(m map[string]any) {
+	allOf, ok := m["allOf"].([]any)
+	if !ok {
+		return
+	}
+	delete(m, "allOf")
+	for _, branch := range allOf {
+		branchMap, ok := branch.(map[string]any)
+		if !ok {
+			continue
+		}
+		for key, value := range branchMap {
+			switch key {
+			case "properties":
+				target, _ := m["properties"].(map[string]any)
+				if target == nil {
+					target = make(map[string]any)
+					m["properties"] = target
+				}
+				source, _ := value.(map[string]any)
+				for propertyName, propertySchema := range source {
+					if _, exists := target[propertyName]; !exists {
+						target[propertyName] = cloneJSONValue(propertySchema)
+					}
+				}
+			case "required":
+				target, _ := m["required"].([]any)
+				source, _ := value.([]any)
+				for _, required := range source {
+					if !jsonArrayContainsValue(target, required) {
+						target = append(target, required)
+					}
+				}
+				m["required"] = target
+			default:
+				if _, exists := m[key]; !exists {
+					m[key] = cloneJSONValue(value)
+				}
+			}
+		}
+	}
+}
+
+// normalizeOneOfSchema folds oneOf into anyOf (the only union keyword Gemini
+// understands).
+func normalizeOneOfSchema(m map[string]any) {
+	oneOf, ok := m["oneOf"].([]any)
+	if !ok {
+		return
+	}
+	delete(m, "oneOf")
+	if anyOf, exists := m["anyOf"].([]any); exists {
+		m["anyOf"] = append(anyOf, oneOf...)
+		return
+	}
+	m["anyOf"] = oneOf
+}
+
+// normalizePrefixItemsSchema replaces tuple validation with a single items
+// schema (the best-effort first branch), which Gemini accepts for arrays.
+func normalizePrefixItemsSchema(m map[string]any) {
+	prefixItems, ok := m["prefixItems"].([]any)
+	if !ok {
+		return
+	}
+	delete(m, "prefixItems")
+	if items, exists := m["items"]; exists && items != nil {
+		return
+	}
+	if len(prefixItems) == 0 {
+		return
+	}
+	m["items"] = cloneJSONValue(prefixItems[0])
+}
+
+func cloneJSONValue(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(v))
+		for key, child := range v {
+			cloned[key] = cloneJSONValue(child)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(v))
+		for i, child := range v {
+			cloned[i] = cloneJSONValue(child)
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+func jsonArrayContainsValue(values []any, target any) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeGeminiEnum(values []any) ([]any, bool) {

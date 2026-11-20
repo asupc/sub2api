@@ -301,6 +301,29 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			}
 			setActualUpstreamEndpoint(c, EndpointAntigravityGenerateContent)
 			result, err = h.antigravityGatewayService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
+		} else if account.Platform == service.PlatformGemini {
+			// Gemini accounts speak Anthropic Messages internally; the compat
+			// service translates Responses -> Anthropic -> Gemini and streams the
+			// result back as Responses events.
+			if h.geminiCompatService == nil {
+				h.responsesErrorResponse(c, http.StatusBadGateway, "upstream_error", "Gemini compatibility service is not configured")
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			// The native input-token counting sub-endpoint has no Gemini
+			// equivalent; answer 404 so clients fall back to local estimation
+			// instead of generating a full (billed) completion.
+			if service.IsOpenAIResponsesInputTokensRequestPath(c) {
+				h.responsesErrorResponse(c, http.StatusNotFound, "not_found_error", "input_tokens endpoint is not supported for this platform")
+				if accountReleaseFunc != nil {
+					accountReleaseFunc()
+				}
+				return
+			}
+			setActualUpstreamEndpoint(c, EndpointGeminiModels)
+			result, err = h.geminiCompatService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
 		} else {
 			result, err = h.gatewayService.ForwardAsResponses(requestCtx, c, account, forwardBody, parsedReq)
 		}

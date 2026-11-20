@@ -15,9 +15,10 @@ const (
 	antigravityTokenCacheSkew   = 5 * time.Minute
 	antigravityBackfillCooldown = 5 * time.Minute
 	// antigravityRequestRefreshTimeout 请求路径上 token 刷新的最大等待时间。
-	// 超过此时间直接放弃刷新、标记账号临时不可调度并触发 failover，
-	// 让后台 TokenRefreshService 在下个周期继续重试。
-	antigravityRequestRefreshTimeout = 8 * time.Second
+	// 超过此时间放弃本次刷新并按策略失败/failover，由后台 TokenRefreshService
+	// 在下个周期继续重试。Google OAuth 在网络抖动时可能超过 10s，取值过短会把
+	// 一次慢刷新变成 agent 请求的 502（已实测出现过 context deadline exceeded）。
+	antigravityRequestRefreshTimeout = 30 * time.Second
 )
 
 // AntigravityTokenCache token cache interface.
@@ -103,8 +104,12 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 		defer cancel()
 		result, err := p.refreshAPI.RefreshIfNeeded(refreshCtx, account, p.executor, antigravityTokenRefreshSkew)
 		if err != nil {
-			// 标记账号临时不可调度，避免后续请求继续命中
-			p.markTempUnschedulable(account, err)
+			// A slow refresh (network latency to Google) must not take the account
+			// out of rotation for ten minutes — the background refresher retries
+			// every cycle. Only persistent failures mark the account unavailable.
+			if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+				p.markTempUnschedulable(account, err)
+			}
 			if p.refreshPolicy.OnRefreshError == ProviderRefreshErrorReturn {
 				return "", err
 			}
