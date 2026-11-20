@@ -447,12 +447,12 @@ type QuotaPackage struct {
 
 // QuotaUsage /api/v2/quota/usage 聚合结果（fetch_credits L2316-2385）。
 type QuotaUsage struct {
-	Remain   int    `json:"remain"`
-	Used     int    `json:"used"`
-	Size     int    `json:"size"`
-	Exceeded bool   `json:"exceeded"`
-	UsagePct any    `json:"usage_pct"`
-	ExpiresAt int64 `json:"expires_at"`
+	Remain    int            `json:"remain"`
+	Used      int            `json:"used"`
+	Size      int            `json:"size"`
+	Exceeded  bool           `json:"exceeded"`
+	UsagePct  any            `json:"usage_pct"`
+	ExpiresAt int64          `json:"expires_at"`
 	Packages  []QuotaPackage `json:"packages"`
 	// Composition 额度构成四桶（hub #141：套餐内/资源包/SOTA/共享池，含
 	// displayLabels 展示名与 available=false 的停用包）。合计（remain/used/
@@ -624,21 +624,21 @@ func (c *Client) QuotaUsage(ctx context.Context, creds Credentials) (*QuotaUsage
 	}
 
 	out := &QuotaUsage{
-		Remain:           remain,
-		Used:             used,
-		Size:             size,
-		Exceeded:         raw.IsQuotaExceeded,
-		UsagePct:         raw.TotalUsagePercentage,
-		ExpiresAt:        normalizeEpoch(raw.ExpiresAt),
-		Packages:         packages,
-		SharedRemain:     sharedRemain,
-		SharedUsed:       sharedUsed,
-		SharedSize:       sharedSize,
-		SharedAvailable:  sharedAvailable,
-		SharedUnlimited:  sharedUnlimited,
-		SharedSource:     sharedKey,
-		EffectiveRemain:  effectiveRemain,
-		Source:           source,
+		Remain:          remain,
+		Used:            used,
+		Size:            size,
+		Exceeded:        raw.IsQuotaExceeded,
+		UsagePct:        raw.TotalUsagePercentage,
+		ExpiresAt:       normalizeEpoch(raw.ExpiresAt),
+		Packages:        packages,
+		SharedRemain:    sharedRemain,
+		SharedUsed:      sharedUsed,
+		SharedSize:      sharedSize,
+		SharedAvailable: sharedAvailable,
+		SharedUnlimited: sharedUnlimited,
+		SharedSource:    sharedKey,
+		EffectiveRemain: effectiveRemain,
+		Source:          source,
 	}
 
 	// hub #141（issue 系列）：构成归一化（四桶）覆盖合计——SOTA
@@ -1331,6 +1331,9 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 	var codes []CampaignCodeGrant
 	// hasPending/hasLocked 仅用于 message 附注去重（对齐 Python "名额已发完/新人任务"关键词短路）。
 	var hasPending, hasLocked bool
+	// 上游偶发重复下发同一活动：按 campaign id 去重，避免签到额度/文案虚增
+	//（trae-workbuddy-switch 4a634d6）。
+	seenCampaign := map[string]bool{}
 	for _, item := range st.Campaigns {
 		if in.OnlyKinds != nil && !kindAllowed(in.OnlyKinds, strings.ToUpper(strings.TrimSpace(item.BenefitKind))) {
 			continue // 只要"每日签到领积分"时跳过券类/其它奖励
@@ -1339,6 +1342,14 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 		if cid == "" {
 			continue
 		}
+		identity := cid
+		if identity == "" {
+			identity = strings.TrimSpace(item.CampaignKey)
+		}
+		if seenCampaign[identity] {
+			continue
+		}
+		seenCampaign[identity] = true
 		label := campaignLabel(item)
 		status := strings.ToUpper(strings.TrimSpace(item.ClaimStatus))
 		actionType := strings.ToUpper(strings.TrimSpace(item.ActionType))
@@ -1347,9 +1358,13 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 		if status == "CLAIMED" {
 			// #25 遗留：归类先于 action_type 过滤——官方领取后会把 actionType
 			// 降级成 VIEW_DETAILS（intl 实测），先过滤会丢掉"已领"事实、误报
-			// "暂无可领取活动"。有奖励（amount>0）或仍是可领类 → already；
-			// 真·详情类（无奖励）才算 views。
-			if amount > 0 || actionType == "" || actionType == "CLAIM_BENEFIT" {
+			// "暂无可领取活动"。
+			//
+			// 4a634d6：只有「每日签到」类活动才计入 already。历史已领的一次性促销
+			//（「极致模型限时体验」等）属于详情/历史，归 views——旧实现按「有奖励」
+			// 一刀切，会让这类包永久伪装成「今日已签」。
+			if campaignIsDailyCheckinAt(item, now.Unix()) &&
+				(amount > 0 || actionType == "" || actionType == "CLAIM_BENEFIT") {
 				out.Already = append(out.Already, label)
 			} else {
 				out.Views = append(out.Views, label)
@@ -1535,9 +1550,9 @@ type CreditUsage struct {
 	// Total 窗口内累计消耗积分（官方口径，不是我们的 token 估算）。
 	Total float64 `json:"total"`
 	// Peak 单日峰值；PeakDate 为对应日期。
-	Peak     float64    `json:"peak"`
-	PeakDate string     `json:"peak_date"`
-	Unit     string     `json:"unit"`
+	Peak     float64     `json:"peak"`
+	PeakDate string      `json:"peak_date"`
+	Unit     string      `json:"unit"`
 	Daily    []CreditDay `json:"daily"`
 }
 

@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -76,9 +77,13 @@ func workbuddyCNChatBaseURL() string {
 	return DefaultWorkbuddyCNChatBaseURL
 }
 
+// workbuddyConsoleSystemFallback 兜底 system 正文：只写行为约定，不写身份
+// （panel e4e6f5c / issue #187）。与 pkg/workbuddy 的 consoleSystemFallback 同文。
+const workbuddyConsoleSystemFallback = "Follow the user's instructions and respond in the user's language."
+
 // workbuddyEnsureConsoleSystem global realm 兜底 system 注入（移植自 pkg
 // client.go ensureConsoleSystem——防上游 code 11-128，未导出故在此复刻）：
-// 首条消息非 system 时在 messages 最前补 fallback system。
+// 首条消息非 system 时在 messages 最前补 fallback system（不声明身份）。
 func workbuddyEnsureConsoleSystem(body []byte) []byte {
 	if len(body) == 0 {
 		return body
@@ -96,7 +101,7 @@ func workbuddyEnsureConsoleSystem(body []byte) []byte {
 			return body
 		}
 	}
-	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
+	obj["messages"] = append([]any{map[string]any{"role": "system", "content": workbuddyConsoleSystemFallback}}, msgs...)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body
@@ -564,6 +569,14 @@ func (s *OpenAIGatewayService) applyWorkbuddyUpstreamErrorKind(
 		// 11102 该后端无此模型：不罚账号；向客户端返回模型不可用（不换号）。
 		return true, nil
 
+	case kind == workbuddy.KindBadParams:
+		// 请求级确定性错误（11101 请求体畸形 / 11151 空 text 段 / 11152 工具名不合规）：
+		// 同 body 换任何账号结果不变。不罚号、不轮转，400 原文透传让客户端改请求
+		//（panel 733942a / f987bac：落到通用链会逐号白打 + 喂连败，末端 503 把
+		//「改 schema」报成「账号都挂了」）。
+		slog.Warn("workbuddy bad params (request-level, no punishment, no rotate)", "account_id", account.ID, "status", resp.StatusCode, "message", upstreamMsg)
+		return true, nil
+
 	case kind == workbuddy.KindChannelRefused:
 		// 11-128 通道校验失败（上游判定请求可能不是官方客户端发出）：账号本身健康——
 		// 官方客户端可正常使用同一账号，这不是账号级故障。不罚账号（无冷却/禁用/错误
@@ -580,9 +593,18 @@ func (s *OpenAIGatewayService) applyWorkbuddyUpstreamErrorKind(
 		// 客户端 SDK 按退避自然重试（429 会被客户端误当作自身 key 被限流），body 保留
 		// 上游原文（含 requestId）。移植自 workbuddy2api-panel f14f374：按限流处置
 		// 会逐号软冷却，2 秒内即可把整池健康号全部误杀。
-		slog.Warn("workbuddy upstream busy (6021 queue.full, no punishment, no rotate)", "account_id", account.ID, "message", upstreamMsg)
+		slog.Warn("workbuddy upstream busy (queue/provider overload, no punishment, no rotate)", "account_id", account.ID, "message", upstreamMsg)
 		appendFailover("upstream_busy")
 		resp.StatusCode = http.StatusServiceUnavailable
+		// 上游若给了等待口径（11134 的 retry_policy.retry_after / 6020-6021 的
+		// data.retry_after），透出 Retry-After 让客户端按上游节奏退避；已有头优先。
+		if resp.Header.Get("Retry-After") == "" {
+			if d, ok := workbuddy.ParseRetryAfter(resp.Header); ok {
+				resp.Header.Set("Retry-After", strconv.Itoa(int(d.Seconds())))
+			} else if d, ok := workbuddy.ParseBodyRetryAfter(respBody); ok {
+				resp.Header.Set("Retry-After", strconv.Itoa(int(d.Seconds())))
+			}
+		}
 		return true, nil
 
 	case kind == workbuddy.KindAccountFault:

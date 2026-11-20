@@ -15,13 +15,16 @@ import (
 // dedicatedResourcePackages（数组 + displayLabels zh-CN「SOTA 专属积分」）。
 // 官方口径钉住：面板旧口径只报「资源包 1,800」，实际 1,800 + 1,961 = 3,761
 //（总量 3,800 = 1,800 + 2,000；已用 39）。
+//
+// expiresAt 用远期值（2100-01-01）：4a634d6 起过期包不计入合计，固定 2026 年
+// 的时间戳会让这个「官方实测样本」随日期推移变红。
 const sotaSample = `{
   "userQuota": {"remaining": 0, "used": 0, "total": 0},
   "addOnQuota": {"remaining": 1800, "used": 0, "total": 1800},
   "isQuotaExceeded": false,
   "totalUsagePercentage": 1.0,
   "dedicatedResourcePackages": [{
-    "total": 2000, "used": 39, "remaining": 1961, "expiresAt": 1794146889433,
+    "total": 2000, "used": 39, "remaining": 1961, "expiresAt": 4102444800000,
     "displayLabels": [{"dimension": "title",
                        "valueI18n": {"zh-CN": "SOTA 专属积分"}}]
   }]

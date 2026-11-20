@@ -496,7 +496,7 @@ func TestPrepareChatBodyPipelineAdditions(t *testing.T) {
 // --- 模型级 5xx 不熔断（hub #499） ---
 
 func TestModelScopedServerErrorClassification(t *testing.T) {
-	for _, code := range []string{"11102", "11129", "11134", "11150", "11158"} {
+	for _, code := range []string{"11102", "11129", "11150", "11158"} {
 		body := `{"code":` + code + `,"msg":"x"}`
 		if !IsModelScopedServerError(500, body) {
 			t.Errorf("500 + code %s 应判模型级", code)
@@ -504,6 +504,10 @@ func TestModelScopedServerErrorClassification(t *testing.T) {
 		if got := ClassifyError(500, []byte(body)); got != KindModelBlocked {
 			t.Errorf("500 + code %s kind=%s want %s", code, got, KindModelBlocked)
 		}
+	}
+	// 11134 是供应商过载（panel 4830686）：归 upstream_busy，不罚号不轮转。
+	if got := ClassifyError(500, []byte(`{"code":11134,"msg":"provider unavailable"}`)); got != KindUpstreamBusy {
+		t.Errorf("500+11134 kind=%s want %s", got, KindUpstreamBusy)
 	}
 	// 普通 500 仍按账号故障语义（KindServer）。
 	if got := ClassifyError(500, []byte(`{"code":0,"msg":"boom"}`)); got != KindServer {

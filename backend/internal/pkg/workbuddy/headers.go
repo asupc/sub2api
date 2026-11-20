@@ -33,6 +33,12 @@ const (
 	// 的 x-stainless-* SDK 指纹版本（hub sdk / node，OpenAI Node SDK 6.25.0 默认值）。
 	defaultSDKVersion  = "6.25.0"
 	defaultNodeVersion = "v22.21.1"
+
+	// defaultClientIdentityPlatform / defaultClientIdentityProduct 5.11.3 桌面端
+	// X-Client-* 三头里的两段固定值（panel 96265d7，2026-11-18 真机 130 次命中无一
+	// 例外：windows / WorkBuddy）。版本段不在这里，走 clientVersion（可覆盖）。
+	defaultClientIdentityPlatform = "windows"
+	defaultClientIdentityProduct  = "WorkBuddy"
 )
 
 // Origin/Referer 基础域（按 realm 切换）。
@@ -81,6 +87,28 @@ func cliVersion(c Credentials) string {
 		return defaultCliVersionGlobal
 	}
 	return defaultCliVersionCN
+}
+
+// injectClientIdentityHeaders 注入 5.11.3 桌面端新增的 X-Client-* 三头。
+//
+// **只对国内版发，国际版一律不发**（panel 96265d7 / issue #257 的隔离口径）：
+// 国际分发包停在 5.9.4，app.asar 里没有 proxy-env2 的 registerOutboundHeaderProvider，
+// 官方国际客户端从不发这三个头；把国内 5.11.3 的形态套到国际链路等于给那条链加一层
+// 它不存在的指纹。版本段跟随 clientVersion（config 可覆盖）。
+//
+// 依据（2026-11-18 真机抓包）：三个头恒同现，取值固定；覆盖范围是全局 axios/undici
+// 拦截器，按 origin 判定而非路径——/v2/chat/completions、/v3/config、report、billing
+// 全带。头序不作为指纹（官方自身三族各异，Go 落盘按字典序）。
+//
+// X-Device-Token 不在这里补：取值只有客户端 Turing SDK 能产，账号配置了
+// device_token 时由 BillingHeaders 的既有注入点带上。
+func injectClientIdentityHeaders(req *http.Request, c Credentials) {
+	if c.IsGlobal() {
+		return
+	}
+	req.Header.Set("X-Client-Version", clientVersion(c))
+	req.Header.Set("X-Client-Platform", defaultClientIdentityPlatform)
+	req.Header.Set("X-Client-Product", defaultClientIdentityProduct)
 }
 
 // defaultWorkBuddyUA 组装默认客户端出站 UA（官方桌面端 buildUserAgent 形状）：
@@ -165,6 +193,10 @@ func commonHeaders(req *http.Request, c Credentials, sdkProfile bool) {
 		injectAccountStableHeaders(req, c)
 	}
 	req.Header.Set("User-Agent", userAgent(c))
+	// 5.11.3 的 X-Client-* 身份头：按 realm 隔离注入（国际版不发），见
+	// injectClientIdentityHeaders。放在 commonHeaders 是为了让 chat / refresh /
+	// v3-config / console 各族一处覆盖。
+	injectClientIdentityHeaders(req, c)
 }
 
 // desktopChatCompatEnabled 桌面 chat 可选协议一致性开关（hub #643）：
@@ -435,6 +467,9 @@ func BillingHeaders(req *http.Request, c Credentials) {
 	if c.DeviceToken != "" {
 		req.Header.Set("X-Device-Token", c.DeviceToken)
 	}
+	// X-Client-* 身份头：billing 真机同样带（resource-summary 全有），与 RPC 层同
+	// 口径按 realm 隔离。
+	injectClientIdentityHeaders(req, c)
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。

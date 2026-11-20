@@ -106,6 +106,24 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 		}
 	}
 
+	// 结构化输出：Anthropic output_config.format(json_schema) → Chat response_format
+	//（panel fa4d62c）。Anthropic 只带 {type,schema}，OpenAI 形状要求 name/strict，
+	// 这里补默认值；其余 type 没有 Chat 对应物，丢弃。
+	if req.OutputConfig != nil && req.OutputConfig.Format != nil &&
+		strings.EqualFold(strings.TrimSpace(req.OutputConfig.Format.Type), "json_schema") &&
+		len(req.OutputConfig.Format.Schema) > 0 {
+		if rf, err := json.Marshal(map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name":   "response",
+				"strict": true,
+				"schema": json.RawMessage(req.OutputConfig.Format.Schema),
+			},
+		}); err == nil {
+			out.ResponseFormat = rf
+		}
+	}
+
 	// Match the Responses bridge, including an explicit thinking disable.
 	out.ReasoningEffort = anthropicReasoningEffort(req)
 

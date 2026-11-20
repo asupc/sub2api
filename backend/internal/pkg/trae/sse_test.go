@@ -416,7 +416,12 @@ func TestTokenUsageCachedFromAllFourUpstreamShapes(t *testing.T) {
 		{"dirty clamped", map[string]any{"prompt_tokens": float64(100), "cached_tokens": float64(150)}, 100},
 	}
 	for _, c := range cases {
-		if got := TokenUsageFromValue(c.usage).Cached; got != c.want {
+		got := TokenUsageFromValue(c.usage).Cached
+		var gotVal uint64
+		if got != nil {
+			gotVal = *got
+		}
+		if gotVal != c.want {
 			t.Errorf("%s: cached = %d, want %d", c.name, got, c.want)
 		}
 	}
@@ -429,7 +434,8 @@ func TestTokenUsageToOpenAICachedTokensWireShape(t *testing.T) {
 	if _, ok := noHit["prompt_tokens_details"]; ok {
 		t.Fatal("no hit: prompt_tokens_details must be absent")
 	}
-	hit := TokenUsage{Prompt: 10, Completion: 1, Total: 11, Cached: 9}.ToOpenAI()
+	nine := uint64(9)
+	hit := TokenUsage{Prompt: 10, Completion: 1, Total: 11, Cached: &nine}.ToOpenAI()
 	details, ok := hit["prompt_tokens_details"].(map[string]any)
 	if !ok {
 		t.Fatal("with hit: prompt_tokens_details must be present")
@@ -439,5 +445,61 @@ func TestTokenUsageToOpenAICachedTokensWireShape(t *testing.T) {
 	}
 	if hit["prompt_tokens"].(uint64) != 10 {
 		t.Fatal("prompt_tokens keeps upstream total (includes cached)")
+	}
+}
+
+// db4754a：缓存三态——未观测 / 明确无命中（0）/ 命中。
+func TestTokenUsageCacheObservationTriState(t *testing.T) {
+	zero := float64(0)
+	// 显式 0 + 无池声明 ⇒ 不可测得的 miss，降级为未观测。
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(`{"prompt_cache_pool_record":null}`), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	pool := cachePoolAssigned(metadata)
+	if pool == nil || *pool {
+		t.Fatalf("explicit null pool = %v", pool)
+	}
+	usage := TokenUsageFromValue(map[string]any{"prompt_tokens": float64(10), "cached_tokens": zero})
+	merged := mergeTokenUsage(nil, usage, pool)
+	if merged.Cached != nil {
+		t.Fatalf("zero without pool must be unobserved, got %d", *merged.Cached)
+	}
+	// 明确有池 ⇒ 0 是可信的未命中。
+	assigned := true
+	merged2 := mergeTokenUsage(nil, usage, &assigned)
+	if merged2.Cached == nil || *merged2.Cached != 0 {
+		t.Fatalf("measured zero must stay 0: %+v", merged2.Cached)
+	}
+	// 命中优先于无池声明（识别上游口径变化）。
+	hit := TokenUsageFromValue(map[string]any{"prompt_tokens": float64(10), "cached_tokens": float64(7)})
+	merged3 := mergeTokenUsage(nil, hit, &[]bool{false}[0])
+	if merged3.Cached == nil || *merged3.Cached != 7 {
+		t.Fatalf("hit must survive no-pool claim: %+v", merged3.Cached)
+	}
+	// 未见到 metadata 时保持旧行为。
+	merged4 := mergeTokenUsage(nil, usage, nil)
+	if merged4.Cached == nil || *merged4.Cached != 0 {
+		t.Fatalf("legacy zero must stay zero: %+v", merged4.Cached)
+	}
+	// 后续帧没报缓存时沿用上一帧观测。
+	prev := uint64(5)
+	merged5 := mergeTokenUsage(&TokenUsage{Cached: &prev}, TokenUsage{Prompt: 10}, nil)
+	if merged5.Cached == nil || *merged5.Cached != 5 {
+		t.Fatalf("previous observation must carry over: %+v", merged5.Cached)
+	}
+}
+
+// db4754a：ToOpenAI 区分未观测（缺键）与实测 0（保留 0）。
+func TestTokenUsageToOpenAICacheWireShapeTriState(t *testing.T) {
+	unknown := TokenUsage{Prompt: 10, Completion: 1, Total: 11}.ToOpenAI()
+	if _, ok := unknown["prompt_tokens_details"]; ok {
+		t.Fatal("unobserved cache must omit prompt_tokens_details")
+	}
+	zero := uint64(0)
+	measured := TokenUsage{Prompt: 10, Completion: 1, Total: 11, Cached: &zero}.ToOpenAI()
+	details, ok := measured["prompt_tokens_details"].(map[string]any)
+	if !ok || details["cached_tokens"] != uint64(0) {
+		t.Fatalf("measured zero must be emitted: %#v", measured)
 	}
 }

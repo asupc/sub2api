@@ -50,7 +50,9 @@ func TestListTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTasks: %v", err)
 	}
-	if gotPlatform != "" {
+	// 5.11.3 桌面端全链路带 X-Client-Platform: windows（panel 96265d7）；mp 口径
+	// 的判别值是 miniprogram，不是「有没有这个头」。
+	if gotPlatform == mpPlatform {
 		t.Errorf("默认口径不应带 mp 头，got %q", gotPlatform)
 	}
 	byCode := map[string]Task{}
@@ -386,7 +388,8 @@ func TestAcceptPendingGrowthTasks(t *testing.T) {
 	var acceptedDefault, acceptedMP []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v2/activity/growth/tasks", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Client-Platform") != "" {
+		// 5.11.3 桌面端默认口径也带 X-Client-Platform: windows，判别必须按取值。
+		if r.Header.Get("X-Client-Platform") == mpPlatform {
 			// mp 口径下发 mp 专属任务。
 			_, _ = w.Write([]byte(`{"code":0,"data":{"tasks":[
 			  {"task_code":"Sequential_Tasks_1","target":1,"current":0,"accept_status":"not_accepted"},
@@ -400,7 +403,7 @@ func TestAcceptPendingGrowthTasks(t *testing.T) {
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
 		for _, v := range body["task_codes"].([]any) {
-			if r.Header.Get("X-Client-Platform") != "" {
+			if r.Header.Get("X-Client-Platform") == mpPlatform {
 				acceptedMP = append(acceptedMP, v.(string))
 			} else {
 				acceptedDefault = append(acceptedDefault, v.(string))

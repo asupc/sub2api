@@ -463,19 +463,31 @@ func (s *OpenAIGatewayService) scanCCStream(
 			st.Usage = *u
 		}
 
-		var chunk apicompat.ChatCompletionsChunk
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			logger.L().Warn(logPrefix+": failed to parse chat stream chunk",
-				zap.Error(err),
-				zap.String("request_id", requestID),
-			)
-			continue
+		// 上游粘帧（一个 data 行多个 JSON 对象）先拆再解析，避免整段被丢弃。
+		payloads := []string{payload}
+		if !json.Valid([]byte(payload)) {
+			if parts, ok := splitConcatenatedJSON(payload); ok {
+				payloads = parts
+			}
 		}
-		if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(payload) && chatChunkStartsResponsesOutput(&chunk) {
-			ms := int(time.Since(startTime).Milliseconds())
-			st.FirstTokenMs = &ms
+		for _, part := range payloads {
+			if u := extractCCStreamUsage(part); u != nil {
+				st.Usage = *u
+			}
+			var chunk apicompat.ChatCompletionsChunk
+			if err := json.Unmarshal([]byte(part), &chunk); err != nil {
+				logger.L().Warn(logPrefix+": failed to parse chat stream chunk",
+					zap.Error(err),
+					zap.String("request_id", requestID),
+				)
+				continue
+			}
+			if st.FirstTokenMs == nil && !isOpenAIChatUsageOnlyStreamChunk(part) && chatChunkStartsResponsesOutput(&chunk) {
+				ms := int(time.Since(startTime).Milliseconds())
+				st.FirstTokenMs = &ms
+			}
+			emit(&chunk)
 		}
-		emit(&chunk)
 	}
 
 	if err := scanner.Err(); err != nil {

@@ -38,6 +38,16 @@ type AnthropicRequest struct {
 // AnthropicOutputConfig controls output generation parameters.
 type AnthropicOutputConfig struct {
 	Effort string `json:"effort,omitempty"` // "low" | "medium" | "high" | "max"
+	// Format 结构化输出（Anthropic output_config.format）。仅 json_schema 有 Chat
+	// 对应物；见 AnthropicToChatCompletionsRequest 的 response_format 转发。
+	Format *AnthropicOutputFormat `json:"format,omitempty"`
+}
+
+// AnthropicOutputFormat Anthropic 结构化输出声明（type=json_schema + schema）。
+// Anthropic 没有 name/strict 字段，转 Chat 时补齐 OpenAI 形状。
+type AnthropicOutputFormat struct {
+	Type   string          `json:"type"`
+	Schema json.RawMessage `json:"schema,omitempty"`
 }
 
 // AnthropicThinking configures extended thinking in the Anthropic API.

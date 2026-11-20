@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -124,10 +125,28 @@ const accountRestrictedMsg = "request illegal"
 //
 // 移植自 workbuddy2api-panel 7a8b7a7（IsAccountRestricted）。
 func IsAccountRestricted(body string) bool {
-	if !strings.Contains(strings.ToLower(body), accountRestrictedMsg) {
+	if !hasBusinessCode(body, "11140") {
 		return false
 	}
-	return hasBusinessCode(body, "11140")
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, accountRestrictedMsg) {
+		return true
+	}
+	// 账号风控限制文书（panel d3edea9 / hub #422）：与 "request illegal" 同属设备/出口级
+	// 判据。只认账号专属措辞，泛化的「已被限制」会把模型/功能级限制误判成设备级扫荡。
+	for _, m := range restrictionMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// restrictionMarkers 11140 账号风控限制文书的专属措辞（面板 restrict.go 同款）。
+// 英文按小写比对（上游大小写不固定），中文原样。
+var restrictionMarkers = []string{
+	"账号存在异常行为",
+	"unusual activity",
 }
 
 // isChannelRefused 报告上游 body 是否为 WorkBuddy 的通道校验失败（11-128
@@ -418,7 +437,7 @@ func ClassifyError(statusCode int, body []byte) ErrorKind {
 // body 里时错误是**模型级**的（该后端/该参数对这个模型不成立），换任何账号都一样——
 // 不罚账号、不记 fails/熔断，把上游 5xx 原样透传（11158 除外：语义是账号类型权限，
 // 仍按模型锁处理）。普通 500 仍按账号故障走通用 failover。
-var modelScoped5xxCodes = []string{"11102", "11129", "11134", "11150", "11158"}
+var modelScoped5xxCodes = []string{"11102", "11129", "11150", "11158"}
 
 // IsModelScopedServerError 报告 5xx 响应是否携带模型级业务码（hub #499）。
 func IsModelScopedServerError(status int, body string) bool {
@@ -437,6 +456,13 @@ func classifyString(status int, body string) ErrorKind {
 	// 11102「该后端无此模型」须最先判：语义比计费/限流都更具体——若不先判，
 	// msg 里的 "service info not found" 会被更宽的 4xx 兜底归为 client。
 	if IsModelBlocked(status, body) {
+		return KindModelBlocked
+	}
+
+	// 11103「Backend [x] is not supported」是模型侧配置问题（panel b35a8d0）：真机
+	// 25 个号轮转 25 次同一句，上游自带 retry_policy.retry=false。判在计费/限流/5xx
+	// 之前——落到通用链会把「换模型」报成「账号全挂」。归模型级，不罚号不轮转。
+	if hasBusinessCode(body, "11103") {
 		return KindModelBlocked
 	}
 	if status == http.StatusPaymentRequired {
@@ -481,6 +507,12 @@ func classifyString(status int, body string) ErrorKind {
 	// 是上游 i18n key 原文，语义唯一，非 429 状态码出现同样归本类（防上游换状态码）。
 	// 移植自 workbuddy2api-panel f14f374。
 	if (status == http.StatusTooManyRequests && hasBusinessCode(body, "6021")) || isQueueFullBody(lower) {
+		return KindUpstreamBusy
+	}
+	// 11134 供应商过载（panel 4830686）：与账号健康无关，跨账号同时出现；原先落
+	// status>=500 → ErrServer 会熔断整片健康号并换号打断会话粘性。只认结构化 code，
+	// 不认 "temporarily unavailable" 文案（无业务码的 5xx 仍是服务器故障）。
+	if hasBusinessCode(body, "11134") {
 		return KindUpstreamBusy
 	}
 	if status == http.StatusTooManyRequests {
@@ -540,6 +572,13 @@ func classifyString(status int, body string) ErrorKind {
 		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
 			return KindBadParams
 		}
+		// 11152「工具名不合规或重名」/ 11151「空 text 段」：同 body 换任何账号都必然
+		// 失败（panel 733942a / f987bac）。漏登记会落通用 4xx 兜底 → 每个健康号白打
+		// 一遍 + 各喂一笔连败，末端 503 no_healthy_account 把「改 schema」报成「账号
+		// 都挂了」。归请求级 fail-fast，400 透传原文。
+		if hasBusinessCode(body, "11152") || hasBusinessCode(body, "11151") {
+			return KindBadParams
+		}
 		return KindClient
 	}
 	// HTTP 200 但业务 code 非 0 且含余额关键词的情况已被上方 hardMarkers 捕获。
@@ -575,6 +614,68 @@ func ParseRetryAfter(h http.Header) (time.Duration, bool) {
 			continue // 非正/异常大：丢弃（回落本地计算）
 		}
 		return n, true
+	}
+	return 0, false
+}
+
+// ParseBodyRetryAfter 从错误 body 里读上游明示的等待秒数（panel 4830686）：
+// 11134 供应商过载的等待口径在 retry_policy.retry_after，6020/6021 队列在
+// data.retry_after。递归找首个数值型 retry_after，单位按秒解释（上游实际单位
+// 未确认；“毫秒量级”数值（> 3600）按毫秒折算，避免退避被放大 1000 倍）。
+func ParseBodyRetryAfter(body []byte) (time.Duration, bool) {
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return 0, false
+	}
+	var found float64
+	var ok bool
+	var walk func(any)
+	walk = func(value any) {
+		if ok {
+			return
+		}
+		switch node := value.(type) {
+		case map[string]any:
+			if raw, has := node["retry_after"]; has {
+				if n, isNum := numericSeconds(raw); isNum {
+					found, ok = n, true
+					return
+				}
+			}
+			for _, child := range node {
+				walk(child)
+			}
+		case []any:
+			for _, child := range node {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
+	if !ok || found <= 0 {
+		return 0, false
+	}
+	d := time.Duration(found) * time.Second
+	if found > 3600 {
+		d = time.Duration(found) * time.Millisecond
+	}
+	if d <= 0 || d > retryAfterSanity {
+		return 0, false
+	}
+	return d, true
+}
+
+// numericSeconds 把 JSON 数值/数字字符串折算为数值（非数值返回 false）。
+func numericSeconds(raw any) (float64, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return v, true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil {
+			return 0, false
+		}
+		return f, true
 	}
 	return 0, false
 }

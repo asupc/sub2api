@@ -164,59 +164,58 @@ func CleanupOrphanToolCalls(messages []any) ([]any, bool) {
 // /v1/responses 时，input 里 function_call_output 可能排在 function_call 之前，
 // 上游判 11148 tool_call_sequence_broken 顶死整条会话。
 //
-// 只调顺序、不改内容；同批结果保持原相对顺序。同名 id 被多条 assistant 声明时
-// 跟最后一次声明走；找不到声明者的孤儿结果不动（交给 CleanupOrphanToolCalls）。
+// 只调顺序、不改内容；同批结果保持原相对顺序。
+//
+// panel e14a3d0：按「最近的未应答声明」配对，而不是一律挂到最后一次声明。网关
+// 自己就会产出跨轮重复的 id（上游流缺 id 时按轮内下标补 call_0），客户端存进历史
+// 再发回来时同一会话每轮都有 call_0——顺序本来正确的历史会被整段挪到第二轮之后，
+// 第一轮调用落空，正好造成该步要消除的 11148。
 func reorderEarlyToolResults(messages []any) ([]any, bool) {
 	if len(messages) < 2 {
 		return messages, false
 	}
-	declAt := map[string]int{}
+	// 每个 id 的全部声明下标（正序遍历 → 升序）。
+	decls := map[string][]int{}
 	for i, raw := range messages {
-		m, ok := raw.(map[string]any)
-		if !ok || m["role"] != "assistant" {
-			continue
-		}
-		tcs, ok := m["tool_calls"].([]any)
-		if !ok {
-			continue
-		}
-		for _, tci := range tcs {
-			tc, ok := tci.(map[string]any)
-			if !ok {
-				continue
-			}
-			if id, _ := tc["id"].(string); id != "" {
-				declAt[id] = i
-			}
+		for _, id := range declaredToolCallIDs(raw) {
+			decls[id] = append(decls[id], i)
 		}
 	}
-	if len(declAt) == 0 {
+	if len(decls) == 0 {
 		return messages, false
 	}
+	open := map[string]int{} // id → 已声明未应答次数；早到结果先扣，可暂为负
+	group := map[int][]any{} // 声明下标 → 归它的早到结果（原相对顺序）
 	early := make([]bool, len(messages))
 	anyEarly := false
 	for i, raw := range messages {
+		for _, id := range declaredToolCallIDs(raw) {
+			open[id]++
+		}
 		m, ok := raw.(map[string]any)
 		if !ok || m["role"] != "tool" {
 			continue
 		}
 		id, _ := m["tool_call_id"].(string)
-		if j, ok := declAt[id]; ok && j > i {
-			early[i] = true
-			anyEarly = true
+		if id == "" {
+			continue
+		}
+		if open[id] > 0 {
+			open[id]-- // 顺序本来正确：原地配对，零改动
+			continue
+		}
+		for _, j := range decls[id] {
+			if j > i {
+				early[i] = true
+				anyEarly = true
+				group[j] = append(group[j], raw)
+				open[id]--
+				break
+			}
 		}
 	}
 	if !anyEarly {
 		return messages, false
-	}
-	group := map[int][]any{}
-	for i, raw := range messages {
-		if !early[i] {
-			continue
-		}
-		m, _ := raw.(map[string]any)
-		id, _ := m["tool_call_id"].(string)
-		group[declAt[id]] = append(group[declAt[id]], raw)
 	}
 
 	out := make([]any, 0, len(messages))
@@ -230,12 +229,13 @@ func reorderEarlyToolResults(messages []any) ([]any, bool) {
 	}
 	for i, raw := range messages {
 		if early[i] {
-			continue
+			continue // 早到的结果不在此处落地
 		}
 		role := ""
 		if m, ok := raw.(map[string]any); ok {
 			role, _ = m["role"].(string)
 		}
+		// 结果区结束（来了一条非 tool 消息）：先把上一批待补的结果补上。
 		if len(pending) > 0 && role != "tool" {
 			flush()
 		}
@@ -246,6 +246,24 @@ func reorderEarlyToolResults(messages []any) ([]any, bool) {
 	}
 	flush()
 	return out, true
+}
+
+// declaredToolCallIDs 返回一条 assistant 消息 tool_calls 里的非空 id（其他消息为 nil）。
+func declaredToolCallIDs(raw any) []string {
+	m, ok := raw.(map[string]any)
+	if !ok || m["role"] != "assistant" {
+		return nil
+	}
+	tcs, _ := m["tool_calls"].([]any)
+	var ids []string
+	for _, tci := range tcs {
+		if tc, ok := tci.(map[string]any); ok {
+			if id, _ := tc["id"].(string); id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
 }
 
 // 修复链入口：按 panel 顺序调用重排/合并/归批/清理，返回是否发生任何改动。

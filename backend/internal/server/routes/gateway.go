@@ -347,6 +347,23 @@ func RegisterGatewayRoutes(
 			}
 			h.Gateway.WebSearch(c)
 		})
+		// WorkBuddy 官方语音端点（二开新增，issue #277）：OpenAI 音频契约。
+		gateway.POST("/audio/speech", textBodyLimit, func(c *gin.Context) {
+			if !resolvedPlatformSetIntersects(c, service.PlatformWorkbuddy) {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Audio Speech API is not supported for this platform"}})
+				return
+			}
+			h.Gateway.WorkbuddySpeech(c)
+		})
+		gateway.POST("/audio/transcriptions", bodyLimit, func(c *gin.Context) {
+			if !resolvedPlatformSetIntersects(c, service.PlatformWorkbuddy) {
+				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Audio Transcriptions API is not supported for this platform"}})
+				return
+			}
+			h.Gateway.WorkbuddyTranscription(c)
+		})
 		gateway.POST("/x_search", func(c *gin.Context) {
 			if !resolvedPlatformSetIntersects(c, service.PlatformGrok) {
 				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
@@ -359,12 +376,17 @@ func RegisterGatewayRoutes(
 		// DSH 等客户端把搜索 provider 的 baseURL 指到 <网关>/v1/search，
 		// 自动打到本端点。刻意不占用 /v1/messages（那是模型对话标准路径）。
 		gateway.POST("/search/messages", textBodyLimit, func(c *gin.Context) {
-			if !resolvedPlatformSetIntersects(c, service.PlatformWorkbuddy) {
-				service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
-				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Web Search API is not supported for this platform"}})
+			if resolvedPlatformSetIntersects(c, service.PlatformWorkbuddy) {
+				h.Gateway.WorkbuddySearchMessages(c)
 				return
 			}
-			h.Gateway.WorkbuddySearchMessages(c)
+			// Qoder 官方 oneSearch 同壳（二开新增）：按分组平台分派，响应契约一致。
+			if resolvedPlatformSetIntersects(c, service.PlatformQoder) {
+				h.Gateway.QoderSearchMessages(c)
+				return
+			}
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalFeatureGate)
+			c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"type": "not_found_error", "message": "Web Search API is not supported for this platform"}})
 		})
 	}
 

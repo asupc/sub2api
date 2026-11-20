@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // QuotaBucket 额度构成的一个桶。
@@ -175,6 +176,32 @@ func bucketFrom(src any, kind, name string) *QuotaBucket {
 			out.ExpiresAt = normalizeEpoch(v)
 			break
 		}
+	}
+	// 过期/停用包不计入合计（trae-workbuddy-switch 4a634d6 / #210）：上游实测
+	// 会给 available=true 但已过期的专属包，只靠 available 会把过期额度入账。
+	if !out.Available {
+		return out
+	}
+	if v, ok := m["expired"]; ok {
+		switch t := v.(type) {
+		case bool:
+			if t {
+				out.Available = false
+			}
+		case float64:
+			if t != 0 {
+				out.Available = false
+			}
+		}
+	}
+	if status, _ := m["status"].(string); status != "" {
+		up := strings.ToUpper(status)
+		if strings.Contains(up, "EXPIRED") || strings.Contains(up, "INACTIVE") || strings.Contains(up, "DISABLED") {
+			out.Available = false
+		}
+	}
+	if out.ExpiresAt > 0 && out.ExpiresAt <= time.Now().Unix() {
+		out.Available = false
 	}
 	return out
 }

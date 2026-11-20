@@ -415,30 +415,33 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	for scanner.Scan() {
-		line := scanner.Text()
-		refusalDetector.ObserveSSELine(line)
-		if payload, ok := extractOpenAISSEDataLine(line); ok {
-			trimmedPayload := strings.TrimSpace(payload)
-			terminal.ObserveDataLine(trimmedPayload)
-			if trimmedPayload != "[DONE]" {
-				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
-				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
-				if u := extractCCStreamUsage(payload); u != nil {
-					usage = *u
-				}
-				if firstTokenMs == nil && !usageOnlyChunk {
-					elapsed := int(time.Since(startTime).Milliseconds())
-					firstTokenMs = &elapsed
+		// 上游粘帧时一个 data 行可能塞了多个 JSON 对象（panel afb5f22 / #197）：
+		// 拆成独立事件逐条处理，usage/终止观测与写出都按拆后的行走。
+		for _, line := range expandSSEDataLine(scanner.Text()) {
+			refusalDetector.ObserveSSELine(line)
+			if payload, ok := extractOpenAISSEDataLine(line); ok {
+				trimmedPayload := strings.TrimSpace(payload)
+				terminal.ObserveDataLine(trimmedPayload)
+				if trimmedPayload != "[DONE]" {
+					observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
+					usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
+					if u := extractCCStreamUsage(payload); u != nil {
+						usage = *u
+					}
+					if firstTokenMs == nil && !usageOnlyChunk {
+						elapsed := int(time.Since(startTime).Milliseconds())
+						firstTokenMs = &elapsed
+					}
 				}
 			}
-		}
-		line = applyOllamaCloudRawChatCompletionsSSELine(account, line)
-		line = stripEmptyChatToolCallIdentityFromSSELine(line)
+			line = applyOllamaCloudRawChatCompletionsSSELine(account, line)
+			line = stripEmptyChatToolCallIdentityFromSSELine(line)
 
-		line = s.replaceModelInSSELine(line, upstreamModel, originalModel)
-		writeLine(line)
-		// 不逐行 flush：scanner 下次向上游读取前统一 flush（见 flushBeforeUpstreamRead）。
-		flushPending = true
+			line = s.replaceModelInSSELine(line, upstreamModel, originalModel)
+			writeLine(line)
+			// 不逐行 flush：scanner 下次向上游读取前统一 flush（见 flushBeforeUpstreamRead）。
+			flushPending = true
+		}
 	}
 	flushToClient()
 

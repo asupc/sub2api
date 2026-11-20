@@ -16,8 +16,12 @@ type TokenUsage struct {
 	Total      uint64 `json:"total_tokens"`
 	// Cached 缓存命中量（trae-switch #154/#169）：上游四种写法都认（见
 	// cachedTokensOf），命中量在语义上是输入的子集，脏数据钳到 Prompt。
-	Cached    uint64 `json:"-"`
-	Reasoning uint64 `json:"-"`
+	//
+	// db4754a：指针三态——nil = 上游未回报（未观测），&0 = 明确未命中，
+	// &n = 命中 n。旧实现用 uint64 把「没测过」与「测了没中」混为一谈，
+	// 命中率分母被稀释。
+	Cached    *uint64 `json:"-"`
+	Reasoning uint64  `json:"-"`
 }
 
 // cachedTokensOf 从上游 usage 对象读缓存命中量（trae-switch #154，
@@ -29,37 +33,83 @@ type TokenUsage struct {
 //	裸字段    cached_tokens
 //
 // 上限钳到 prompt_tokens：命中量报得比 prompt 还大时，下游命中率会 > 100%。
-func cachedTokensOf(value map[string]any) uint64 {
-	read := func(key string) uint64 {
-		if v, ok := value[key].(float64); ok && v > 0 {
-			return uint64(v)
+func cachedTokensOf(value map[string]any) (uint64, bool) {
+	read := func(key string) (uint64, bool) {
+		if v, ok := value[key].(float64); ok {
+			return uint64(v), true
 		}
-		return 0
+		return 0, false
 	}
-	hit := read("prompt_cache_hit_tokens")
-	if hit == 0 {
-		if details, ok := value["prompt_tokens_details"].(map[string]any); ok {
-			hit = read2(details, "cached_tokens")
+	hit, ok := read("prompt_cache_hit_tokens")
+	if !ok {
+		if details, ok2 := value["prompt_tokens_details"].(map[string]any); ok2 {
+			hit, ok = read2(details, "cached_tokens")
 		}
 	}
-	if hit == 0 {
-		hit = read("cache_read_input_tokens")
+	if !ok {
+		hit, ok = read("cache_read_input_tokens")
 	}
-	if hit == 0 {
-		hit = read("cached_tokens")
+	if !ok {
+		hit, ok = read("cached_tokens")
 	}
-	if prompt := read("prompt_tokens"); prompt > 0 && hit > prompt {
-		return prompt
+	if !ok {
+		return 0, false
 	}
-	return hit
+	if prompt, okP := read("prompt_tokens"); okP && prompt > 0 && hit > prompt {
+		return prompt, true
+	}
+	return hit, true
 }
 
 // read2 map 读取辅助（cachedTokensOf 的嵌套明细用）。
-func read2(m map[string]any, key string) uint64 {
-	if v, ok := m[key].(float64); ok && v > 0 {
-		return uint64(v)
+func read2(m map[string]any, key string) (uint64, bool) {
+	if v, ok := m[key].(float64); ok {
+		return uint64(v), true
 	}
-	return 0
+	return 0, false
+}
+
+// cachePoolAssigned 把 metadata 的 cache pool 记录转成三态（db4754a）：
+// 缺失 = 老上游未回报（nil）；显式 null = 本次明确无池（&false）；对象/数组/非空值
+// = 已挂池（&true）。真假值 0、false 也按无池——这不是布尔字段，其余标量都不是
+// 有效池记录。
+func cachePoolAssigned(raw map[string]any) *bool {
+	record, has := raw["prompt_cache_pool_record"]
+	if !has {
+		return nil
+	}
+	t, f := true, false
+	switch record.(type) {
+	case nil:
+		return &f
+	case map[string]any, []any:
+		return &t
+	default:
+		return &f
+	}
+}
+
+// resolveCacheObservation metadata 已证明本次没有 cache pool 时，缓存计数 0 不是
+// 可测得的 miss；非零计数仍原样保留（真实命中优先于无池声明）；未见到 metadata
+// 时保持旧行为，避免把老上游的明确 0 误降级。
+func resolveCacheObservation(previous *uint64, poolAssigned *bool, measured *uint64) *uint64 {
+	if measured != nil {
+		if *measured == 0 && poolAssigned != nil && !*poolAssigned {
+			return nil
+		}
+		return measured
+	}
+	return previous
+}
+
+// mergeTokenUsage 把一个 usage 事件的可信度与已积累的用量合并。
+func mergeTokenUsage(previous *TokenUsage, latest TokenUsage, poolAssigned *bool) TokenUsage {
+	var prevCached *uint64
+	if previous != nil {
+		prevCached = previous.Cached
+	}
+	latest.Cached = resolveCacheObservation(prevCached, poolAssigned, latest.Cached)
+	return latest
 }
 
 // TokenUsageFromValue 从事件 payload 解析；字段缺失按 0 处理，
@@ -77,28 +127,32 @@ func TokenUsageFromValue(value map[string]any) TokenUsage {
 	if total == 0 {
 		total = prompt + completion
 	}
+	var cached *uint64
+	if hit, ok := cachedTokensOf(value); ok {
+		cached = &hit
+	}
 	return TokenUsage{
 		Prompt:     prompt,
 		Completion: completion,
 		Total:      total,
-		Cached:     cachedTokensOf(value),
+		Cached:     cached,
 		Reasoning:  read("reasoning_tokens"),
 	}
 }
 
 // ToOpenAI 转成 OpenAI usage 对象。reasoning_tokens 不是 OpenAI 标准字段，不外发。
 //
-// prompt_tokens_details.cached_tokens **只在真有命中量时才写**（trae-switch
-// #154）：这是对外 wire 形状，多一个恒在的键会让严格校验的客户端拒帧，
-// 而「上游没报」与「确实没命中」在这里收敛成同一种表现（缺键）是正确的。
+// prompt_tokens_details.cached_tokens 只在**观测到缓存状态**时写（db4754a）：
+// 未观测（nil）缺键——多一个恒在的键会让严格校验的客户端拒帧；实测 0 保留 0，
+// 否则下游无法区分「没测过」与「测了没中」，命中率分母失真。
 func (u TokenUsage) ToOpenAI() map[string]any {
 	usage := map[string]any{
 		"prompt_tokens":     u.Prompt,
 		"completion_tokens": u.Completion,
 		"total_tokens":      u.Total,
 	}
-	if u.Cached > 0 {
-		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": u.Cached}
+	if u.Cached != nil {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": *u.Cached}
 	}
 	return usage
 }
@@ -110,14 +164,17 @@ func (u TokenUsage) IsMeaningful() bool {
 
 // SoloEvent 一个解析完成的 SOLO 事件。
 type SoloEvent struct {
-	Event        string
-	Response     string
-	Reasoning    string
-	ToolCalls    json.RawMessage
-	Usage        *TokenUsage
-	FinishReason string
-	ErrorCode    *int64
-	ErrorMessage string
+	Event     string
+	Response  string
+	Reasoning string
+	ToolCalls json.RawMessage
+	Usage     *TokenUsage
+	// CachePoolAssigned Trae metadata 三态：&true=明确有池，&false=明确无池，
+	// nil=未回报。只有明确有池时，token_usage 的缓存 0 才是可信的「未命中」。
+	CachePoolAssigned *bool
+	FinishReason      string
+	ErrorCode         *int64
+	ErrorMessage      string
 }
 
 // SoloParser 增量 SSE 解析器：跨 chunk 保留未完成的行与未结束的事件。
@@ -221,6 +278,8 @@ func ParseSoloEvent(event, data string) SoloEvent {
 	case "token_usage":
 		usage := TokenUsageFromValue(raw)
 		parsed.Usage = &usage
+	case "metadata":
+		parsed.CachePoolAssigned = cachePoolAssigned(raw)
 	case "done":
 		if reason, ok := raw["finish_reason"].(string); ok && reason != "" {
 			parsed.FinishReason = reason
@@ -608,10 +667,15 @@ func StreamConvert(reader io.Reader, chatID, model string, onChunk func(line str
 	parser := &SoloParser{}
 	outcome := StreamOutcome{}
 	var pendingUsage *TokenUsage
+	// db4754a：metadata 的 cache pool 三态（后到覆盖先到）。
+	var cachePool *bool
 	// issue #172：工具调用必须跨帧累加，按帧各自输出会被拆成残缺条目。
 	tools := newToolCallAccumulator()
 
 	emit := func(event SoloEvent) bool {
+		if event.CachePoolAssigned != nil {
+			cachePool = event.CachePoolAssigned
+		}
 		switch event.Event {
 		case "output", "thought":
 			delta := map[string]any{}
@@ -632,8 +696,9 @@ func StreamConvert(reader io.Reader, chatID, model string, onChunk func(line str
 			return onChunk(ChunkLine(chatID, model, delta, "", pendingUsage)) == nil
 		case "token_usage":
 			if event.Usage != nil {
-				pendingUsage = event.Usage
-				outcome.Usage = *event.Usage
+				merged := mergeTokenUsage(pendingUsage, *event.Usage, cachePool)
+				pendingUsage = &merged
+				outcome.Usage = merged
 			}
 			return true
 		case "done", "turn_completion":
@@ -704,11 +769,15 @@ func Aggregate(reader io.Reader, chatID, model string) (map[string]any, *Upstrea
 	var content, reasoning strings.Builder
 	finishReason := "stop"
 	var usage TokenUsage
+	var cachePool *bool
 	var upstreamErr *UpstreamError
 	// issue #172：非流式同样跨帧累加后再输出完整调用。
 	tools := newToolCallAccumulator()
 
 	consume := func(event SoloEvent) {
+		if event.CachePoolAssigned != nil {
+			cachePool = event.CachePoolAssigned
+		}
 		switch event.Event {
 		case "output", "thought":
 			content.WriteString(event.Response)
@@ -718,7 +787,7 @@ func Aggregate(reader io.Reader, chatID, model string) (map[string]any, *Upstrea
 			}
 		case "token_usage":
 			if event.Usage != nil {
-				usage = *event.Usage
+				usage = mergeTokenUsage(&usage, *event.Usage, cachePool)
 			}
 		case "done", "turn_completion":
 			if event.FinishReason != "" {

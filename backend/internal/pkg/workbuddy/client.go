@@ -385,6 +385,11 @@ func PrepareChatBody(cred Credentials, body []byte, conversationID string) []byt
 			obj["messages"] = repaired
 			msgs = repaired
 		}
+		// 空 text 段补位（panel f987bac / 11151）：放在 repack/cleanup 之后——那两步
+		// 会把字符串 content 挪到别的消息上；只补值不删段，普通请求零改动。
+		guardEmptyTextParts(msgs)
+		// reasoning_content → reasoning 镜像（Kimi/GLM 家族按 reasoning 读历史）。
+		mirrorUpstreamReasoning(obj)
 		sanitizeMessages(msgs)
 	}
 	out, err := json.Marshal(obj)
@@ -601,9 +606,15 @@ func dropReasoningContentParts(msgs []any) ([]any, bool) {
 	return out, changed
 }
 
+// consoleSystemFallback 兜底 system 正文：只写行为约定，不写身份（panel e4e6f5c，
+// issue #187）。上游只校验「首条必须是 system」，正文不参与校验；写成
+// "You are a helpful assistant." 等于网关自己往对话里插一句身份声明，与客户端
+// harness 自带的人设并列时，模型会把它当外部注入而拒绝执行。
+const consoleSystemFallback = "Follow the user's instructions and respond in the user's language."
+
 // ensureConsoleSystem global realm 兜底 system 注入（防上游 code 11-128）：
-// 首条消息非 system 时在 messages 最前补一条 fallback system。body 不可解析时
-// 原样返回。
+// 首条消息非 system 时在 messages 最前补一条 fallback system（不声明身份）。
+// body 不可解析时原样返回。
 func ensureConsoleSystem(body []byte) []byte {
 	if len(body) == 0 {
 		return body
@@ -621,7 +632,7 @@ func ensureConsoleSystem(body []byte) []byte {
 			return body // 首条已是 system：不注入
 		}
 	}
-	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
+	obj["messages"] = append([]any{map[string]any{"role": "system", "content": consoleSystemFallback}}, msgs...)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body

@@ -1205,3 +1205,47 @@ func TestAnthropicThinkingModeOffDropsThinking(t *testing.T) {
 		}
 	}
 }
+
+// panel fa4d62c：Anthropic output_config.format(json_schema) → Chat response_format。
+func TestAnthropicToChatForwardsOutputConfigFormat(t *testing.T) {
+	req := &AnthropicRequest{
+		Model: "kimi-k3",
+		OutputConfig: &AnthropicOutputConfig{
+			Format: &AnthropicOutputFormat{
+				Type:   "json_schema",
+				Schema: json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}}}`),
+			},
+		},
+	}
+	out, err := AnthropicToChatCompletionsRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.ResponseFormat) == 0 {
+		t.Fatal("response_format not forwarded")
+	}
+	var rf map[string]any
+	if err := json.Unmarshal(out.ResponseFormat, &rf); err != nil {
+		t.Fatal(err)
+	}
+	if rf["type"] != "json_schema" {
+		t.Fatalf("type = %v", rf["type"])
+	}
+	inner, _ := rf["json_schema"].(map[string]any)
+	if inner["name"] != "response" || inner["strict"] != true {
+		t.Fatalf("json_schema shape = %#v", inner)
+	}
+	if _, ok := inner["schema"].(map[string]any); !ok {
+		t.Fatalf("schema lost: %#v", inner)
+	}
+
+	// 非 json_schema（如 text）没有 Chat 对应物：不转发。
+	other := &AnthropicRequest{Model: "kimi-k3", OutputConfig: &AnthropicOutputConfig{Format: &AnthropicOutputFormat{Type: "text"}}}
+	out2, err := AnthropicToChatCompletionsRequest(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out2.ResponseFormat) != 0 {
+		t.Fatalf("non-json_schema must not be forwarded: %s", out2.ResponseFormat)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/workbuddy"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -165,9 +166,9 @@ func (s *OpenAIGatewayService) forwardAnthropicViaRawChatCompletions(
 
 	// 5. Convert response
 	if clientStream {
-		return s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+		return s.streamChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, account)
 	}
-	return s.bufferChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	return s.bufferChatCompletionsAsAnthropic(c, resp, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, account)
 }
 
 func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
@@ -179,11 +180,16 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	account *Account,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	ccResp, usage, err := s.readCCUpstreamJSONResponse(c, resp, writeAnthropicError)
 	if err != nil {
 		return nil, err
+	}
+	// workbuddy 上游偶发把 CoT 连控制 token 一起当正文下发（panel 771c887）。
+	if account != nil && account.Platform == PlatformWorkbuddy {
+		splitWorkbuddyThinkResponse(ccResp)
 	}
 	anthropicResp := apicompat.ChatCompletionsResponseToAnthropic(ccResp, compositeClientModel(c.Request.Context(), originalModel))
 
@@ -218,9 +224,15 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	reasoningEffort *string,
 	serviceTier *string,
 	startTime time.Time,
+	account *Account,
 ) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
 	writeStreamHeaders := s.newStreamHeaderWriter(c, resp.Header)
+	// workbuddy：把正文里的 <think:SUF> 控制 token 拆回 reasoning_content。
+	var thinkTag *workbuddy.ThinkTag
+	if account != nil && account.Platform == PlatformWorkbuddy {
+		thinkTag = &workbuddy.ThinkTag{}
+	}
 
 	anthropicState := apicompat.NewChatCompletionsToAnthropicStreamState(compositeClientModel(c.Request.Context(), originalModel))
 	clientDisconnected := false
@@ -228,6 +240,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 	// 与 responses 兄弟不同：客户端断开后仍继续做事件转换（喂 anthropicState），
 	// 仅跳过写出，保证 finalize 阶段的 usage 汇总不受断开影响。
 	emitChunk := func(chunk *apicompat.ChatCompletionsChunk) {
+		splitWorkbuddyThinkChunk(thinkTag, chunk)
 		// CC chunk → Anthropic events (direct, single state machine)
 		anthropicEvents := apicompat.ChatCompletionsChunkToAnthropicEvents(chunk, anthropicState)
 		if clientDisconnected {
@@ -251,6 +264,9 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 
 	scan := s.scanCCStream(c, resp, "openai messages chat fallback", requestID, startTime, emitChunk)
 	usage := scan.Usage
+	if fl := flushWorkbuddyThinkChunk(thinkTag); fl != nil {
+		emitChunk(fl)
+	}
 
 	if scan.Err != nil {
 		// Broken upstream read: skip finalization so no synthetic message_stop
