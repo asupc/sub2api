@@ -476,3 +476,36 @@
 - **验证**：`go build ./...`、`go vet ./...`、`gofmt` 通过；`go test -tags=unit ./internal/pkg/workbuddy/ ./internal/pkg/trae/ ./internal/pkg/qoder/ ./internal/pkg/apicompat/ ./internal/service/ ./internal/handler/ ./internal/server/` 全绿（qoder/apicompat 仅剩 CLAUDE.md 记录的存量失败）。全量 `go test -tags=unit ./...` 与 HEAD 基线对比：存量失败 10 项不变；`TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort` 在 HEAD 与本次均约 4/5 概率失败（时间敏感，存量）；`TestCommandCodeGatewayPassesThroughCatalogProtocols` 全量跑偶发、单跑通过（用例顺序污染）。本机无 pnpm，**前端未改动也未验证**。
 - **合并影响**：`pkg/apicompat/types.go`、`chatcompletions_anthropic_bridge.go`、`service/openai_gateway_cc_pipeline.go`、`openai_gateway_chat_completions_raw.go`、`openai_gateway_messages_chat_fallback.go`、`server/routes/gateway.go` 属上游同步共面文件，后续上游同步需按本文语义手工合并（output_config.format 转发、SSE 粘帧拆分、messages 回退签名新增 account 参数）。其余为纯二开新增/修改。**不触碰 `UPSTREAM-BASE` / `VERSION`**。
 - **PORTER-BASE**：trae → `ebcaead1`（本轮建议项均有结论）；qoder 保持 `f0b41e4`、workbuddy 保持 `a19c78f`（各有明确未完成的大项：qoder 托管工具/外部后端、workbuddy 救援体系）。
+
+### 同步 v0.2.24（2026-11-20）
+
+- **区间与规模**：`2af3f1e1 → 328db26f`（110 提交 / 190 文件，+11853/-610）。上游 `pull --ff-only` + `fetch --tags` 成功；`describe` → `v0.2.24`，与 `backend/cmd/server/VERSION`（0.2.24）一致。二开侧：86 文件直接覆盖、52 个上游新增文件并入、46 个本地改动文件三路合并（38 自动、8 冲突手工裁决）、6 个文件跳过。
+- **同步功能（按主题）**：
+  - **请求体安全**：新增 `pkg/requestmodel/conflict.go` + `server/middleware/request_field_conflict.go`，拒绝顶层与嵌套对象中键重复且取值冲突的 JSON 体（多次绕过审计后收口），multipart 拒绝 RFC 2231 扩展字段名；`routes/gateway.go` 挂载新中间件；`pkg/httputil/body_read_error.go`、`request_body_limit.go`、`request_body_read_log.go` 收敛读体错误分类。
+  - **Web 搜索**：`pkg/websearch/exa.go` 新增 Exa 后端（配置/`websearch_config.go`/前端 SettingsView）； Responses→Anthropic 返回 `web_search_tool_result` 的来源（`apicompat/responses_web_search_sources.go`）。
+  - **协议转换**：`apicompat/anthropic_tool_search.go`（ToolSearch → Codex OAuth 原生 `tool_search`）；tool_use.input 保证为 JSON 对象；保留 forced tools / 结果文本 / 保留名；容忍非字符串 `action.url`、跳过未完成的 web_search；`stop` 与 Kimi 动态工具定义不再在转换中丢失；DeepSeek Anthropic 历史带 thinking 块（`openai_gateway_deepseek_anthropic_thinking.go`）；Claude 5.5 thinking 适配（`service/claude55_thinking.go` + `pkg/claude/sampling.go`）；Gemini 尾部 part 拆分（见冲突裁决）。
+  - **Responses 缓冲链路**：新增 `openai_gateway_buffered_hosted_items.go` 与配套测试，修复 buffered 模式下的 hosted items、服务端搜索、工具调用重建、空终态输出、流式与非流式一致性。
+  - **OpenAI 网关**：上游请求超时纳入 failover；alpha/search 工具级 403 不再把 OAuth 账号打入惩罚；OAuth 凭据轮换防竞态与超时；VS Code IDE 上下文透传；按轮记录 Responses reasoning effort；图片 usage 单行 SSE；大请求体在 handler 之后不再被固定；Kimi 动态工具保留。性能：tool-schema 扫描短路、namespace 剥离不再整体复制、请求体单次 root walk 解析、图片意图预检（`image_generation_intent.go`）。
+  - **Antigravity**：额度改按账号实际转发端点查询；裸 429 在重试循环结束后只冷却一个账号（`antigravity_bare429_scope.go`，请求级作用域）；保留下游 Gemini SSE 注释帧。
+  - **账号/计费/调度**：typesafe 账号 model mapping 作用于 System One；新用户默认平台配额（`service/user_platform_quota_defaults.go`，wire 注入 `NewAdminService`）；账号测试对拒收 temperature 的模型省略该字段；批量编辑透传模型过滤需显式 opt-in；Claude OAuth / Setup Token 窗口成本估算；账号用量快照刷新；调度账号缓存不再展开分组；ops 平均 token 速率按请求时长加权；grok 接受五种编辑来源并按 xAI usage success count 计费。
+  - **其他**：Anthropic 元数据长上下文模型曝光（`service/anthropic_models_list.go`）；Claude Code compaction 请求写 5m 缓存 TTL；前端模型 ID 复制按钮、频繁手动刷新 token 提示、Ultra Fast 文案。
+- **冲突裁决（8 文件）**：
+  - `pkg/apicompat/responses_to_anthropic.go`：二开 `parseAnthropicToolArguments` / `normalizeAnthropicHistoryToolInput` / `normalizeAnthropicToolUseInput`（qoder2api-hub 双重编码解开）全部保留，并并入上游新增的 `anthropicToolUseInput`（function_call 非对象参数补 `{}`、custom_tool_call 包 `{"input":...}`）；上游调用点改用其新函数，二开桥接文件（`chatcompletions_anthropic_bridge.go`）继续用二开 helper。
+  - `server/routes/composite_platform_test.go`：两侧都在文件末尾追加测试，全部保留（二开多平台所有权用例 + 上游 Claude 5.5 thinking 适配用例）。
+  - `service/antigravity_quota_fetcher.go`：保留二开语义——只查 `retrieveUserQuotaSummary`（`fetchAvailableModels` 的 quotaInfo 恒为 100%，不参与展示），**并入**上游“按账号实际转发端点查询”的修复，改用二开已有的 `RetrieveUserQuotaSummaryFromURL(ctx, baseURL, ...)`；`Raw` 由重新序列化 summary 填充（FromURL 不回传原始 JSON）。`buildUsageInfo`/`buildAntigravityQuotaGroups` 保持二开分组（Buckets）实现。
+  - `service/antigravity_quota_fetcher_test.go`：import 合并 `strconv`（上游）+ `strings`（二开）；上游 `TestFetchQuota_QueriesForwardEndpoint` 适配二开语义——只断言 `retrieveUserQuotaSummary` 落在哪个端点（不再断言 `fetchAvailableModels`），分组断言改用 `Buckets[0]`（上游为 `Windows[0]`）。
+  - `service/gemini_messages_compat_service.go`：保留二开 `normalizeGeminiContents`（同角色合并 / functionResponse 归 user / 丢弃尾部 thinking-only model 轮），把上游“尾部非 functionResponse part 拆成独立 user 轮”的修复**移植进该函数**（合并之后再拆），语义与上游一致。
+  - `frontend/src/components/account/AccountUsageCell.vue`：import 采用上游新名 `buildAccountUsageRefreshKey`，保留二开 `AntigravityQuotaGroup` 类型引入。
+  - `frontend/src/components/admin/account/AccountActionMenu.vue`：保留二开紧凑样式（`px-3.5 py-1.5 text-xs`），并入上游 `:title="t('admin.accounts.refreshTokenHint')"`。
+  - `frontend/src/i18n/locales/zh/dashboard.ts`：`modelPlaza` 整块继续删除（模型广场前端已裁剪），不并入上游新增的 `table.copyModelId`。
+- **测试适配（合并后）**：
+  - `service/gateway_usage_billing.go`：二开把上游的 `recordUsageBillingModel` 内联在 `recordUsageCore` 中，上游新测试（`TestForwardSystemOneAppliesAccountModelMapping`）仍调用该方法——按上游原样**重新抽出** `recordUsageBillingModel` 方法并由 `recordUsageCore` 调用，行为等价（composite 别名 + 无价兜底顺序不变）。
+  - `service/gemini_tool_compat_test.go`：`TestConvertClaudeMessagesMergesConsecutiveUserTurns` 由 3 轮改为 4 轮（尾部用户文本独立成轮），与上游“functionResponse 之后不再带其它 part”的修复一致。
+  - `service/model_protocol_catalog_test.go`：**修复存量 flake**——用例用 `time.Now().UnixNano()` 生成 base URL，Windows 时钟粒度下连续调用会取到同一值，导致目录缓存 key 相撞、前一用例的成功目录污染“目录不可用”分支（`TestCommandCodeGatewayPassesThroughCatalogProtocols` 全量偶发失败）。改为进程内原子自增后缀。
+- **跳过项**：`frontend/src/i18n/locales/en/admin/{accounts,overview,settings}.ts`、`frontend/src/i18n/locales/en/dashboard.ts`（en 语言包永久跳过）；`frontend/src/components/modelPlaza/PlazaModelPricingTable.vue` 与其 spec（模型广场前端永久裁剪）。对应 zh 文案 `admin.accounts.refreshTokenHint` 已随 zh 包并入。
+- **依赖/构建链**：`go.mod` / `go.sum` / `package.json` / `pnpm-lock.yaml` 本区间零变更；无 ent schema 与迁移变更（二开迁移仍从 253 起）。
+- **验证**：
+  - 后端：`go build ./...`、`go vet ./...` 通过。`go test -tags=unit ./...` 与 HEAD（`3ad7ad1`）干净 worktree 逐项对比：失败集合完全一致（11 项：CLAUDE.md 记录的 10 项 + `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort`，后者在 HEAD 同样失败）。HEAD 全量跑还会命中上述 `TestCommandCodeGatewayPassesThroughCatalogProtocols` 时钟 flake，本次修复后不再复现。
+  - 前端：本机无 pnpm，改用 `node_modules/.bin/{vue-tsc,vitest,vite}` 等价执行——`vue-tsc --noEmit` 通过；`vitest run` 298 文件 / 2409 用例全部通过；i18n 完整性检查通过；`vite build` 通过，产物写入 `backend/internal/web/dist/`。
+  - 版本号一致性：`describe 328db26f` → `v0.2.24`；`backend/cmd/server/VERSION`=0.2.24；`backend/scripts/resolve-version.sh` 输出 0.2.24；`UPSTREAM-BASE`=`328db26f450edbdf9f8d4344a3ea903ac6396842`。
+- **合并影响**：支付链路与 en 语言包零变更（`git status` 复核）；模型广场前端维持裁剪；`wire_gen.go` 的手工接线（三平台 provider）保留，仅按上游新增 `serviceUserPlatformQuotaRepository` 参数。高冲突面（`openai_gateway_*`、`gemini_messages_compat_service.go`、`antigravity_quota_fetcher.go`、`gateway_usage_billing.go`）已按上述语义合入，下轮同步需沿用。

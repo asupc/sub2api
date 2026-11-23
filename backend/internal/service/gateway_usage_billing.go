@@ -816,24 +816,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 	multiplier, imageMultiplier := computePeakAwareMultipliers(apiKey, multiplier, pricingAt)
 
 	// 确定计费模型
-	concreteBillingModel := forwardResultBillingModel(result.Model, result.UpstreamModel)
-	billingModel := concreteBillingModel
-	if input.BillingModelSource == BillingModelSourceChannelMapped && input.ChannelMappedModel != "" {
-		billingModel = input.ChannelMappedModel
-	}
-	if input.BillingModelSource == BillingModelSourceRequested && input.OriginalModel != "" {
-		billingModel = input.OriginalModel
-	}
-	// composite 分组的公开别名（如 all/claude）会经 OriginalModel/ChannelMappedModel
-	// 进入上面的来源覆盖：任意别名查无价会静默落 $0，含家族词的别名则被价格表的
-	// 家族模糊匹配错计（如 Opus 流量按 Sonnet 兜底价）。除非管理员为别名显式配置了
-	// 渠道定价（OpenRouter 式自定价），composite 请求一律按实际转发的具体模型计费。
-	if apiKey.Group != nil && apiKey.Group.Platform == PlatformComposite {
-		billingModel = s.compositeBillableModel(ctx, apiKey, billingModel, concreteBillingModel)
-	}
-	// 通用兜底（与 OpenAI 路径的 usageBillingModelCandidates 语义对齐）：
-	// 选定模型查不到任何价格时回退到实际转发的具体模型。已定价流量不受影响。
-	billingModel = s.billableModelWithFallback(ctx, apiKey, billingModel, result.UpstreamModel, result.Model)
+	billingModel := s.recordUsageBillingModel(ctx, apiKey, result, input.ChannelUsageFields)
 
 	// 确定 RequestedModel（渠道映射前的原始模型）
 	requestedModel := result.Model
@@ -1016,6 +999,29 @@ func (s *GatewayService) calculateRecordUsageCost(
 // 换成公开别名等非具体模型时，只有管理员为该名字显式配置了渠道定价才按其计费
 // （OpenRouter 式自定价），否则回退到实际转发的具体模型，避免别名落入价格表的
 // 家族模糊匹配（错价）或查无价（$0）。未发生来源覆盖时原样返回。
+// recordUsageBillingModel 按计费模型来源、composite 规则与无价兜底确定计费模型。
+// （自上游 v0.2.24 重新抽成独立方法；语义与二开 recordUsageCore 内联逻辑一致。）
+func (s *GatewayService) recordUsageBillingModel(ctx context.Context, apiKey *APIKey, result *ForwardResult, fields ChannelUsageFields) string {
+	concreteBillingModel := forwardResultBillingModel(result.Model, result.UpstreamModel)
+	billingModel := concreteBillingModel
+	if fields.BillingModelSource == BillingModelSourceChannelMapped && fields.ChannelMappedModel != "" {
+		billingModel = fields.ChannelMappedModel
+	}
+	if fields.BillingModelSource == BillingModelSourceRequested && fields.OriginalModel != "" {
+		billingModel = fields.OriginalModel
+	}
+	// composite 分组的公开别名（如 all/claude）会经 OriginalModel/ChannelMappedModel
+	// 进入上面的来源覆盖：任意别名查无价会静默落 $0，含家族词的别名则被价格表的
+	// 家族模糊匹配错计（如 Opus 流量按 Sonnet 兜底价）。除非管理员为别名显式配置了
+	// 渠道定价（OpenRouter 式自定价），composite 请求一律按实际转发的具体模型计费。
+	if apiKey.Group != nil && apiKey.Group.Platform == PlatformComposite {
+		billingModel = s.compositeBillableModel(ctx, apiKey, billingModel, concreteBillingModel)
+	}
+	// 通用兜底（与 OpenAI 路径的 usageBillingModelCandidates 语义对齐）：
+	// 选定模型查不到任何价格时回退到实际转发的具体模型。已定价流量不受影响。
+	return s.billableModelWithFallback(ctx, apiKey, billingModel, result.UpstreamModel, result.Model)
+}
+
 func (s *GatewayService) compositeBillableModel(ctx context.Context, apiKey *APIKey, billingModel, concreteBillingModel string) string {
 	if concreteBillingModel == "" || billingModel == concreteBillingModel {
 		return billingModel

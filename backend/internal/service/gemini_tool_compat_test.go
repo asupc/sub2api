@@ -114,20 +114,28 @@ func TestConvertClaudeMessagesMergesConsecutiveUserTurns(t *testing.T) {
 	}
 	decoded := decodeJSONObject(t, out)
 	contents, _ := decoded["contents"].([]any)
-	if len(contents) != 3 {
-		t.Fatalf("expected 3 merged turns, got %d: %s", len(contents), out)
+	// 工具结果之后紧跟的用户文本仍单独成轮：Gemini 拒绝 functionResponse 之后
+	// 还带其它 part 的轮次（上游 v0.2.24 修复），因此这里是 4 轮而不是合并后的 3 轮，
+	// 最后一轮只承载文本。
+	if len(contents) != 4 {
+		t.Fatalf("expected 4 turns (tool result and trailing text split), got %d: %s", len(contents), out)
 	}
-	last, _ := contents[2].(map[string]any)
+	toolTurn, _ := contents[2].(map[string]any)
+	toolParts, _ := toolTurn["parts"].([]any)
+	if len(toolParts) != 1 {
+		t.Fatalf("expected the tool_result turn to carry only functionResponse, got %v", toolParts)
+	}
+	last, _ := contents[3].(map[string]any)
 	parts, _ := last["parts"].([]any)
-	if len(parts) != 2 {
-		t.Fatalf("expected tool_result and text merged in the last user turn, got %v", parts)
+	if len(parts) != 1 {
+		t.Fatalf("expected trailing user text in its own turn, got %v", parts)
 	}
 	if role, _ := last["role"].(string); role != "user" {
 		t.Fatalf("expected user role, got %v", last["role"])
 	}
-	first, _ := parts[0].(map[string]any)
+	first, _ := toolParts[0].(map[string]any)
 	if _, ok := first["functionResponse"]; !ok {
-		t.Fatalf("expected functionResponse as first part: %v", parts[0])
+		t.Fatalf("expected functionResponse as first part: %v", toolParts[0])
 	}
 }
 

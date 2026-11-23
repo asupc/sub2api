@@ -64,10 +64,16 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
 	}
 
+	baseURL := resolveAntigravityForwardBaseURL(account)
+	if baseURL == "" {
+		return nil, errors.New("no antigravity base url configured")
+	}
+
 	// 额度查询使用 retrieveUserQuotaSummary：按额度组返回 5h / weekly 窗口。
 	// fetchAvailableModels 的 quotaInfo 恒为 100% 剩余，不能用于展示用量。
 	// 不带 project 也能返回同一份分组数据，这里不强制要求 project_id。
-	quotaResp, quotaRaw, err := client.RetrieveUserQuotaSummary(ctx, accessToken, projectID)
+	// 上游 v0.2.24：查询账号实际转发端点——Google 按端点分别计算额度。
+	quotaResp, err := client.RetrieveUserQuotaSummaryFromURL(ctx, baseURL, accessToken, projectID)
 	if err != nil {
 		// 403 Forbidden: 不报错，返回 is_forbidden 标记
 		var forbiddenErr *antigravity.ForbiddenError
@@ -93,7 +99,11 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	// 调用 LoadCodeAssist 获取订阅等级和 AI Credits 余额（非关键路径，失败不影响主流程）
 	tierRaw, tierNormalized, loadResp := f.fetchSubscriptionTier(ctx, client, accessToken)
 
-	// 转换为 UsageInfo
+	// 转换为 UsageInfo。FromURL 不回传原始 JSON，重新序列化后填入 Raw。
+	var quotaRaw map[string]any
+	if rawBytes, mErr := json.Marshal(quotaResp); mErr == nil {
+		_ = json.Unmarshal(rawBytes, &quotaRaw)
+	}
 	usageInfo := f.buildUsageInfo(quotaResp, tierRaw, tierNormalized, loadResp)
 
 	return &QuotaResult{

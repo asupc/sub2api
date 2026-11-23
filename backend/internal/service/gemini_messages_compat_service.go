@@ -3844,6 +3844,35 @@ func normalizeGeminiContents(contents []any) []any {
 		normalized = append(normalized, content)
 	}
 
+	// Gemini/Vertex 拒收「以 functionResponse 开头、后面还跟着其它 part」的最后一个 turn，
+	// 报错文案是误导性的 "Requests ending with a model turn are not supported."。
+	// 客户端在工具结果后紧跟一条 user 文本时（例如 ACP nudge），上面的同角色合并会
+	// 把它们并成同一个 user 消息，这里再把尾部的非 functionResponse part 拆成独立的
+	// 一轮 user（语义顺序不变）。移植自上游 v0.2.24。
+	if n := len(normalized); n > 0 {
+		if last, ok := normalized[n-1].(map[string]any); ok {
+			if parts, ok := last["parts"].([]any); ok {
+				lastFR := -1
+				for i, p := range parts {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					if _, isFR := pm["functionResponse"]; isFR {
+						lastFR = i
+					}
+				}
+				if lastFR >= 0 && lastFR < len(parts)-1 {
+					last["parts"] = parts[:lastFR+1]
+					normalized = append(normalized, map[string]any{
+						"role":  "user",
+						"parts": parts[lastFR+1:],
+					})
+				}
+			}
+		}
+	}
+
 	// Drop a trailing model turn whose only content is thinking/reasoning: the
 	// API has nothing to answer and rejects thought-only turns downstream.
 	if n := len(normalized); n > 0 {

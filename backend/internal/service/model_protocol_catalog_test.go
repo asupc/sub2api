@@ -18,6 +18,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// uniqueTestSeq 给同一进程内的测试生成唯一后缀。time.Now().UnixNano() 在 Windows
+// 上的时钟粒度可能让连续调用取到同一值，导致模型协议目录的缓存 key 相撞，
+// 前一个用例的成功目录会污染后续用例的"目录不可用"分支。
+var uniqueTestSeq atomic.Int64
+
+func uniqueTestSuffix() int64 { return uniqueTestSeq.Add(1) }
+
 // 取自 https://api.commandcode.ai/provider/v1/models 的片段（2026-09-26）。
 const commandCodeModelsSample = `{"object":"list","data":[
 	{"id":"claude-sonnet-4-6","supported_endpoints":["/messages"]},
@@ -249,7 +256,7 @@ func TestModelProtocolCatalogOfficialAccountsAreIsolated(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := &modelCatalogAccountUpstream{failureStatus: tc.status, failureErr: tc.err}
 			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
-			id := time.Now().UnixNano()
+			id := uniqueTestSuffix() * 1000
 			bad, chat, responses := commandCodeTestAccount(id), commandCodeTestAccount(id+1), commandCodeTestAccount(id+2)
 			bad.Credentials["api_key"] = "invalid-key"
 			responses.Credentials["header_override_enabled"] = true
@@ -334,7 +341,7 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 	}
 	forward := func(t *testing.T, ingress routingMatrixIngress, model string, catalog map[string][]string) observation {
 		t.Helper()
-		base := fmt.Sprintf("http://cc-%s-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), time.Now().UnixNano())
+		base := fmt.Sprintf("http://cc-%s-%d.example", strings.ReplaceAll(t.Name(), "/", "-"), uniqueTestSuffix())
 		account := commandCodeTestAccount(12)
 		account.Credentials["api_base_urls"] = map[string]any{
 			APIProtocolChatCompletions: base + "/provider/v1",
@@ -385,7 +392,7 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 // 目录缺失时网关拉取目录，首个请求即按目录分流；自定义上游按账号各自拉取，并带上
 // 账号的请求头覆写。
 func TestCommandCodeGatewayFetchesModelCatalog(t *testing.T) {
-	base := fmt.Sprintf("http://cc-fetch-%d.example/provider/v1", time.Now().UnixNano())
+	base := fmt.Sprintf("http://cc-fetch-%d.example/provider/v1", uniqueTestSuffix())
 	newAccount := func(id int64) *Account {
 		account := commandCodeTestAccount(id)
 		account.Credentials["api_base_urls"] = map[string]any{
