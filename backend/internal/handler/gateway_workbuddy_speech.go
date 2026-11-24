@@ -6,15 +6,19 @@ package handler
 //	POST /v1/audio/transcriptions  OpenAI ASR 契约：multipart 字段 file
 //
 // 上游协议见 pkg/workbuddy/speech.go。TTS 只出 WAV（PCM s16le/24kHz 单声道封装），
-// 其余 response_format 明确 400——不谎报转码能力。ASR 入口限制 3MB（panel 08cb935）。
+// 其余 response_format 明确 400——不谎报转码能力。ASR 入口限制 3MB（panel 08cb935），
+// 整包按 3MB+64KiB 钳制并清理 multipart 临时文件；response_format 支持 json/text
+//（panel 026f9c0/d5ce7de）。
 
 import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
@@ -35,6 +39,9 @@ const (
 	workbuddySpeechBodyLimit = 1 << 20
 	// workbuddyASRBodyLimit ASR 入口 3MB（panel 08cb935：超限在上游之前挡掉）。
 	workbuddyASRBodyLimit = 3 << 20
+	// workbuddyASRBodyOverhead multipart 头/边界/其它小字段的余量：整包上限按
+	// 3MB + 64KiB 判（panel 026f9c0），否则恰好 3MB 的音频会被边界开销挤成超限。
+	workbuddyASRBodyOverhead = 64 << 10
 )
 
 // workbuddySpeechRequest TTS 请求（OpenAI 契约的子集）。
@@ -112,10 +119,21 @@ func (h *GatewayHandler) WorkbuddyTranscription(c *gin.Context) {
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "transcriptions are only supported for workbuddy groups")
 		return
 	}
-	// 入口挡 3MB：multipart 的其余字段很小，按整包上限判足够。
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, workbuddyASRBodyLimit)
+	// 入口挡 3MB：先钳住 body 再解析，超过的部分不会落到 /tmp（panel 026f9c0；
+	// multipart 边界/其它小字段留 64KiB 余量，文件本身仍按 3MB 判）。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, workbuddyASRBodyLimit+workbuddyASRBodyOverhead)
 	fileHeader, err := c.FormFile("file")
+	if c.Request.MultipartForm != nil {
+		// ParseMultipartForm 超过内存阈值的分片会写临时文件：无论成功失败都清掉，
+		// 避免每次超限上传在 /tmp 留一个 multipart-* 文件。
+		defer c.Request.MultipartForm.RemoveAll()
+	}
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			h.errorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "audio file exceeds the 3MB limit")
+			return
+		}
 		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "multipart field 'file' is required")
 		return
 	}
@@ -139,6 +157,15 @@ func (h *GatewayHandler) WorkbuddyTranscription(c *gin.Context) {
 		return
 	}
 
+	// OpenAI 的 response_format：json（默认）/ text 可选；srt/vtt/verbose_json 要
+	// 时间戳，上游不返回，明确拒绝而不是静默回 JSON（panel d5ce7de / issue #277）。
+	responseFormat, formatOK := normalizeWorkbuddyASRResponseFormat(c.Request.FormValue("response_format"))
+	if !formatOK {
+		h.errorResponse(c, http.StatusBadRequest, "invalid_request_error",
+			"response_format "+responseFormat+" is not supported: upstream does not return timestamps; use json or text")
+		return
+	}
+
 	if !h.prepareWorkbuddyAudioBilling(c, apiKey, workbuddyASRModelLabel, "", false, requestStart) {
 		return
 	}
@@ -157,7 +184,22 @@ func (h *GatewayHandler) WorkbuddyTranscription(c *gin.Context) {
 		return
 	}
 	h.recordWorkbuddyAudioUsage(c, apiKey, workbuddyASRModelLabel, "/agenttool/v1/asr", requestStart)
+	if responseFormat == "text" {
+		c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(text))
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"text": text})
+}
+
+// normalizeWorkbuddyASRResponseFormat 归一合并校验 ASR response_format。
+// ok=false 表示上游不支持该格式（srt/vtt/verbose_json 要时间戳）。
+func normalizeWorkbuddyASRResponseFormat(raw string) (format string, ok bool) {
+	switch f := strings.ToLower(strings.TrimSpace(raw)); f {
+	case "", "json", "text":
+		return f, true
+	default:
+		return f, false
+	}
 }
 
 // prepareWorkbuddyAudioBilling 计费资格 + 在途预留 + （文本类）安全审计。

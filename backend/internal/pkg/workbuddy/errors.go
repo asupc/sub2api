@@ -239,19 +239,28 @@ func isAlreadyCheckinMsg(msg string) bool {
 // 「该模型的使用量超限」而非账号整体被限——账号健康，只是这个模型此刻被限。
 const modelRateLimitCode = "6004"
 
-// modelBlockCode / modelBlockMsgMarker 11102「该后端无此模型」的确定性判定。
-// msg 只收窄短语 "service info not found"，不收 "model ... not found" 宽正则。
+// modelBlockCode / modelBlockMsgMarkers 11102「该后端无此模型」的确定性判定。
+// msg 只收窄短语，不收 "model ... not found" 宽正则：14401「route config not found」
+// 是图像模型的同族答复（该模型在本域没有路由），归同一模型级语义
+// （workbuddy2api-panel d629a8c）；两者换遍全池都是同一句，不应轮转白打账号。
 //
 // modelForbiddenCode / modelForbiddenMsgMarker 11158「该账号类型无权使用该模型」
 // 的确定性判定（移植自 workbuddy2api-panel 6ee5491）。同一模型在不同账号类型上
-// 权限不同，与 11102 同属 (账号, 模型) 级确定性拒绝：换有权限的账号仍可能成功，
-// 全部账号都拒绝时才向客户端报模型不可用。
+// 权限不同：换有权限的账号仍可能成功（服务层据此保留换号），与 11102/14401 的
+// 请求级处置不同。
 const (
-	modelBlockCode          = "11102"
-	modelBlockMsgMarker     = "service info not found"
-	modelForbiddenCode      = "11158"
-	modelForbiddenMsgMarker = "is not allowed for user type"
+	modelBlockCode             = "11102"
+	modelBlockMsgMarker        = "service info not found"
+	modelRouteMissingMsgMarker = "route config not found"
+	modelForbiddenCode         = "11158"
+	modelForbiddenMsgMarker    = "is not allowed for user type"
 )
+
+// isModelBlockMsg 报告 msg 是否命中 11102/14401 的确定性文案（调用方先转小写）。
+func isModelBlockMsg(lowerMsg string) bool {
+	return strings.Contains(lowerMsg, modelBlockMsgMarker) ||
+		strings.Contains(lowerMsg, modelRouteMissingMsgMarker)
+}
 
 // softRateResetLoc 上游 429 重置时间固定按 UTC+8 解释（上游文案如此，与时区无关）。
 var softRateResetLoc = time.FixedZone("UTC+8", 8*60*60)
@@ -279,14 +288,14 @@ func IsModelRateLimit(body string) bool {
 	return reModelRateLimit.MatchString(body)
 }
 
-// IsModelBlocked 报告 body 是否是「该后端无此模型」(11102) 或「该账号类型无权使用
-// 该模型」(11158) 的确定性答复。
+// IsModelBlocked 报告 body 是否是「该后端无此模型」(11102)、「该模型在本域无路由」
+// (14401) 或「该账号类型无权使用该模型」(11158) 的确定性答复。
 //
 // 只比对 code/msg 等独立字段，绝不做整段文本子串匹配：错误体还带 requestId 等字段，
 // 拿整段文本匹配会把 code 撞在 ID 上、误避让一个本来能用的模型。判定 =
 // code 字段精确等于 "11102"/"11158"，或 msg/message 字段命中对应窄短语。
 // 只看 400/404：429 带这些 code 属限流语义。字段遍历覆盖顶层与 error 子对象两层。
-// 移植自 workbuddy2api-panel 6ee5491（合并 11158 判定）。
+// 移植自 workbuddy2api-panel 6ee5491（合并 11158 判定）、d629a8c（补 14401 文案）。
 func IsModelBlocked(status int, body string) bool {
 	if (status != http.StatusBadRequest && status != http.StatusNotFound) || body == "" {
 		return false
@@ -294,7 +303,7 @@ func IsModelBlocked(status int, body string) bool {
 	lower := strings.ToLower(body)
 	// 轻量预检：body 无任何已知 code/marker 时直接短路（大多数 4xx 零分配返回）。
 	if !strings.Contains(body, modelBlockCode) && !strings.Contains(body, modelForbiddenCode) &&
-		!strings.Contains(lower, modelBlockMsgMarker) && !strings.Contains(lower, modelForbiddenMsgMarker) {
+		!isModelBlockMsg(lower) && !strings.Contains(lower, modelForbiddenMsgMarker) {
 		return false
 	}
 	code, msg := modelBlockFields(body)
@@ -302,7 +311,7 @@ func IsModelBlocked(status int, body string) bool {
 		return true
 	}
 	lowerMsg := strings.ToLower(msg)
-	return strings.Contains(lowerMsg, modelBlockMsgMarker) || strings.Contains(lowerMsg, modelForbiddenMsgMarker)
+	return isModelBlockMsg(lowerMsg) || strings.Contains(lowerMsg, modelForbiddenMsgMarker)
 }
 
 // ModelBlockReasonFor 返回确定性模型拒绝对应的负缓存 reason 前缀（"11102"/"11158"），

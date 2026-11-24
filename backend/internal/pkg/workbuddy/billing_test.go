@@ -129,8 +129,10 @@ func TestEnterpriseResource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enterprise: %v", err)
 	}
-	if gotEnt != "a6239ec8" || gotTenant != "a6239ec8" {
-		t.Errorf("企业头 X-Enterprise-Id=%q X-Tenant-Id=%q", gotEnt, gotTenant)
+	// 企业额度按 Bearer 身份推导企业：不得把账号资料里的租户标识当授权参数发送
+	//（trae-workbuddy-switch 7e277b7）。
+	if gotEnt != "" || gotTenant != "" {
+		t.Errorf("企业额度请求不应发送租户头: X-Enterprise-Id=%q X-Tenant-Id=%q", gotEnt, gotTenant)
 	}
 	// remain = 2000 - round(812.45) = 2000-812 = 1188。
 	if b.Remain != 1188 || b.Total != 2000 {
@@ -141,6 +143,15 @@ func TestEnterpriseResource(t *testing.T) {
 	}
 	if b.EarliestExpiry.IsZero() {
 		t.Error("周期到期批次应解析")
+	}
+
+	// 缺少已用额度时余额未知：不能按 0 已用伪报满额（trae-workbuddy-switch 70bf9de）。
+	srvMissing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"data":{"limitNum":500}}`))
+	}))
+	defer srvMissing.Close()
+	if _, err := newTestClient(srvMissing).UserResourceDetailedWithExpiry(context.Background(), cred, 0); err == nil {
+		t.Fatal("missing credit must fail instead of reporting a full quota")
 	}
 
 	// 不限量：limitNum=-1。

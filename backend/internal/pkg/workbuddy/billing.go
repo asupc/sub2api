@@ -141,7 +141,7 @@ func (c *Client) UserResource(ctx context.Context, cred Credentials) (remain, to
 
 // enterpriseResource 企业版额度口径。上游（实测 2026-10-07）：
 //
-//	POST /v2/billing/meter/get-enterprise-user-usage   （X-Enterprise-Id 由 BillingHeaders 注入）
+//	POST /v2/billing/meter/get-enterprise-user-usage
 //	{"credit":812.45,"limitNum":2000,
 //	 "cycleStartTime":"2026-09-27 00:00:00","cycleEndTime":"2026-10-26 23:59:59",
 //	 "cycleResetTime":"2026-10-27 00:00:00"}
@@ -150,23 +150,36 @@ func (c *Client) UserResource(ctx context.Context, cred Credentials) (remain, to
 // 分配给本账号的额度。故 remain = limitNum - credit、total = limitNum。
 // 企业池总额度成员账号无权查询（实测所有池端点 403 not_authorized）。
 // 兼容上游两套字段命名（camelCase 与 snake_case）。
+//
+// 该请求**不发送 X-Enterprise-Id / X-Tenant-Id**：上游按 Bearer 凭证推导所属企业，
+// 把账号资料里的租户标识当授权参数发送会让被篡改的元数据选中其它租户的用量
+// （workbuddy2api-panel 7e277b7 / trae-workbuddy-switch 7e277b7）。
 func (c *Client) enterpriseResource(ctx context.Context, cred Credentials, soon time.Duration) (*Balance, error) {
 	var data json.RawMessage
 	err := c.retryBillingTransient(ctx, func() error {
+		req, reqErr := c.newJSONRequest(ctx, http.MethodPost,
+			c.billingBase(cred)+"/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
+		if reqErr != nil {
+			return reqErr
+		}
+		BillingHeaders(req, cred)
+		// 租户归属由服务端按 Bearer 判定；客户端提供的租户头一律不信任。
+		req.Header.Del("X-Enterprise-Id")
+		req.Header.Del("X-Tenant-Id")
 		var e error
-		data, e = c.billingJSON(ctx, cred, http.MethodPost, "/v2/billing/meter/get-enterprise-user-usage", map[string]any{})
+		data, e = c.doJSON(ctx, req)
 		return e
 	})
 	if err != nil {
 		return nil, err
 	}
 	var resp struct {
-		Credit         float64 `json:"credit"`
-		LimitNum       int64   `json:"limitNum"`
-		LimitNumSnake  int64   `json:"limit_num"`
-		UsedNum        float64 `json:"used_num"`
-		CycleEndTime   string  `json:"cycleEndTime"`
-		CycleResetTime string  `json:"cycleResetTime"`
+		Credit         *float64 `json:"credit"` // 已用；nil 表示上游没给
+		LimitNum       int64    `json:"limitNum"`
+		LimitNumSnake  int64    `json:"limit_num"`
+		UsedNum        *float64 `json:"used_num"`
+		CycleEndTime   string   `json:"cycleEndTime"`
+		CycleResetTime string   `json:"cycleResetTime"`
 	}
 	if uerr := json.Unmarshal(data, &resp); uerr != nil {
 		return nil, fmt.Errorf("enterprise resource parse: %w", uerr)
@@ -175,12 +188,20 @@ func (c *Client) enterpriseResource(ctx context.Context, cred Credentials, soon 
 	if limit == 0 && resp.LimitNumSnake != 0 {
 		limit = resp.LimitNumSnake
 	}
-	used := resp.Credit
-	if used == 0 && resp.UsedNum != 0 {
-		used = resp.UsedNum
-	}
 	if limit < 0 { // 不限量
 		return &Balance{Remain: enterpriseUnlimitedRemain, Total: enterpriseUnlimitedTotal, Enterprise: true, Unlimited: true}, nil
+	}
+	// 已用额度缺失时余额未知：当成 0 已用会把「查不到」伪报成「满额」
+	//（trae-workbuddy-switch 70bf9de）。交给调用方按失败处理，保留旧快照。
+	used, haveUsed := 0.0, false
+	if resp.Credit != nil {
+		used, haveUsed = *resp.Credit, true
+	}
+	if resp.UsedNum != nil && (!haveUsed || used == 0) {
+		used, haveUsed = *resp.UsedNum, true
+	}
+	if !haveUsed {
+		return nil, fmt.Errorf("enterprise resource missing used value (credit)")
 	}
 	// credit 是浮点，四舍五入到最近整数（向下取整会低报剩余额度）。
 	usedInt := int64(used)

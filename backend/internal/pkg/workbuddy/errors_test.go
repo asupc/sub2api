@@ -61,6 +61,8 @@ func TestClassifyError(t *testing.T) {
 		{404, `{"code":11102,"msg":"model [deepseek-v3-2-volc] service info not found"}`, KindModelBlocked},
 		{400, `{"error":{"code":"11102","message":"model service info not found"}}`, KindModelBlocked},
 		{400, `{"msg":"service info not found"}`, KindModelBlocked},
+		{400, `{"code":14401,"msg":"route config not found"}`, KindModelBlocked}, // d629a8c：图像模型同族答复
+		{404, `{"msg":"model route config not found for this domain"}`, KindModelBlocked},
 		{404, `{"requestId":"11102","msg":"ok"}`, KindNotFound}, // 撞 ID 不算
 		{429, `{"code":11102,"msg":"service info not found"}`, KindSoftRate},
 		// 11158 模型权限（6ee5491）：与 11102 同层判定。
@@ -248,6 +250,7 @@ func TestModelBlockReasonFor(t *testing.T) {
 		{`{"code":11102,"msg":"service info not found"}`, "11102"},
 		{`{"msg":"model xxx is not allowed for user type"}`, "11158"},
 		{`{"msg":"service info not found"}`, "11102"},
+		{`{"code":14401,"msg":"route config not found"}`, "11102"}, // 请求级同族，复用 11102 reason
 	}
 	for _, c := range cases {
 		if got := ModelBlockReasonFor(c.body); got != c.want {

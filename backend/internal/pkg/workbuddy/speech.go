@@ -132,7 +132,15 @@ func (c *Client) Speech(ctx context.Context, cred Credentials, text, voice strin
 	if len(pcm) == 0 {
 		return nil, fmt.Errorf("tts stream completed without audio")
 	}
-	return pcm, nil
+	// speech.audio.done 是唯一的「音频完整」标记。上游 SSE 被中间层提前切断时
+	// EOF 前可能已经产出半段 PCM（2026-11-20 复测 132480 vs 136320 字节，
+	// ASR 识别成乱码），当成功返回会让客户端拿到 200 + 残缺录音
+	// （workbuddy2api-panel d5ce7de / issue #277）。交给上层换号重试。
+	return nil, &Error{
+		Kind:   KindServer,
+		Status: http.StatusBadGateway,
+		Msg:    fmt.Sprintf("tts stream truncated after %d bytes: no speech.audio.done", len(pcm)),
+	}
 }
 
 // Transcribe 语音转文本，返回上游识别文本。
