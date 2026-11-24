@@ -46,6 +46,18 @@ func deepCopyMap(m map[string]any) map[string]any {
 	return out
 }
 
+// OmitDefaultSystemPrompt 报告是否省略模板自带的 Qoder system 提示词
+// （qoder2api-hub f57c56e：面板「省略默认 system prompt」开关的网关等价物）。
+//
+// 默认关闭，保持官方模板；客户端显式提供 system 时不受此开关影响。
+func OmitDefaultSystemPrompt() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("QD_OMIT_DEFAULT_SYSTEM_PROMPT"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // Python 风格字符串工具（strip/lstrip 空白集与码点长度语义）
 // ---------------------------------------------------------------------------
@@ -1170,9 +1182,13 @@ func BuildAgentChatBody(openAIReq map[string]any, session *CosySession, realm st
 	}
 	res := flattenMessages(messages, IsDeepSeekModel(model, modelKey), structured)
 
-	// 模板只保留 system 基座（自带示例 user 轮是样例内容，必须丢弃）
+	// 模板只保留 system 基座（自带示例 user 轮是样例内容，必须丢弃）。
+	// QD_OMIT_DEFAULT_SYSTEM_PROMPT=1 时连模板 system 也省略（客户端没给 system 时
+	// 不向上游注入任何默认提示词）；客户端显式 system 始终优先。
 	if res.systemText != nil {
 		body["messages"] = []any{map[string]any{"role": "system", "content": *res.systemText}}
+	} else if OmitDefaultSystemPrompt() {
+		body["messages"] = []any{}
 	} else {
 		tmplSystem := []any{}
 		for _, m := range anyList(body["messages"]) {

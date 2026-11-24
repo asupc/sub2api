@@ -368,10 +368,10 @@ func TestClaimCampaignBlockedAndReplayed(t *testing.T) {
 		t.Fatalf("blocked: %+v", claim)
 	}
 
-	// 409 -> 幂等已领取
+	// 409 + 明确 errorCode -> 幂等已领取（裸 409 不再猜成已领取，见 958f14f）。
 	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(409)
-		_, _ = w.Write([]byte(`ALREADY_CLAIMED`))
+		_, _ = w.Write([]byte(`{"errorCode":"ALREADY_CLAIMED"}`))
 	}))
 	defer srv2.Close()
 	withRealm(t, "cn", srv2.URL)

@@ -26,6 +26,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -37,6 +38,11 @@ import (
 
 // qoderOpsDefaultTimeout 单账号单任务的执行预算。
 const qoderOpsDefaultTimeout = 2 * time.Minute
+
+// errQoderCampaignClaimRefused 活动平台已进入领取阶段、上游明确拒绝（风控/未开始/
+// 未确认等）。这类错误不能再回落旧 sash Checkin 重复领取（qoder2api-hub 958f14f /
+// issue #167），必须作为任务失败如实上报。
+var errQoderCampaignClaimRefused = errors.New("qoder campaign claim refused")
 
 // QoderOpsService Qoder 平台运营任务运行器（实现 PlatformOpsRunner）。
 type QoderOpsService struct {
@@ -295,6 +301,10 @@ func (s *QoderOpsService) runCheckin(ctx context.Context, account *Account) (str
 		s.refreshQuotaAfterCheckin(ctx, account, note)
 		return note, nil
 	}
+	// 领取阶段被上游拒绝：不能再回旧 sash 接口重复领取（issue #167），直接按失败上报。
+	if errors.Is(err, errQoderCampaignClaimRefused) {
+		return "", err
+	}
 	// 兜底旧 sash 接口（仅活动平台列表查询失败时进入）。
 	result, cerr := client.Checkin(ctx, creds)
 	if cerr != nil {
@@ -319,15 +329,25 @@ func (s *QoderOpsService) checkinViaCampaigns(ctx context.Context, client *qoder
 	if err != nil {
 		return "", err
 	}
-	if !camp.OK {
+	// 列表查询失败（camp.Error）才允许回落旧 sash 接口；领取阶段的拒绝不能回退。
+	if camp.Error != "" {
 		return "", fmt.Errorf("qoder campaigns unavailable: %s", camp.Error)
 	}
 	if len(camp.BlockedMarks) > 0 {
 		s.saveQoderCampaignBlocked(ctx, account, camp.BlockedMarks)
 	}
+	// 已走到领取阶段但没有任何成功/已领/同人拦截、只有错误：上游明确拒绝，
+	// 作为任务失败上报，不得回旧接口再领一次（qoder2api-hub 958f14f）。
+	if len(camp.Errors) > 0 && len(camp.Claimed) == 0 && len(camp.Already) == 0 && len(camp.Blocked) == 0 {
+		return "", fmt.Errorf("%w: %s", errQoderCampaignClaimRefused, camp.Message)
+	}
 	note := camp.Message
 	if camp.Earned == 0 && camp.NextAvailableNote != "" {
 		note += "；下次可领 " + camp.NextAvailableNote // Python 前端契约：没到账才渲染下次窗口
+	}
+	if len(camp.Errors) > 0 {
+		// 部分成功时仍要披露被拒的活动，避免只报「领取成功」掩盖失败项。
+		note += "；部分活动未领取：" + strings.Join(camp.Errors, "; ")
 	}
 	return note, nil
 }

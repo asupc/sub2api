@@ -1111,6 +1111,10 @@ var campaignFailureCN = map[string]string{
 // ClaimCampaign 领取单个活动奖励（POST …/campaigns/{id}/claim，官方幂等语义：
 // 已领取返回 CLAIMED+replayed；同机器身份下其他账号已领返回 BLOCKED+
 // SAME_PERSON_ALREADY_CLAIMED，服务端按"人"去重）。
+//
+// 上游拒绝语义必须原样保留（qoder2api-hub 958f14f / issue #167）：只有明确
+// ALREADY_CLAIMED/REPLAYED 才算幂等成功；裸 409 或未知业务码不能被猜成「今日已
+// 领取」，已知失败码（风控/活动未开始等）返回带码的结果，由上层归入错误。
 func (c *Client) ClaimCampaign(ctx context.Context, creds Credentials, campaignID string) (*CampaignClaimResult, error) {
 	cfg := realmConfigForCredentials(creds)
 	var r struct {
@@ -1128,16 +1132,27 @@ func (c *Client) ClaimCampaign(ctx context.Context, creds Credentials, campaignI
 		[]byte("{}"), creds.DesktopHeaders(), &r)
 	if err != nil {
 		if se, ok := err.(*StatusError); ok {
-			code := ""
+			// 上游在 HTTP 错误体里也带 failureCode/errorCode：把业务语义取出来，
+			// 不要仅凭 409 状态码判定「已领取」（409 也可能是别的冲突）。
 			var eb struct {
-				ErrorCode string `json:"errorCode"`
+				FailureCode string `json:"failureCode"`
+				ErrorCode   string `json:"errorCode"`
 			}
 			_ = json.Unmarshal([]byte(se.Body), &eb)
-			code = eb.ErrorCode
-			upper := strings.ToUpper(code)
-			if se.Code == 409 || upper == "ALREADY_CLAIMED" || upper == "REPLAYED" {
+			code := strings.ToUpper(strings.TrimSpace(eb.FailureCode))
+			if code == "" {
+				code = strings.ToUpper(strings.TrimSpace(eb.ErrorCode))
+			}
+			switch code {
+			case "ALREADY_CLAIMED", "REPLAYED":
 				return &CampaignClaimResult{OK: true, Status: "CLAIMED", Replayed: true,
 					Message: "今日已领取（上游幂等确认）"}, nil
+			case "SAME_PERSON_ALREADY_CLAIMED":
+				return &CampaignClaimResult{Blocked: true, Status: "BLOCKED", FailureCode: code,
+					Message: "同人已领取（同一设备/身份下其他账号本轮已领，服务端按人去重）"}, nil
+			}
+			if msg, known := campaignFailureCN[code]; known {
+				return &CampaignClaimResult{FailureCode: code, Message: msg}, nil
 			}
 			return nil, err
 		}
@@ -1154,12 +1169,22 @@ func (c *Client) ClaimCampaign(ctx context.Context, creds Credentials, campaignI
 			amount = b.Amount
 		}
 	}
-	if failure == "SAME_PERSON_ALREADY_CLAIMED" || status == "BLOCKED" {
-		if failure == "" {
-			failure = "BLOCKED"
+	if failure == "SAME_PERSON_ALREADY_CLAIMED" {
+		// 只按业务码认定同人去重；裸 status=BLOCKED 不足以说明原因，归未确认。
+		if status == "" {
+			status = "BLOCKED"
 		}
 		return &CampaignClaimResult{Blocked: true, Status: status, FailureCode: failure,
 			Amount: amount, Message: "同人已领取（同一设备/身份下其他账号本轮已领，服务端按人去重）"}, nil
+	}
+	code := strings.TrimSpace(r.RedemptionCode)
+	// 已知失败码优先于 success=false：保留上游给出的具体原因（风控/未开始等）。
+	if msg, ok := campaignFailureCN[failure]; ok {
+		if status == "" {
+			status = "NOT_ELIGIBLE"
+		}
+		return &CampaignClaimResult{Status: status, FailureCode: failure,
+			RedemptionCode: code, Message: msg}, nil
 	}
 	if status == "" && r.Success != nil && !*r.Success {
 		msg := r.Error
@@ -1168,16 +1193,9 @@ func (c *Client) ClaimCampaign(ctx context.Context, creds Credentials, campaignI
 		}
 		return nil, fmt.Errorf("qoder: campaign claim failed: %s", clip(msg, 160))
 	}
-	code := strings.TrimSpace(r.RedemptionCode)
-	if msg, ok := campaignFailureCN[failure]; ok {
-		if status == "" {
-			status = "NOT_ELIGIBLE"
-		}
-		return &CampaignClaimResult{Status: status, FailureCode: failure,
-			RedemptionCode: code, Message: msg}, nil
-	}
+	successOK := r.Success == nil || *r.Success
 	res := &CampaignClaimResult{
-		OK:             status == "CLAIMED" || status == "GRANTED" || status == "SUCCESS",
+		OK:             failure == "" && successOK && (status == "CLAIMED" || status == "GRANTED" || status == "SUCCESS"),
 		Status:         status,
 		Replayed:       r.Replayed,
 		FailureCode:    failure,
@@ -1232,8 +1250,9 @@ type CampaignCodeGrant struct {
 
 // CampaignCheckinOutcome 活动平台签到编排结果。
 type CampaignCheckinOutcome struct {
-	// OK 列表查询成功且无未归类错误（对齐 Python ok: not errors）；
-	// false 时 service 侧走旧 sash Checkin 兜底。
+	// OK 列表查询成功且无未归类错误（对齐 Python ok: not errors）。
+	// 注意：只有 Error（列表查询失败）才触发旧 sash Checkin 兜底；
+	// OK=false 的领取阶段拒绝由 service 作为任务失败上报，不能回退重复领取。
 	OK bool `json:"ok"`
 	// Available 本区域存在活动平台（列表 404/405/410 → false）。
 	Available bool `json:"available"`
@@ -1376,7 +1395,9 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 			continue
 		}
 		if status != "CLAIMABLE" {
-			// 不可领取但并非"与我们无关"：名额发完/成就未完成如实报出。
+			// 不可领取但并非"与我们无关"：名额发完/成就未完成如实报出，
+			// 其它已知失败原因（风控/活动未开始等）归错误而不是伪装成「新人任务」
+			//（qoder2api-hub 958f14f / issue #167）。
 			// （Go 的 AchievementCompleted 无法区分缺失与 false，只取
 			// unavailable_reason 主判定路径，漏分的条目与 Python 一样不领取。）
 			switch reason {
@@ -1386,6 +1407,10 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 			case "ACHIEVEMENT_NOT_COMPLETED":
 				out.Locked = append(out.Locked, label)
 				hasLocked = true
+			default:
+				if msg, known := campaignFailureCN[reason]; known {
+					out.Errors = append(out.Errors, fmt.Sprintf("%s: %s（%s）", label, msg, reason))
+				}
 			}
 			continue
 		}
@@ -1404,13 +1429,27 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 			out.BlockedMarks[cid] = time.Now().Add(6 * time.Hour).Unix()
 			out.Blocked = append(out.Blocked, label)
 		} else if res.FailureCode != "" {
-			// 已知失败码按"待重试/被锁"分类，不算失败。
-			if res.FailureCode == "REDEMPTION_CODE_OUT_OF_STOCK" {
+			// 只有「名额发完 / 成就未完成」是待重试或被锁；其它已知失败码
+			//（风控、活动未开始等）是上游明确拒绝，归错误并带上原因。
+			switch res.FailureCode {
+			case "REDEMPTION_CODE_OUT_OF_STOCK":
 				out.Pending = append(out.Pending, label)
 				hasPending = true
-			} else {
+			case "ACHIEVEMENT_NOT_COMPLETED":
 				out.Locked = append(out.Locked, label)
 				hasLocked = true
+			default:
+				detail := campaignFailureCN[res.FailureCode]
+				if detail == "" {
+					detail = res.Message
+				}
+				if detail == "" {
+					detail = "上游未确认领取"
+				}
+				if campaignFailureCN[res.FailureCode] != "" {
+					detail += "（" + res.FailureCode + "）"
+				}
+				out.Errors = append(out.Errors, fmt.Sprintf("%s: %s", label, detail))
 			}
 		} else if res.Replayed {
 			out.Already = append(out.Already, label)
@@ -1422,9 +1461,9 @@ func (c *Client) CampaignCheckin(ctx context.Context, in CampaignCheckinInput) (
 			// 不冒领（对齐 Python else → errors）。
 			msg := res.Status
 			if msg == "" {
-				msg = "unknown"
+				msg = "?"
 			}
-			out.Errors = append(out.Errors, fmt.Sprintf("%s: status=%s", cid, msg))
+			out.Errors = append(out.Errors, fmt.Sprintf("%s: 上游未确认领取（status=%s）", label, msg))
 		} else {
 			earned := res.Amount
 			if earned <= 0 {
@@ -1464,12 +1503,14 @@ func campaignCheckinMessage(out *CampaignCheckinOutcome) string {
 		return "同人已领取：同一设备/身份下的其他账号本轮已领过（服务端按人去重）"
 	case len(out.Already) > 0:
 		return "今日活动奖励已领取（" + strings.Join(out.Already, "、") + "）"
+	case len(out.Errors) > 0:
+		// 上游拒绝优先于「名额发完/待完成任务」这类附注：拒绝原因不能被伪装成
+		// 正常等待状态（qoder2api-hub 958f14f）。
+		return "活动领取未成功：" + clip(strings.Join(out.Errors, "; "), 200)
 	case len(out.Pending) > 0:
 		return "名额已发完，次日 10:00 后可再领：" + strings.Join(out.Pending, "、")
 	case len(out.Locked) > 0:
 		return "需先在官方桌面端完成新人任务后可领：" + strings.Join(out.Locked, "、")
-	case len(out.Errors) > 0:
-		return "活动领取失败：" + clip(strings.Join(out.Errors, "; "), 200)
 	default:
 		return "当前账号暂无可领取的官方活动"
 	}

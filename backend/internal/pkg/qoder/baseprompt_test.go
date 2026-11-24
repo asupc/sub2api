@@ -3,10 +3,10 @@
 package qoder
 
 import (
-	"time"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 func mustSession(t *testing.T) *CosySession {
@@ -401,6 +401,47 @@ func TestBuildAgentChatBodyNoSystemKeepsTemplate(t *testing.T) {
 	}
 }
 
+func TestBuildAgentChatBodyOmitDefaultSystemPrompt(t *testing.T) {
+	t.Setenv("QD_OMIT_DEFAULT_SYSTEM_PROMPT", "1")
+	sess := mustSession(t)
+	req := map[string]any{
+		"model":    "auto",
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	encoded, err := BuildAgentChatBody(req, sess, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := decodeBody(t, encoded)
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("template system must be omitted, messages=%+v", msgs)
+	}
+	if first, _ := msgs[0].(map[string]any); first["role"] != "user" {
+		t.Fatalf("first message: %+v", msgs[0])
+	}
+
+	// 客户端显式 system 优先，开关不影响。
+	req2 := map[string]any{
+		"model": "auto",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "client system"},
+			map[string]any{"role": "user", "content": "hi"},
+		},
+	}
+	encoded2, err := BuildAgentChatBody(req2, sess, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs2, _ := decodeBody(t, encoded2)["messages"].([]any)
+	if len(msgs2) != 2 {
+		t.Fatalf("client system must be kept, messages=%+v", msgs2)
+	}
+	if first, _ := msgs2[0].(map[string]any); first["role"] != "system" || first["content"] != "client system" {
+		t.Fatalf("client system: %+v", first)
+	}
+}
+
 func TestBuildAgentChatBodyImagesAndVisionParts(t *testing.T) {
 	sess := mustSession(t)
 	req := map[string]any{
@@ -741,7 +782,6 @@ func TestCleanupOrphanToolHistory(t *testing.T) {
 	}
 }
 
-
 // issue #101：出站 parameters.max_tokens 的钳制（超限压上限、0/负值压 1、缺省不注入）。
 func TestBuildAgentChatBodyMaxTokensClamp(t *testing.T) {
 	resetMaxOutLimits(t)
@@ -804,8 +844,8 @@ func TestBuildAgentChatBodyMaxTokensClamp(t *testing.T) {
 
 	// max_completion_tokens 经 firstNonZeroInt 折叠后走同一路径。
 	req5 := map[string]any{
-		"model":                "qwen3.8-max",
-		"messages":             []any{map[string]any{"role": "user", "content": "hi"}},
+		"model":                 "qwen3.8-max",
+		"messages":              []any{map[string]any{"role": "user", "content": "hi"}},
 		"max_completion_tokens": float64(200000),
 	}
 	body5 := decodeBody(t, mustBuild(t, req5, sess, "cn"))
