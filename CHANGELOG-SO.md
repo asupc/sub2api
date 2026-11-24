@@ -509,3 +509,31 @@
   - 前端：本机无 pnpm，改用 `node_modules/.bin/{vue-tsc,vitest,vite}` 等价执行——`vue-tsc --noEmit` 通过；`vitest run` 298 文件 / 2409 用例全部通过；i18n 完整性检查通过；`vite build` 通过，产物写入 `backend/internal/web/dist/`。
   - 版本号一致性：`describe 328db26f` → `v0.2.24`；`backend/cmd/server/VERSION`=0.2.24；`backend/scripts/resolve-version.sh` 输出 0.2.24；`UPSTREAM-BASE`=`328db26f450edbdf9f8d4344a3ea903ac6396842`。
 - **合并影响**：支付链路与 en 语言包零变更（`git status` 复核）；模型广场前端维持裁剪；`wire_gen.go` 的手工接线（三平台 provider）保留，仅按上游新增 `serviceUserPlatformQuotaRepository` 参数。高冲突面（`openai_gateway_*`、`gemini_messages_compat_service.go`、`antigravity_quota_fetcher.go`、`gateway_usage_billing.go`）已按上述语义合入，下轮同步需沿用。
+
+### 平台移植源同步：workbuddy 语音/回放与企业额度 + qoder 签到拒绝语义（2026-11-23）
+
+- **区间与规模**：workbuddy2api-panel `08cb9351 → d221c721`（14 提交；PORTER-BASE 基准仍为 `a19c78f`，含 11-20 已评估批次）；qoder2api-hub `25d05944 → 285d98be`（5 提交；基准仍为 `f0b41e4`）；trae-workbuddy-switch `ebcaead1 → ae9d92f3`（15 提交）。三仓库均 `pull --ff-only` 成功、工作区干净。
+- **WorkBuddy 已移植**：
+  - **11102/14401 归请求级（`d629a8c`）**：`pkg/workbuddy/errors.go` 的模型级判定新增 `route config not found`（14401，图像模型同族答复），与 11102 同归「非 11158」分支——服务层已有的 11102 不换号处置覆盖 14401，不再落通用 `KindClient` 白轮全池。`ModelBlockReasonFor` 对 14401 复用 `"11102"` reason。
+  - **TTS 截断检测（`d5ce7de`/`c405254`，issue #277）**：`pkg/workbuddy/speech.go` 以 `speech.audio.done` 作为唯一完整标记；读到 EOF 或 `[DONE]` 仍未见 done、但已产出 PCM 时返回 `KindServer` 错误，交给语音服务换号重试，不再把中间层切断的半段音频当 200 成功。
+  - **ASR response_format 与体积钳制（`d5ce7de`/`026f9c0`）**：`handler/gateway_workbuddy_speech.go` 支持 `response_format=json/text`（text 回 `text/plain`，srt/vtt/verbose_json 明确 400）；整包上限改为 3MB+64KiB（文件本身仍 3MB，避免恰好 3MB 的音频被 multipart 边界挤成超限），`MaxBytesError` 回 413，解析后 `MultipartForm.RemoveAll()` 清理临时文件。
+  - **Responses 回放合并与 reasoning（`9ad206b`/PR #281）**：`pkg/apicompat/chatcompletions_responses_bridge.go` 的 `appendAssistantToolCall` 在合并同轮 assistant 文字与工具调用时**追加**第二段 reasoning（相同内容去重）；新增 `mergeAssistant` 轮次边界状态，`phase=final_answer` 与 compaction/未知条目之后的 function_call 不再并进上一轮 assistant。并行调用的第二条不再重复追加同一段思考。
+  - **企业额度口径（trae 仓 `70bf9de`/`7e277b7`，改 WorkBuddy 模块）**：`pkg/workbuddy/billing.go` 企业端点响应缺 `credit`/`used_num` 时返回错误（余额未知），不再按 0 已用伪报满额；企业额度请求删除 `X-Enterprise-Id`/`X-Tenant-Id`，租户归属由服务端按 Bearer 推导。
+- **Qoder 已移植**：
+  - **签到/活动领取拒绝语义（`958f14f`/issue #167）**：`pkg/qoder/accounts.go` 的 `ClaimCampaign` 不再把任意 409 当「已领取」——仅错误体明确 `ALREADY_CLAIMED`/`REPLAYED` 才幂等成功；`SAME_PERSON_ALREADY_CLAIMED` 归同人拦截；其它已知失败码（风控/活动未开始等）返回带码结果。成功路径只在无 failureCode、`success != false` 且状态为 CLAIMED/GRANTED/SUCCESS 时 OK；裸 `status=BLOCKED` 归「上游未确认领取」。不可领取原因中除名额发完/成就未完成外，已知失败码归错误而不是「新人任务」；消息优先展示错误（「活动领取未成功」）。
+  - **运营兜底隔离**：`service/qoder_ops_service.go` 仅在活动列表查询失败（`camp.Error`）时回落旧 sash Checkin；领取阶段被拒且无任何成功/已领/同人拦截时返回 `errQoderCampaignClaimRefused` 作为任务失败，不再回旧接口重复领取；部分成功时 note 追加未领取项。
+  - **可选省略默认 system prompt（`f57c56e`/`1a9ae79` 的网关等价物）**：`pkg/qoder/baseprompt.go` 新增 `QD_OMIT_DEFAULT_SYSTEM_PROMPT=1/true`：客户端未提供 system 时省略模板自带 Qoder 提示词；客户端显式 system 始终优先。默认关闭，行为不变。
+- **三平台通用**：
+  - **raw CC 上游流 idle 超时（trae 仓 `ab1ded7` 的 `stream_with_idle_timeout` 语义）**：新增 `service/cc_upstream_idle.go`，在 `sendCCUpstreamRequest` 返回前包装 `resp.Body`——按相邻字节块计 idle，超时关闭上游 body 并返回 `errCCUpstreamStreamIdle`。workbuddy CN 默认 60s（与 panel 同口径；`WB_STREAM_IDLE_TIMEOUT_SECS` 对两区域可覆盖，0 关闭），workbuddy global 与 qoder/trae 沿用 `gateway.stream_data_interval_timeout`（未配置时关闭）。此前 raw CC 读循环只有 scanner，无读超时。
+- **评估未移植（原因，勿重复评估）**：
+  - workbuddy `d221c72` 同域重名优惠模型把 promo 标签并进 name：本侧 `/v1/models` 只回 id/object/created/owned_by，不暴露 display name 与 promo 字段，无重名歧义来源。
+  - workbuddy `24e59f8`/`4221f2b`/`c27d731`/`e2d0eb6`（视频/MCP generate_video）：媒体系列 2026-11-04 用户裁定跳过。
+  - workbuddy `be99749` 跨账号缓存探针、`c84b6f2` 测试夹具时间、README 更新：诊断/测试/文档。
+  - qoder `1a9ae79` 面板 settings.json 写入保护、`285d98b` 发版、`431c3f0` 合并提交：本侧无该面板。
+  - trae `ab1ded7` 其余桌面端项（本地快照凭据同步、会话切换复核、逐时统计、进程探测、api_guard 通配域）、`fb2eebf`/`13ae2ee`/`ae9d92f`/`3411f52`/`0e23f87`/`5f0448d`/`f187f4f`/`a0e6390`/`7b7b363` 发版/CI/桌面 UI：桌面端专属。
+  - trae `5d41e02` 企业/教育版额度读取：本侧 `billing.go` 已有企业端点（本次只补 `70bf9de`/`7e277b7` 两处修正）。trae `3762249` Qoder 业务按会话聚合：本侧 `conversation_identity.go` + `baseprompt.go` 已有稳定 business.id/begin_at/name（#128）。
+  - 上次（11-20）记录的 workbuddy 救援/续写体系、qoder Responses 托管工具/外部检索后端仍按原口径暂不实现，不重复评估。
+- **改动文件**：`pkg/workbuddy/{errors,speech,billing}.go`；`pkg/qoder/{accounts,baseprompt}.go`；`pkg/apicompat/chatcompletions_responses_bridge.go`；`handler/gateway_workbuddy_speech.go`；`service/{openai_gateway_cc_pipeline,qoder_ops_service}.go` + 新增 `cc_upstream_idle.go`。测试：新增 `workbuddy/speech_test.go`、`qoder/campaign_denial_test.go`、`apicompat/chatcompletions_responses_bridge_turn_merge_test.go`、`service/cc_upstream_idle_test.go`、`handler/gateway_workbuddy_speech_test.go`；更新 `workbuddy/{errors,billing}_test.go`、`qoder/{baseprompt,accounts}_test.go`。
+- **验证**：`go build ./...`、`go vet ./...`、`gofmt` 通过；定向 unit（workbuddy/qoder/apicompat/service/handler 的新增与受影响用例）全绿。全量 `go test -tags=unit ./...` 与 HEAD 基线对比：失败集合保持 CLAUDE.md 记录的 11 项（10 项 + `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort`），无新增回归；qoder 包的存量 `TestRecoverTruncatedEchoSwallowed` panic 会中止该包后续用例，新增用例已用 `-run` 单独验证通过。本机无 pnpm；本轮未改前端。
+- **合并影响**：`pkg/apicompat/chatcompletions_responses_bridge.go` 与 `service/openai_gateway_cc_pipeline.go` 属上游同步共面文件（后续上游同步需保留：同轮合并/reasoning 追加、`mergeAssistant` 边界、idle body 包装）；其余为纯二开文件。**不触碰 `UPSTREAM-BASE` / `VERSION`**。
+- **PORTER-BASE**：trae → `ae9d92f3`（本轮建议项均有结论）；workbuddy 保持 `a19c78f`、qoder 保持 `f0b41e4`——11-20 记录的两个大项（workbuddy 救援/续写体系、qoder Responses 托管工具）仍属「以后再说」，按基准规则不推进。
