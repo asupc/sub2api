@@ -416,6 +416,11 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 	// replaying the turn's reasoning on B's message satisfies the contract. Only
 	// a user-side item ends the turn and clears it.
 	var lastTurnReasoning string
+	// mergeAssistant 表示列表末尾的 assistant 消息能否吸收紧随其后的工具调用。
+	// 同一轮的「先说话再调用」必须合并成一条 assistant（拆成两条会让 Kimi 类模型
+	// 在进度句后直接停下）；final_answer、compaction、user/tool 等边界必须断开，
+	// 否则会把下一轮调用错并进上一轮（workbuddy2api-panel 9ad206b / PR #281）。
+	mergeAssistant := false
 	mediaByCallID := make(toolOutputMediaByCallID)
 	invalidFunctionCallIDs := make(map[string]struct{})
 	invalidEmptyFunctionCallOutputs := 0
@@ -426,10 +431,20 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 		}
 		return lastTurnReasoning
 	}
+	// reasoningForToolCall 合并进已有 assistant 时只追加本段新思考；只有新建
+	// assistant 消息时才回落到本轮思考（DeepSeek 链式调用需要）。否则并行调用
+	// 的第二条会把已合并的同一段思考再追加一遍。
+	reasoningForToolCall := func() string {
+		if mergeAssistant {
+			return pendingReasoning
+		}
+		return reasoningForAssistant()
+	}
 
 	for _, raw := range rawItems {
 		raw = bytesTrimSpace(raw)
 		if len(raw) == 0 || string(raw) == "null" {
+			mergeAssistant = false
 			continue
 		}
 
@@ -441,6 +456,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 				messages = append(messages, ChatMessage{Role: "user", Content: content})
 				pendingReasoning = ""
 				lastTurnReasoning = ""
+				mergeAssistant = false
 				continue
 			}
 			return nil, nil, fmt.Errorf("parse responses input item: %w", err)
@@ -485,6 +501,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 					invalidEmptyFunctionCallOutputs++
 				}
 				pendingReasoning = ""
+				mergeAssistant = false
 				continue
 			}
 			name := rawString(item["name"])
@@ -501,8 +518,9 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 					Arguments: arguments,
 				},
 			}
-			messages = appendAssistantToolCall(messages, toolCall, reasoningForAssistant())
+			messages = appendAssistantToolCall(messages, toolCall, reasoningForToolCall(), mergeAssistant)
 			pendingReasoning = ""
+			mergeAssistant = true
 			continue
 		case "tool_search_call":
 			// tool_search 调用的 arguments 是 JSON 对象（如 {"query": ...}），
@@ -522,8 +540,9 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 					Arguments: arguments,
 				},
 			}
-			messages = appendAssistantToolCall(messages, toolCall, reasoningForAssistant())
+			messages = appendAssistantToolCall(messages, toolCall, reasoningForToolCall(), mergeAssistant)
 			pendingReasoning = ""
+			mergeAssistant = true
 			continue
 		case "custom_tool_call":
 			// custom/freeform 工具的历史调用：input 自由文本包进降级 function 工具
@@ -538,8 +557,9 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 					Arguments: string(arguments),
 				},
 			}
-			messages = appendAssistantToolCall(messages, toolCall, reasoningForAssistant())
+			messages = appendAssistantToolCall(messages, toolCall, reasoningForToolCall(), mergeAssistant)
 			pendingReasoning = ""
+			mergeAssistant = true
 			continue
 		case "function_call_output", "custom_tool_call_output", "tool_search_output":
 			outputRaw := bytesTrimSpace(item["output"])
@@ -552,10 +572,12 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			if callID == "" && invalidEmptyFunctionCallOutputs > 0 {
 				invalidEmptyFunctionCallOutputs--
 				pendingReasoning = ""
+				mergeAssistant = false
 				continue
 			}
 			if _, skipped := invalidFunctionCallIDs[callID]; skipped {
 				pendingReasoning = ""
+				mergeAssistant = false
 				continue
 			}
 			delete(mediaByCallID, callID)
@@ -579,6 +601,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 				Content:    content,
 			})
 			pendingReasoning = ""
+			mergeAssistant = false
 			continue
 		case "agent_message":
 			// Codex multi_agent_v2 用 agent_message 在父线程与子智能体之间传递任务和回复：
@@ -586,6 +609,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			// （自定义 provider 下为明文）。chat 上游没有对应条目，按原顺序拼成一条 user 消息，
 			// 否则子智能体收不到任务却仍返回 200。
 			text := AgentMessageText(item["content"])
+			mergeAssistant = false
 			if text == "" {
 				pendingReasoning = ""
 				continue
@@ -600,6 +624,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			messages = append(messages, ChatMessage{Role: "user", Content: content})
 			pendingReasoning = ""
 			lastTurnReasoning = ""
+			mergeAssistant = false
 			continue
 		case "input_image":
 			content, err := chatContentFromSingleResponsesPart(itemType, item)
@@ -609,6 +634,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			messages = append(messages, ChatMessage{Role: "user", Content: content})
 			pendingReasoning = ""
 			lastTurnReasoning = ""
+			mergeAssistant = false
 			continue
 		}
 
@@ -620,6 +646,9 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 		// ("insufficient tool messages following tool_calls message"). Skip them.
 		if itemType != "" && itemType != "message" {
 			pendingReasoning = ""
+			// 未知条目（含 compaction）是轮次边界：其后的 tool call 不得并进
+			// 此前的 assistant 文字（panel 9ad206b 的跨轮保护）。
+			mergeAssistant = false
 			continue
 		}
 
@@ -638,15 +667,21 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 		// reasoning-only / plain-text assistant turn to be passed back on its
 		// assistant message; dropping it yields 400 "The `reasoning_content` in
 		// the thinking mode must be passed back to the API" on the next turn.
-		// A following function_call in the same turn still receives it because
-		// appendAssistantToolCall merges into this message and only fills
-		// ReasoningContent when it is still empty.
+		// A following function_call in the same turn still receives the reasoning
+		// item that sits between the text and the call: appendAssistantToolCall
+		// merges into this message and appends any new reasoning segment.
 		if role == "assistant" {
 			msg.ReasoningContent = reasoningForAssistant()
 			pendingReasoning = ""
+			// 同一轮「先说一句再调用」合并成一条 assistant；final_answer 是明确
+			// 收尾，其后的 tool call 属于下一轮，不能并进来（panel 9ad206b）。
+			phase := strings.ToLower(strings.TrimSpace(rawString(item["phase"])))
+			mergeAssistant = phase != "final_answer" &&
+				strings.TrimSpace(chatMessageContentText(chatContent)) != ""
 		} else {
 			pendingReasoning = ""
 			lastTurnReasoning = ""
+			mergeAssistant = false
 		}
 		messages = append(messages, msg)
 	}
@@ -818,13 +853,18 @@ func toolOutputImagePart(imageURL string) ChatContentPart {
 // appendAssistantToolCall merges a tool call into the chat message list.
 // Parallel tool calls arrive as consecutive *_call items and must share one
 // assistant message; the matching tool replies then follow it. Merge into the
-// immediately preceding assistant message.
-func appendAssistantToolCall(messages []ChatMessage, toolCall ChatToolCall, pendingReasoning string) []ChatMessage {
-	if n := len(messages); n > 0 && messages[n-1].Role == "assistant" {
-		messages[n-1].ToolCalls = append(messages[n-1].ToolCalls, toolCall)
-		if messages[n-1].ReasoningContent == "" {
-			messages[n-1].ReasoningContent = pendingReasoning
-		}
+// immediately preceding assistant message when allowMerge permits it (same turn,
+// not after a final_answer / compaction boundary).
+//
+// A same-turn assistant text message may already carry reasoning from an earlier
+// reasoning item; the reasoning item that precedes the tool call is appended
+// (deduplicated) instead of being dropped, otherwise multi-turn histories lose
+// the second half of the thinking trace (workbuddy2api-panel 9ad206b).
+func appendAssistantToolCall(messages []ChatMessage, toolCall ChatToolCall, pendingReasoning string, allowMerge bool) []ChatMessage {
+	if allowMerge && len(messages) > 0 && messages[len(messages)-1].Role == "assistant" {
+		last := &messages[len(messages)-1]
+		last.ToolCalls = append(last.ToolCalls, toolCall)
+		last.ReasoningContent = appendVisibleReasoning(last.ReasoningContent, pendingReasoning)
 		return messages
 	}
 	return append(messages, ChatMessage{
@@ -832,6 +872,21 @@ func appendAssistantToolCall(messages []ChatMessage, toolCall ChatToolCall, pend
 		ToolCalls:        []ChatToolCall{toolCall},
 		ReasoningContent: pendingReasoning,
 	})
+}
+
+// appendVisibleReasoning 把一段新思考接到已有 reasoning_content 后面；相同内容
+// 不重复追加（tool call 前的兜底 reasoning 可能与消息上已有的同源）。
+func appendVisibleReasoning(current, addition string) string {
+	if addition == "" {
+		return current
+	}
+	if current == "" {
+		return addition
+	}
+	if current == addition {
+		return current
+	}
+	return current + "\n" + addition
 }
 
 // normalizeChatMessages is the single place that enforces the tool-call
