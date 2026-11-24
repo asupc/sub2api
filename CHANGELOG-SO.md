@@ -537,3 +537,26 @@
 - **验证**：`go build ./...`、`go vet ./...`、`gofmt` 通过；定向 unit（workbuddy/qoder/apicompat/service/handler 的新增与受影响用例）全绿。全量 `go test -tags=unit ./...` 与 HEAD 基线对比：失败集合保持 CLAUDE.md 记录的 11 项（10 项 + `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort`），无新增回归；qoder 包的存量 `TestRecoverTruncatedEchoSwallowed` panic 会中止该包后续用例，新增用例已用 `-run` 单独验证通过。本机无 pnpm；本轮未改前端。
 - **合并影响**：`pkg/apicompat/chatcompletions_responses_bridge.go` 与 `service/openai_gateway_cc_pipeline.go` 属上游同步共面文件（后续上游同步需保留：同轮合并/reasoning 追加、`mergeAssistant` 边界、idle body 包装）；其余为纯二开文件。**不触碰 `UPSTREAM-BASE` / `VERSION`**。
 - **PORTER-BASE**：trae → `ae9d92f3`（本轮建议项均有结论）；workbuddy 保持 `a19c78f`、qoder 保持 `f0b41e4`——11-20 记录的两个大项（workbuddy 救援/续写体系、qoder Responses 托管工具）仍属「以后再说」，按基准规则不推进。
+
+### 同步 v0.2.25（2026-11-24）
+
+- **区间与规模**：`328db26f → 0f66714`（15 提交 / 91 文件，+3486/-319）。上游 `pull --ff-only` + `fetch --tags` 成功；`describe` → `v0.2.25`，与 `backend/cmd/server/VERSION`（0.2.25）一致。二开侧：56 文件直接覆盖、27 文件三路自动合并、1 文件冲突手工裁决、5 个上游新增文件并入、2 个 en 语言包文件跳过（`MISSING_IN_SO`）。
+- **同步功能（按主题）**：
+  - **请求头覆写身份上报变量（`0f1e3c1f6`+`c5147eab1`）**：新增 `service/account_header_override_vars.go`——覆写值支持 `{{user_id}}/{{api_key_id}}/{{group_id}}/{{request_id}}`，仅 api_key 账号解析，转发时替换为本次请求身份并记录实际上报头；OAuth 保存拒绝、无用户上下文时整条不发且删除同名客户端头；`X-Request-ID` 只保留字母数字与 `._-` 并限长；`server/middleware/api_key_auth{,_google}.go` 注入请求作用域；`admin_account.go` 保存路径校验变量使用；错误详情新增「身份上报请求头」区块（`OpsErrorDetailModal.vue` + `ops_upstream_context.go` 的 `ReportedHeaders`）；编辑器新增变量面板（`HeaderOverrideEditor.vue`、`credentialsBuilder.ts`）。
+  - **上游分组同步（`a95c9e263`/`03aa05fd9`/`38903b6d1`/`34423bf1e`）**：账号可从上游 `/v1/sub2api/billing` 同步分组名称/备注；新增 `UpstreamGroupSyncButton.vue` 与 `adminAPI.accounts.previewUpstreamGroup`；`api_key_service.go` 新增 `GetBillingGroupInfo` 与 `handler/gateway_key_billing.go` 的 `include=group`（`include` 支持逗号列表与重复参数）；入库前校验上游分组文字（非法 UTF-8 只丢字段、名称拒控制字符、备注仅留换行/制表符，写入前先修剪首尾空白）。
+  - **OpenAI 错误透传修复（`4339d5061`/`2b7437832`/`eabf37852`）**：`replaceCaseInsensitive` 改为在原始字节上大小写不敏感匹配（修复折叠后字节长度变化导致的 panic/脱敏越界）；`error.type/code/param` 只接受字符串或数字并限长；凭据/主机名脱敏覆盖规则命中路径；透传模式保留 `invalid_encrypted_content` 结构化 400；compact 心跳已提交时 `response.failed` 改写为可重试 `server_error`，空白 `code` 回退内嵌 JSON 提取。新增 `openai_passthrough_error_forwarding_test.go`。
+  - **依赖**：`gorilla/websocket` `v1.5.3 → v1.5.4-0.20240701034025-d67f41855da4`（GO-2026-6278，仅管理端 ops WebSocket 服务端升级）。
+- **冲突裁决**：
+  - `frontend/src/views/admin/ops/components/OpsErrorDetailModal.vue`：上游插入新的「身份上报请求头」区块，二开侧把卡片内边距系统性收紧为 `p-4`（`space-y-6→space-y-4` 等）。裁决：保留上游新区块，其外层卡片套用二开 `p-4` 约定，后续「诊断负载」卡片保留二开 `p-4`。
+- **二开适配（因本地裁剪导致的编译/契约差异）**：
+  - `service/api_key_service.go`：上游 `GetBillingGroupInfo` 使用 `group.I18n.Localize`，二开已永久裁剪分组多语言（`Group.I18n` / `group_i18n.go` 已删）。保留函数签名（调用方仍传 `Accept-Language`），忽略语言参数，直接返回 `group.Name/Description`。
+  - `server/routes/gateway_key_billing_test.go`：移除 `GroupI18n` 夹具字段；两处 `group_name` 断言由 `"Standard"` 改为 `"标准分组"`（`Accept-Language: en` 在二开不再生效）。
+  - `frontend/src/components/account/{Create,Edit}AccountModal.vue`：二开删除代理 UI 时连 `form.proxy_id` 一并移除，导致上游分组预览负载缺 `proxy_id`、编辑弹窗 `undefined === null` 判定失败。补回 `proxy_id: null as number | null`（不恢复代理 UI，仅对齐 API 契约）；编辑弹窗的 `upstreamGroupSource` 不再比较 `account.proxy_id`（`Account` 类型已无该字段）。
+  - `frontend/src/views/admin/__tests__/AccountsView.sparkShadow.spec.ts`：上游把名称单元格包进 flex 行并移除 `HelpTooltip` 的 `self-start`。SO 本地 spec 断言改为 `-ml-1`。
+- **跳过项**：`frontend/src/i18n/locales/en/admin/{accounts,ops}.ts`（en 语言包永久跳过）；对应 zh 文案随 `zh/admin/{accounts,ops}.ts` 并入。
+- **依赖/构建链**：`go.mod`/`go.sum` 同步后执行 `go mod tidy`（websocket 升级；顺带清理若干未被引用的历史条目）；`package.json`/`pnpm-lock.yaml` 零变更；无 ent schema、无迁移、无 Wire 变更。
+- **验证**：
+  - 后端：`go build ./...`、`go vet ./...` 通过。`go test -tags=unit ./...` 失败集合与基线完全一致（11 项：CLAUDE.md 记录的 10 项 + `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort` 时间敏感项），无新增回归。本次新增/适配用例定向通过：`TestApplyHeaderOverrides*`、`TestValidateHeaderOverrideVariableUsage`、`TestOpenAIGatewayService_APIKeyPassthrough_InvalidEncryptedContentPreservesStructured400`、`gateway_key_billing` 路由用例。
+  - 前端：i18n 完整性、`vue-tsc --noEmit`、`vite build` 通过（产物写入 `backend/internal/web/dist/`）；全量 `vitest run` 299 文件 / 2428 用例全部通过（修正 `AccountsView.sparkShadow` 断言后复跑）。
+  - 版本号一致性：`describe 0f66714` → `v0.2.25`；`backend/cmd/server/VERSION`=0.2.25；`backend/scripts/resolve-version.sh`=0.2.25。
+- **合并影响**：支付链路与 en 语言包零变更（`git status` 复核）；高冲突面（`openai_gateway_{cc_pipeline,forward,passthrough,grok}.go`、`upstream_models.go`、`api_key_service.go`、账号/计费/调度）已按上表合入——二开三平台（workbuddy/qoder/trae）与 OpenCode 回放等本地语义在干净合并中均保留；下轮同步沿用。
